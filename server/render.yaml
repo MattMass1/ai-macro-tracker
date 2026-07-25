@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: macro-tracker
+    runtime: python
+    plan: free
+    rootDir: server
+    buildCommand: pip install -r requirements.txt
+    startCommand: python src/server.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: NOTION_TOKEN
+        sync: false
+      - key: NUTRITION_DS_ID
+        value: a9165caa-f1ba-4a3d-9d9b-c850bd1b4c4c
+      - key: TARGETS_DS_ID
+        sync: false
+      - key: PRESETS_DS_ID
+        sync: false
+      - key: PARENT_PAGE_ID
+        value: 3415aac7-7d31-8176-8d64-eb008a13e919
+      - key: APP_SHARED_TOKEN
+        generateValue: true
+      - key: LOCAL_TZ
+        value: America/New_York
+      - key: DAY_ROLLOVER_HOUR
+        value: "4"
+      - key: ALLOWED_ORIGINS
+        sync: false

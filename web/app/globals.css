@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #07090c;
+  --surface: #12161d;
+  --surface-2: #1a2029;
+  --line: #232b36;
+  --text: #f4f7fb;
+  --muted: #8b95a7;
+
+  --calories: #f59e0b;
+  --protein: #34d399;
+  --carbs: #60a5fa;
+  --fat: #c084fc;
+  --over: #fb5b5b;
+
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-calories: var(--calories);
+  --color-protein: var(--protein);
+  --color-carbs: var(--carbs);
+  --color-fat: var(--fat);
+  --color-over: var(--over);
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  margin: 0;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto,
+    system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+/* Respect the notch and the home indicator. */
+.safe-top {
+  padding-top: max(1rem, env(safe-area-inset-top));
+}
+
+.safe-bottom {
+  padding-bottom: max(1.5rem, calc(env(safe-area-inset-bottom) + 1rem));
+}
+
+.safe-x {
+  padding-left: max(1rem, env(safe-area-inset-left));
+  padding-right: max(1rem, env(safe-area-inset-right));
+}
+
+/* Big figures read better with tabular, tightly tracked numerals. */
+.numeral {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  font-weight: 700;
+}
+
+/* The only motion in the app: rings filling. */
+.ring-arc {
+  transition: stroke-dashoffset 600ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ring-arc {
+    transition: none;
+  }
+}
+
+button {
+  touch-action: manipulation;
+}

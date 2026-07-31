@@ -43,6 +43,21 @@ P_EMOJI = "Emoji"
 P_SORT_ORDER = "Sort Order"
 P_ACTIVE = "Active"
 
+# `Fitness Tracker` workout log property names.
+P_EXERCISE_NAME = "Exercise Name"
+P_WORKOUT_TYPE = "Workout type"
+P_MUSCLE_GROUP = "Muscle Group"
+P_DATE_INPUT = "Date (user input)"
+P_WEIGHT_1 = "Weight 1"
+P_REPS_1 = "Reps 1"
+WEIGHT_AND_REPS = [(f"Weight {i}", f"Reps {i}") for i in range(1, 5)]
+
+# `Exercise Max Reps` (the PR log) property names.
+P_EXERCISE = "Exercise"
+P_MAX_WEIGHT = "Max weight"
+P_DATE_ACHIEVED = "Date achieved"
+P_SOURCE_ENTRY = "Source entry"
+
 
 class NotionError(RuntimeError):
     """A Notion API failure, carrying Notion's own `message` field."""
@@ -457,3 +472,62 @@ def date_range_filter(start: date, end: date) -> dict[str, Any]:
             {"property": P_DATE, "date": {"on_or_before": end.isoformat()}},
         ]
     }
+
+
+def read_multi_select(page: Mapping[str, Any], name: str) -> list[str]:
+    prop = (page.get("properties") or {}).get(name) or {}
+    return [
+        option.get("name")
+        for option in prop.get("multi_select", [])
+        if option.get("name")
+    ]
+
+
+def multi_select_prop(values: list[str]) -> dict[str, Any]:
+    return {"multi_select": [{"name": value} for value in values]}
+
+
+# --------------------------------------------------------------------------- #
+# Workout row mapping — Fitness Tracker pages in, plain dicts out
+# --------------------------------------------------------------------------- #
+
+
+def workout_from_page(page: Mapping[str, Any]) -> dict[str, Any]:
+    """One `Fitness Tracker` row as a flat dict with a `sets` list."""
+    sets: list[dict[str, float]] = []
+    for weight_name, reps_name in WEIGHT_AND_REPS:
+        weight = read_number(page, weight_name)
+        reps = read_number(page, reps_name)
+        if weight or reps:
+            sets.append({"weight": weight, "reps": reps})
+    return {
+        "id": page.get("id", ""),
+        "exercise": read_title(page, P_EXERCISE_NAME),
+        "workout_type": read_multi_select(page, P_WORKOUT_TYPE),
+        "muscle_group": read_multi_select(page, P_MUSCLE_GROUP),
+        "sets": sets,
+        "date": read_date(page, P_DATE_INPUT),
+        "created_time": page.get("created_time", ""),
+    }
+
+
+def workout_properties(
+    exercise: str,
+    workout_type: str,
+    muscle_group: list[str],
+    sets: list[dict[str, float]],
+    day: date,
+) -> dict[str, Any]:
+    """Properties for a `Fitness Tracker` row. The `Date` formula is never written."""
+    properties: dict[str, Any] = {
+        P_EXERCISE_NAME: title_prop(exercise),
+        P_WORKOUT_TYPE: multi_select_prop([workout_type]),
+        P_MUSCLE_GROUP: multi_select_prop(muscle_group),
+        P_DATE_INPUT: date_prop(day),
+    }
+    for index, (weight_name, reps_name) in enumerate(WEIGHT_AND_REPS):
+        if index < len(sets):
+            set_value = sets[index]
+            properties[weight_name] = number_prop(set_value["weight"])
+            properties[reps_name] = number_prop(set_value["reps"])
+    return properties

@@ -20,6 +20,25 @@ MEALS = ("Breakfast", "Lunch", "Dinner", "Snack")
 
 MACRO_KEYS = ("calories", "protein", "carbs", "fat")
 
+WORKOUT_TYPES = ("Push", "Pull", "Legs", "Abs", "Cardio", "Full Body")
+
+MUSCLE_GROUPS = ("Quads", "Hams", "Push", "Pull", "Abs")
+
+MAX_SETS = 4
+MAX_WORKOUT_WEIGHT = 2000.0
+MAX_REPS = 300
+
+#: Muscle Group written for each Workout type when the app logs a workout.
+#: Keeps the Fitness Tracker's two taxonomies consistent for the PR sweep.
+WORKOUT_TYPE_TO_MUSCLE = {
+    "Push": ["Push"],
+    "Pull": ["Pull"],
+    "Legs": ["Quads"],
+    "Abs": ["Abs"],
+    "Cardio": ["Cardio"],
+    "Full Body": ["Full Body"],
+}
+
 MAX_CALORIES = 10_000.0
 MAX_MACRO = 1_000.0
 
@@ -245,3 +264,70 @@ def average_totals(days: Iterable[Mapping[str, Any]]) -> dict[str, float]:
         return zero_totals()
     summed = sum_macros(days)
     return {key: round(value / len(days), 2) for key, value in summed.items()}
+
+
+# --------------------------------------------------------------------------- #
+# Workout validation
+# --------------------------------------------------------------------------- #
+
+
+def normalize_workout_type(value: str | None) -> str:
+    """Case-insensitively map a workout type onto the allowed taxonomy."""
+    if value is None or not str(value).strip():
+        raise MacroError(
+            f"workout_type is required — one of {', '.join(WORKOUT_TYPES)}"
+        )
+    candidate = str(value).strip().lower()
+    for allowed in WORKOUT_TYPES:
+        if allowed.lower() == candidate:
+            return allowed
+    raise MacroError(
+        f"workout_type must be one of {', '.join(WORKOUT_TYPES)} — got "
+        f"{str(value).strip()!r}"
+    )
+
+
+def normalize_muscle_group(value: str | list[str] | None) -> list[str]:
+    """Map a workout type onto its default Muscle Group tags."""
+    types = value if isinstance(value, list) else ([value] if value else [])
+    groups: list[str] = []
+    for entry in types:
+        if not str(entry).strip():
+            continue
+        candidate = str(entry).strip().lower()
+        for allowed in WORKOUT_TYPES:
+            if allowed.lower() == candidate and allowed in WORKOUT_TYPE_TO_MUSCLE:
+                for group in WORKOUT_TYPE_TO_MUSCLE[allowed]:
+                    if group not in groups:
+                        groups.append(group)
+    return groups
+
+
+def validate_sets(sets: Any) -> list[dict[str, float]]:
+    """Validate a list of up to MAX_SETS weight/reps pairs.
+
+    Each set is a dict with `weight` and `reps` numbers. Empty weight or reps
+    are allowed (bodyweight, burnout sets), but at least one populated set is
+    required and every value must be finite and within a sane range.
+    """
+    if not isinstance(sets, list) or not sets:
+        raise MacroError("sets must be a non-empty list of {weight, reps} objects")
+    if len(sets) > MAX_SETS:
+        raise MacroError(
+            f"sets must have at most {MAX_SETS} sets — got {len(sets)}. "
+            "Log a second exercise row for anything beyond that."
+        )
+
+    cleaned: list[dict[str, float]] = []
+    for index, item in enumerate(sets, start=1):
+        if not isinstance(item, dict):
+            raise MacroError(f"set {index} must be an object with weight and reps")
+        weight = item.get("weight")
+        reps = item.get("reps")
+        weight_f = _validate_number(weight, f"set {index} weight", MAX_WORKOUT_WEIGHT)
+        reps_f = _validate_number(reps, f"set {index} reps", MAX_REPS)
+        cleaned.append({"weight": weight_f, "reps": reps_f})
+
+    if all(s["weight"] == 0 and s["reps"] == 0 for s in cleaned):
+        raise MacroError("at least one set needs a weight or reps value")
+    return cleaned

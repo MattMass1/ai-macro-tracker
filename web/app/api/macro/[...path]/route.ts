@@ -11,13 +11,21 @@ import { NextResponse } from "next/server";
 import {
   ApiError,
   deleteMeal,
+  deleteWorkout,
   getDay,
+  getExercises,
   getPresets,
   getToday,
+  getWorkouts,
   logMeal,
   logPreset,
+  logWorkout,
 } from "@/lib/api";
-import type { LogMealBody, LogPresetBody } from "@/lib/types";
+import type {
+  LogMealBody,
+  LogPresetBody,
+  LogWorkoutBody,
+} from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,6 +55,12 @@ export async function GET(_request: Request, context: Context) {
     if (path.length === 1 && path[0] === "presets") {
       return NextResponse.json(await getPresets(), { headers: noStore });
     }
+    if (path.length === 1 && path[0] === "exercises") {
+      return NextResponse.json(await getExercises(), { headers: noStore });
+    }
+    if (path.length === 2 && path[0] === "workouts") {
+      return NextResponse.json(await getWorkouts(path[1]), { headers: noStore });
+    }
     return NextResponse.json({ error: "Unknown endpoint" }, { status: 404 });
   } catch (error) {
     return fail(error);
@@ -69,6 +83,9 @@ export async function POST(request: Request, context: Context) {
     if (path.length === 1 && path[0] === "log") {
       return NextResponse.json(await logMeal(body as LogMealBody));
     }
+    if (path.length === 1 && path[0] === "workout") {
+      return NextResponse.json(await logWorkout(body as LogWorkoutBody));
+    }
     return NextResponse.json({ error: "Unknown endpoint" }, { status: 404 });
   } catch (error) {
     return fail(error);
@@ -80,6 +97,9 @@ export async function DELETE(_request: Request, context: Context) {
   try {
     if (path.length === 2 && path[0] === "meal") {
       return NextResponse.json(await deleteMeal(path[1]));
+    }
+    if (path.length === 2 && path[0] === "workout") {
+      return NextResponse.json(await deleteWorkout(path[1]));
     }
     return NextResponse.json({ error: "Unknown endpoint" }, { status: 404 });
   } catch (error) {

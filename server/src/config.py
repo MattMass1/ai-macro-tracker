@@ -45,6 +45,8 @@ class ConfigError(RuntimeError):
 DEFAULT_PARENT_PAGE_ID = "3415aac7-7d31-8176-8d64-eb008a13e919"
 DEFAULT_NUTRITION_DS_ID = "a9165caa-f1ba-4a3d-9d9b-c850bd1b4c4c"
 DEFAULT_NUTRITION_DB_ID = "f450b636-8123-409f-b1e5-960251f377dd"
+DEFAULT_FITNESS_DS_ID = "7a35aac7-7d31-82cd-9f2f-072f91d9f61f"
+DEFAULT_MAXREPS_DS_ID = "52a10855-2304-4b71-ac09-ab39772268a4"
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,8 @@ class Config:
     nutrition_ds_id: str
     targets_ds_id: str
     presets_ds_id: str
+    fitness_ds_id: str
+    maxreps_ds_id: str
     parent_page_id: str
     app_shared_token: str
     local_tz: str
@@ -78,6 +82,8 @@ def load_config() -> Config:
         nutrition_ds_id=_require("NUTRITION_DS_ID", missing, DEFAULT_NUTRITION_DS_ID),
         targets_ds_id=_require("TARGETS_DS_ID", missing),
         presets_ds_id=_require("PRESETS_DS_ID", missing),
+        fitness_ds_id=_require("FITNESS_DS_ID", missing, DEFAULT_FITNESS_DS_ID),
+        maxreps_ds_id=_require("MAXREPS_DS_ID", missing, DEFAULT_MAXREPS_DS_ID),
         parent_page_id=os.environ.get("PARENT_PAGE_ID", DEFAULT_PARENT_PAGE_ID).strip(),
         app_shared_token=_require("APP_SHARED_TOKEN", missing),
         local_tz=os.environ.get("LOCAL_TZ", "America/New_York").strip(),

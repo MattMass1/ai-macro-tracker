@@ -8,9 +8,13 @@
 
 import type {
   DayPayload,
+  KnownExercise,
   LogMealBody,
   LogPresetBody,
+  LogWorkoutBody,
   Preset,
+  WorkoutEntry,
+  WorkoutsPayload,
 } from "./types";
 
 export class ApiError extends Error {
@@ -116,4 +120,29 @@ export function deleteMeal(pageId: string): Promise<DayPayload> {
   return call<DayPayload>(`/api/meal/${encodeURIComponent(pageId)}`, {
     method: "DELETE",
   });
+}
+
+/** GET /api/exercises — every known exercise with its workout type tag. */
+export function getExercises(): Promise<{ exercises: KnownExercise[] }> {
+  return call<{ exercises: KnownExercise[] }>("/api/exercises");
+}
+
+/** GET /api/workouts/{date} — workout entries for one YYYY-MM-DD. */
+export function getWorkouts(date: string): Promise<WorkoutsPayload> {
+  return call<WorkoutsPayload>(
+    `/api/workouts/${encodeURIComponent(date)}`,
+  );
+}
+
+/** POST /api/workout — log one exercise with its sets. */
+export function logWorkout(body: LogWorkoutBody): Promise<WorkoutEntry> {
+  return call<WorkoutEntry>("/api/workout", { method: "POST", body });
+}
+
+/** DELETE /api/workout/{page_id} — archive one workout entry. */
+export function deleteWorkout(pageId: string): Promise<{ deleted: string }> {
+  return call<{ deleted: string }>(
+    `/api/workout/${encodeURIComponent(pageId)}`,
+    { method: "DELETE" },
+  );
 }

@@ -16,6 +16,8 @@ from notion import (
     meal_properties,
     preset_from_page,
     target_from_page,
+    workout_from_page,
+    workout_properties,
 )
 
 SRC_DIR = Path(__file__).resolve().parent.parent / "src"
@@ -324,6 +326,57 @@ def test_date_range_filter_is_inclusive_of_both_ends():
             {"property": "Date", "date": {"on_or_before": "2026-07-07"}},
         ]
     }
+
+
+def test_workout_properties_builds_sets_and_tags():
+    props = workout_properties(
+        "Barbell Bench Press",
+        "Push",
+        ["Push"],
+        [{"weight": 225, "reps": 5}, {"weight": 185, "reps": 8}],
+        date(2026, 7, 31),
+    )
+    assert props["Exercise Name"] == {
+        "title": [{"type": "text", "text": {"content": "Barbell Bench Press"}}]
+    }
+    assert props["Workout type"] == {"multi_select": [{"name": "Push"}]}
+    assert props["Muscle Group"] == {"multi_select": [{"name": "Push"}]}
+    assert props["Date (user input)"] == {"date": {"start": "2026-07-31"}}
+    assert props["Weight 1"] == {"number": 225.0}
+    assert props["Reps 1"] == {"number": 5.0}
+    assert props["Weight 2"] == {"number": 185.0}
+    assert props["Reps 2"] == {"number": 8.0}
+    # Unused set slots are simply absent — never written as null.
+    assert "Weight 3" not in props and "Reps 4" not in props
+
+
+def test_workout_from_page_reads_sets_and_tags():
+    workout = workout_from_page(
+        {
+            "id": "w1",
+            "created_time": "2026-07-31T14:00:00.000Z",
+            "properties": {
+                "Exercise Name": {"title": [{"plain_text": "Hack Squats"}]},
+                "Workout type": {"multi_select": [{"name": "Legs"}]},
+                "Muscle Group": {"multi_select": [{"name": "Quads"}]},
+                "Weight 1": {"number": 90},
+                "Reps 1": {"number": 10},
+                "Weight 2": {"number": 140},
+                "Reps 2": {"number": 8},
+                "Weight 3": {"number": None},
+                "Reps 3": {"number": None},
+                "Date (user input)": {"date": {"start": "2026-07-31"}},
+            },
+        }
+    )
+    assert workout["exercise"] == "Hack Squats"
+    assert workout["workout_type"] == ["Legs"]
+    assert workout["muscle_group"] == ["Quads"]
+    assert workout["sets"] == [
+        {"weight": 90.0, "reps": 10.0},
+        {"weight": 140.0, "reps": 8.0},
+    ]
+    assert workout["date"] == "2026-07-31"
 
 
 # --------------------------------------------------------------------------- #

@@ -7,12 +7,23 @@ import DayHeader from "@/components/DayHeader";
 import MacroRings from "@/components/MacroRings";
 import MealList from "@/components/MealList";
 import PresetGrid from "@/components/PresetGrid";
-import type { DayPayload, Macros, Meal, Preset } from "@/lib/types";
+import WorkoutList from "@/components/WorkoutList";
+import WorkoutLogger from "@/components/WorkoutLogger";
+import type {
+  DayPayload,
+  KnownExercise,
+  Macros,
+  Meal,
+  Preset,
+  WorkoutEntry,
+  WorkoutSet,
+} from "@/lib/types";
 
 const TODAY_KEY = "/api/macro/today";
+const EXERCISES_KEY = "/api/macro/exercises";
 const POLL_MS = 15_000;
 
-async function fetcher(url: string): Promise<DayPayload> {
+async function fetcher<T>(url: string): Promise<T> {
   const response = await fetch(url, { cache: "no-store" });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
@@ -21,7 +32,7 @@ async function fetcher(url: string): Promise<DayPayload> {
         `Could not reach the macro service (${response.status})`,
     );
   }
-  return payload as DayPayload;
+  return payload as T;
 }
 
 const ZERO: Macros = { calories: 0, protein: 0, carbs: 0, fat: 0 };
@@ -68,8 +79,27 @@ export default function TodayPage() {
     },
   );
 
+  const { data: exercisesData } = useSWR<{ exercises: KnownExercise[] }>(
+    EXERCISES_KEY,
+    fetcher,
+    { revalidateOnFocus: false, dedupingInterval: 300_000 },
+  );
+  const exercises = exercisesData?.exercises ?? [];
+
+  const { data: workoutsData, mutate: mutateWorkouts } = useSWR<
+    { date: string; day_label: string; workouts: WorkoutEntry[] }
+  >(
+    () => (data ? `/api/macro/workouts/${data.date}` : null),
+    fetcher,
+    { refreshInterval: POLL_MS, revalidateOnFocus: true },
+  );
+  const workouts = workoutsData?.workouts ?? [];
+
+  const [tab, setTab] = useState<"macros" | "workout">("macros");
   const [pendingPresets, setPendingPresets] = useState<string[]>([]);
   const [pendingMeals, setPendingMeals] = useState<string[]>([]);
+  const [pendingWorkouts, setPendingWorkouts] = useState<string[]>([]);
+  const [workoutError, setWorkoutError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   const [, forceTick] = useState(0);
@@ -171,6 +201,61 @@ export default function TodayPage() {
     [data, mutate],
   );
 
+  const logWorkoutEntry = useCallback(
+    async (exercise: string, sets: WorkoutSet[], workoutType: string) => {
+      if (!data) return;
+      setWorkoutError(null);
+      const response = await fetch("/api/macro/workout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          exercise,
+          sets,
+          workout_type: workoutType,
+          date: data.date,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        setWorkoutError(
+          (payload as { error?: string } | null)?.error ??
+            `Logging ${exercise} failed (${response.status})`,
+        );
+        return;
+      }
+      await mutateWorkouts();
+    },
+    [data, mutateWorkouts],
+  );
+
+  const deleteWorkoutEntry = useCallback(
+    async (workout: WorkoutEntry) => {
+      setWorkoutError(null);
+      setPendingWorkouts((ids) => [...ids, workout.id]);
+      try {
+        const response = await fetch(
+          `/api/macro/workout/${encodeURIComponent(workout.id)}`,
+          { method: "DELETE" },
+        );
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+          throw new Error(
+            (payload as { error?: string } | null)?.error ??
+              `Deleting that entry failed (${response.status})`,
+          );
+        }
+        await mutateWorkouts();
+      } catch (caught) {
+        setWorkoutError(
+          caught instanceof Error ? caught.message : "Could not delete that entry",
+        );
+      } finally {
+        setPendingWorkouts((ids) => ids.filter((id) => id !== workout.id));
+      }
+    },
+    [mutateWorkouts],
+  );
+
   if (!data) {
     return (
       <main className="safe-top safe-x safe-bottom mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-4">
@@ -214,37 +299,76 @@ export default function TodayPage() {
         refreshing={isValidating}
       />
 
-      <MacroRings
-        totals={data.totals ?? ZERO}
-        targets={data.targets ?? ZERO}
-        remaining={data.remaining ?? ZERO}
-      />
+      <div className="grid grid-cols-2 gap-1 rounded-2xl bg-surface p-1">
+        {(["macros", "workout"] as const).map((key) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setTab(key)}
+            className={`min-h-10 rounded-xl text-sm font-semibold transition-colors ${
+              tab === key ? "bg-surface-2 text-protein" : "text-muted"
+            }`}
+          >
+            {key === "macros" ? "🥗 Macros" : "💪 Workout"}
+          </button>
+        ))}
+      </div>
 
-      {(actionError || error) && (
-        <p
-          role="alert"
-          className="rounded-2xl border border-over/40 bg-over/10 p-3 text-sm text-over"
-        >
-          {actionError ?? String(error?.message ?? "")}
-        </p>
+      {tab === "macros" ? (
+        <>
+          <MacroRings
+            totals={data.totals ?? ZERO}
+            targets={data.targets ?? ZERO}
+            remaining={data.remaining ?? ZERO}
+          />
+
+          {(actionError || error) && (
+            <p
+              role="alert"
+              className="rounded-2xl border border-over/40 bg-over/10 p-3 text-sm text-over"
+            >
+              {actionError ?? String(error?.message ?? "")}
+            </p>
+          )}
+
+          <PresetGrid
+            presets={data.presets ?? []}
+            pending={pendingPresets}
+            onLog={logPreset}
+          />
+
+          <MealList
+            meals={data.meals}
+            pending={pendingMeals}
+            onDelete={deleteMeal}
+          />
+
+          <p className="pt-2 text-center text-[0.7rem] text-muted">
+            Day rolls over at 4am. Text Poke to log anything that isn&rsquo;t a
+            preset.
+          </p>
+        </>
+      ) : (
+        <>
+          <WorkoutLogger
+            exercises={exercises}
+            pending={pendingWorkouts.length > 0}
+            error={workoutError}
+            onLog={logWorkoutEntry}
+          />
+
+          <WorkoutList
+            workouts={workouts}
+            pending={pendingWorkouts}
+            onDelete={deleteWorkoutEntry}
+          />
+
+          <p className="pt-2 text-center text-[0.7rem] text-muted">
+            Logged exercises land in the Fitness Tracker. The nightly sweep
+            turns new maxes into PRs automatically.
+          </p>
+        </>
       )}
-
-      <PresetGrid
-        presets={data.presets ?? []}
-        pending={pendingPresets}
-        onLog={logPreset}
-      />
-
-      <MealList
-        meals={data.meals}
-        pending={pendingMeals}
-        onDelete={deleteMeal}
-      />
-
-      <p className="pt-2 text-center text-[0.7rem] text-muted">
-        Day rolls over at 4am. Text Poke to log anything that isn&rsquo;t a
-        preset.
-      </p>
     </main>
   );
 }

@@ -267,3 +267,83 @@ def test_average_totals():
         "fat": 65.0,
     }
     assert average_totals([]) == domain.zero_totals()
+
+
+# --------------------------------------------------------------------------- #
+# Workout validation
+# --------------------------------------------------------------------------- #
+
+from domain import (  # noqa: E402
+    normalize_muscle_group,
+    normalize_workout_type,
+    validate_sets,
+)
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("push", "Push"),
+        ("PULL", "Pull"),
+        ("  legs ", "Legs"),
+        ("Abs", "Abs"),
+        ("cardio", "Cardio"),
+        ("full body", "Full Body"),
+    ],
+)
+def test_normalize_workout_type(raw, expected):
+    assert normalize_workout_type(raw) == expected
+
+
+def test_normalize_workout_type_rejects_unknown():
+    with pytest.raises(MacroError) as excinfo:
+        normalize_workout_type("yoga")
+    assert "Push, Pull, Legs, Abs, Cardio, Full Body" in str(excinfo.value)
+
+
+def test_normalize_workout_type_requires_a_value():
+    with pytest.raises(MacroError):
+        normalize_workout_type(None)
+    with pytest.raises(MacroError):
+        normalize_workout_type("")
+
+
+def test_normalize_muscle_group_maps_workout_types():
+    assert normalize_muscle_group(["Push"]) == ["Push"]
+    assert normalize_muscle_group(["Pull"]) == ["Pull"]
+    assert normalize_muscle_group(["Legs"]) == ["Quads"]
+    assert normalize_muscle_group(["Abs"]) == ["Abs"]
+
+
+def test_validate_sets_ok():
+    sets = [{"weight": 225, "reps": 5}, {"weight": 185, "reps": 8}]
+    assert validate_sets(sets) == [
+        {"weight": 225.0, "reps": 5.0},
+        {"weight": 185.0, "reps": 8.0},
+    ]
+
+
+def test_validate_sets_allows_bodyweight_zero_weight():
+    assert validate_sets([{"weight": 0, "reps": 10}]) == [
+        {"weight": 0.0, "reps": 10.0}
+    ]
+
+
+@pytest.mark.parametrize(
+    "sets",
+    [
+        [],
+        "not a list",
+        [{"weight": -5, "reps": 10}],
+        [{"weight": 225, "reps": -1}],
+        [{"weight": 99999, "reps": 10}],
+        [{"weight": 225, "reps": 9999}],
+        [{"weight": 0, "reps": 0}],
+        [{"weight": "heavy", "reps": 10}],
+        [{"weight": 225}],
+        [{"weight": 225, "reps": 10}, {"weight": 225, "reps": 10}, {"weight": 225, "reps": 10}, {"weight": 225, "reps": 10}, {"weight": 225, "reps": 10}],
+    ],
+)
+def test_validate_sets_rejects_bad_input(sets):
+    with pytest.raises(MacroError):
+        validate_sets(sets)

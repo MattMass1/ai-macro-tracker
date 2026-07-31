@@ -1,0 +1,213 @@
+"use client";
+
+import { useMemo, useState } from "react";
+
+import type { KnownExercise, WorkoutSet } from "@/lib/types";
+import { WORKOUT_TYPES } from "@/lib/types";
+
+type Props = {
+  exercises: KnownExercise[];
+  pending: boolean;
+  error: string | null;
+  onLog: (exercise: string, sets: WorkoutSet[], workoutType: string) => void;
+};
+
+const EMPTY_SET: WorkoutSet = { weight: 0, reps: 0 };
+
+function typeEmoji(workoutType: string): string {
+  switch (workoutType) {
+    case "Push":
+      return "🔥";
+    case "Pull":
+      return "🏋️";
+    case "Legs":
+      return "🦵";
+    case "Abs":
+      return "💪";
+    case "Cardio":
+      return "🏃";
+    default:
+      return "💪";
+  }
+}
+
+/**
+ * Log one exercise with up to 4 sets. Exercise comes from a picker built
+ * from the PR log (known exercises), or free text for anything new.
+ */
+export default function WorkoutLogger({
+  exercises,
+  pending,
+  error,
+  onLog,
+}: Props) {
+  const [exercise, setExercise] = useState("");
+  const [workoutType, setWorkoutType] = useState<string>("Push");
+  const [sets, setSets] = useState<WorkoutSet[]>([{ ...EMPTY_SET }]);
+
+  const known = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const ex of exercises) map.set(ex.name, ex.workout_type);
+    return map;
+  }, [exercises]);
+
+  const grouped = useMemo(() => {
+    const groups = new Map<string, string[]>();
+    for (const ex of exercises) {
+      const type = ex.workout_type[0] ?? "Other";
+      const list = groups.get(type) ?? [];
+      list.push(ex.name);
+      groups.set(type, list);
+    }
+    return [...groups.entries()];
+  }, [exercises]);
+
+  const pickExercise = (name: string) => {
+    setExercise(name);
+    const types = known.get(name);
+    if (types && types.length > 0) setWorkoutType(types[0]);
+  };
+
+  const updateSet = (index: number, field: keyof WorkoutSet, value: string) => {
+    setSets((prev) =>
+      prev.map((set, i) =>
+        i === index ? { ...set, [field]: Number(value) || 0 } : set,
+      ),
+    );
+  };
+
+  const addSet = () => {
+    setSets((prev) =>
+      prev.length < 4 ? [...prev, { ...EMPTY_SET }] : prev,
+    );
+  };
+
+  const removeSet = (index: number) => {
+    setSets((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== index) : prev));
+  };
+
+  const hasValues = sets.some((set) => set.weight > 0 || set.reps > 0);
+
+  const submit = () => {
+    if (!exercise.trim()) return;
+    if (!hasValues) return;
+    onLog(
+      exercise.trim(),
+      sets.filter((set) => set.weight > 0 || set.reps > 0),
+      workoutType,
+    );
+  };
+
+  return (
+    <section className="rounded-2xl bg-surface p-4">
+      <h2 className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-muted">
+        Log an exercise
+      </h2>
+
+      <label className="mb-1 block text-xs text-muted" htmlFor="exercise">
+        Exercise
+      </label>
+      <input
+        id="exercise"
+        list="known-exercises"
+        value={exercise}
+        onChange={(e) => {
+          setExercise(e.target.value);
+          const types = known.get(e.target.value);
+          if (types && types.length > 0) setWorkoutType(types[0]);
+        }}
+        placeholder="Barbell Bench Press"
+        className="mb-3 w-full rounded-xl bg-surface-2 px-3 py-2.5 text-sm outline-none placeholder:text-muted/50 focus:ring-2 focus:ring-protein/40"
+      />
+      <datalist id="known-exercises">
+        {grouped.map(([type, names]) => (
+          <optgroup key={type} label={`${typeEmoji(type)} ${type}`}>
+            {names.map((name) => (
+              <option key={name} value={name} />
+            ))}
+          </optgroup>
+        ))}
+      </datalist>
+
+      <div className="mb-3 flex flex-wrap gap-2">
+        {WORKOUT_TYPES.map((type) => (
+          <button
+            key={type}
+            type="button"
+            onClick={() => setWorkoutType(type)}
+            className={`min-h-9 rounded-full px-3 text-xs font-semibold transition-colors ${
+              workoutType === type
+                ? "bg-protein text-black"
+                : "bg-surface-2 text-muted active:bg-surface-2/60"
+            }`}
+          >
+            {typeEmoji(type)} {type}
+          </button>
+        ))}
+      </div>
+
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-xs text-muted">Sets</span>
+        {sets.length < 4 && (
+          <button
+            type="button"
+            onClick={addSet}
+            className="text-xs font-semibold text-protein"
+          >
+            + Add set
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        {sets.map((set, index) => (
+          <div key={index} className="flex items-center gap-2">
+            <span className="numeral w-6 text-xs text-muted">{index + 1}</span>
+            <input
+              inputMode="decimal"
+              value={set.weight || ""}
+              onChange={(e) => updateSet(index, "weight", e.target.value)}
+              placeholder="lbs"
+              aria-label={`Set ${index + 1} weight`}
+              className="min-w-0 flex-1 rounded-xl bg-surface-2 px-3 py-2.5 text-sm outline-none placeholder:text-muted/50 focus:ring-2 focus:ring-protein/40"
+            />
+            <span className="text-xs text-muted">×</span>
+            <input
+              inputMode="numeric"
+              value={set.reps || ""}
+              onChange={(e) => updateSet(index, "reps", e.target.value)}
+              placeholder="reps"
+              aria-label={`Set ${index + 1} reps`}
+              className="min-w-0 flex-1 rounded-xl bg-surface-2 px-3 py-2.5 text-sm outline-none placeholder:text-muted/50 focus:ring-2 focus:ring-protein/40"
+            />
+            {sets.length > 1 && (
+              <button
+                type="button"
+                onClick={() => removeSet(index)}
+                aria-label={`Remove set ${index + 1}`}
+                className="min-h-9 min-w-9 rounded-xl text-muted active:bg-surface-2"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {error && (
+        <p role="alert" className="mt-3 rounded-xl border border-over/40 bg-over/10 p-2.5 text-xs text-over">
+          {error}
+        </p>
+      )}
+
+      <button
+        type="button"
+        disabled={pending || !exercise.trim() || !hasValues}
+        onClick={submit}
+        className="mt-3 min-h-11 w-full rounded-xl bg-protein px-4 font-semibold text-black active:opacity-80 disabled:opacity-40"
+      >
+        {pending ? "Logging…" : "Log workout"}
+      </button>
+    </section>
+  );
+}

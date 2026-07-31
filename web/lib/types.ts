@@ -56,3 +56,47 @@ export type LogPresetBody = {
   servings?: number;
   meal?: string;
 };
+
+export type WorkoutSet = {
+  weight: number;
+  reps: number;
+};
+
+export type WorkoutEntry = {
+  id: string;
+  exercise: string;
+  workout_type: string[];
+  muscle_group: string[];
+  sets: WorkoutSet[];
+  date?: string;
+  created_time?: string;
+};
+
+export type KnownExercise = {
+  name: string;
+  workout_type: string[];
+};
+
+export const WORKOUT_TYPES = [
+  "Push",
+  "Pull",
+  "Legs",
+  "Abs",
+  "Cardio",
+  "Full Body",
+] as const;
+
+export type WorkoutType = (typeof WORKOUT_TYPES)[number];
+
+export type LogWorkoutBody = {
+  exercise: string;
+  sets: WorkoutSet[];
+  workout_type: string;
+  date?: string;
+};
+
+export type WorkoutsPayload = {
+  date: string;
+  day_label: string;
+  workouts: WorkoutEntry[];
+};

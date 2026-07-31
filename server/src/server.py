@@ -93,6 +93,70 @@ async def fetch_presets() -> list[dict[str, Any]]:
     return presets
 
 
+async def fetch_workouts(day: _date) -> list[dict[str, Any]]:
+    """Every `Fitness Tracker` row for one day, newest first."""
+    pages = await notion_client().query_data_source(
+        CONFIG.fitness_ds_id,
+        filter={"property": notion_api.P_DATE_INPUT, "date": {"equals": day.isoformat()}},
+        sorts=[{"timestamp": "created_time", "direction": "descending"}],
+    )
+    return [notion_api.workout_from_page(page) for page in pages]
+
+
+async def fetch_known_exercises() -> list[dict[str, Any]]:
+    """Every exercise with its workout type, from the PR log (Max Reps).
+
+    The PWA uses this to offer an exercise picker with the correct
+    Push/Pull/Legs tag instead of a free-text field.
+    """
+    pages = await notion_client().query_data_source(
+        CONFIG.maxreps_ds_id,
+        sorts=[{"property": notion_api.P_EXERCISE, "direction": "ascending"}],
+    )
+    return [
+        {
+            "name": notion_api.read_title(page, notion_api.P_EXERCISE).strip(),
+            "workout_type": notion_api.read_multi_select(page, notion_api.P_WORKOUT_TYPE),
+        }
+        for page in pages
+        if notion_api.read_title(page, notion_api.P_EXERCISE).strip()
+    ]
+
+
+async def write_workout(
+    exercise: str,
+    sets: Any,
+    workout_type: str | None,
+    day_value: str | None,
+) -> dict[str, Any]:
+    """Validate, write one Fitness Tracker row, and return it."""
+    clean_exercise = domain.validate_name(exercise, "exercise")
+    cleaned_sets = domain.validate_sets(sets)
+    type_name = domain.normalize_workout_type(workout_type)
+    muscle_group = domain.normalize_muscle_group([type_name])
+    day = domain.resolve_date(day_value, "date")
+
+    page = await notion_client().create_page(
+        CONFIG.fitness_ds_id,
+        notion_api.workout_properties(
+            clean_exercise,
+            type_name,
+            muscle_group,
+            cleaned_sets,
+            day,
+        ),
+    )
+    return {
+        "id": page.get("id", ""),
+        "exercise": clean_exercise,
+        "workout_type": [type_name],
+        "muscle_group": muscle_group,
+        "sets": cleaned_sets,
+        "date": day.isoformat(),
+        "created_time": page.get("created_time", ""),
+    }
+
+
 async def day_payload(
     day: _date,
     include_presets: bool = False,
@@ -582,6 +646,34 @@ async def set_targets(
     }
 
 
+@mcp.tool
+@tool_errors
+async def log_workout(
+    exercise: str,
+    sets: list[dict[str, float]],
+    workout_type: str,
+    date: str | None = None,
+) -> dict[str, Any]:
+    """Log one exercise with its sets to the Fitness Tracker.
+
+    Use when the user reports a workout ("3 sets of bench at 225"), one
+    exercise at a time. Each entry is a row in the Fitness Tracker database;
+    the nightly sweep turns new maxes into PR rows automatically.
+
+    Args:
+        exercise: Exercise name, e.g. "Barbell Bench Press".
+        sets: Up to 4 sets as [{"weight": 225, "reps": 5}, ...]. Weight in
+            pounds (or kg if that is what the user tracks); reps is a count.
+            Bodyweight exercises can pass weight: 0.
+        workout_type: One of Push, Pull, Legs, Abs, Cardio, Full Body.
+        date: YYYY-MM-DD the workout was done. Defaults to the current
+            logging day (rolls at 4am Eastern).
+
+    Returns the created entry with its id, exercise, sets, and type.
+    """
+    return await write_workout(exercise, sets, workout_type, date)
+
+
 # --------------------------------------------------------------------------- #
 # REST API for the PWA
 # --------------------------------------------------------------------------- #
@@ -715,6 +807,41 @@ async def api_delete_meal(request: Request) -> Any:
     )
     payload["deleted"] = page_id
     return payload
+
+
+@api_route("/api/exercises", methods=["GET"])
+async def api_exercises(request: Request) -> Any:
+    return {"exercises": await fetch_known_exercises()}
+
+
+@api_route("/api/workout", methods=["POST"])
+async def api_log_workout(request: Request) -> Any:
+    body = await _json_body(request)
+    return await write_workout(
+        exercise=str(body.get("exercise", "")),
+        sets=body.get("sets"),
+        workout_type=body.get("workout_type"),
+        day_value=body.get("date"),
+    )
+
+
+@api_route("/api/workouts/{date}", methods=["GET"])
+async def api_workouts(request: Request) -> Any:
+    day = domain.parse_date(request.path_params["date"])
+    return {
+        "date": day.isoformat(),
+        "day_label": domain.day_label(day),
+        "workouts": await fetch_workouts(day),
+    }
+
+
+@api_route("/api/workout/{page_id}", methods=["DELETE"])
+async def api_delete_workout(request: Request) -> Any:
+    page_id = request.path_params["page_id"].strip()
+    if not page_id:
+        raise MacroError("A workout id is required to delete an entry")
+    await notion_client().archive_page(page_id)
+    return {"deleted": page_id}
 
 
 @mcp.custom_route("/health", methods=["GET"])

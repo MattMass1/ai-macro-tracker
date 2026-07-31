@@ -100,3 +100,10 @@ export type WorkoutsPayload = {
   day_label: string;
   workouts: WorkoutEntry[];
 };
+
+export type WorkoutPlanPayload = {
+  rotation: string[];
+  last_workout: string | null;
+  upcoming: { type: string; exercises: { name: string }[] }[];
+  core: { name: string }[];
+};

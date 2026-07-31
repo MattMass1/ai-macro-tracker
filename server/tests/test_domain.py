@@ -274,9 +274,11 @@ def test_average_totals():
 # --------------------------------------------------------------------------- #
 
 from domain import (  # noqa: E402
+    next_workout_type,
     normalize_muscle_group,
     normalize_workout_type,
     validate_sets,
+    workout_type_from_muscle,
 )
 
 
@@ -347,3 +349,43 @@ def test_validate_sets_allows_bodyweight_zero_weight():
 def test_validate_sets_rejects_bad_input(sets):
     with pytest.raises(MacroError):
         validate_sets(sets)
+
+
+# --------------------------------------------------------------------------- #
+# Workout rotation
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "last, expected",
+    [
+        ("Push", "Pull"),
+        ("Pull", "Legs"),
+        ("Legs", "Push"),
+        ("push", "Pull"),
+        ("  PULL ", "Legs"),
+        (None, "Push"),
+        ("Abs", "Push"),  # accessory days do not advance the split
+        ("Cardio", "Push"),
+        ("yoga", "Push"),
+    ],
+)
+def test_next_workout_type_rotates(last, expected):
+    assert next_workout_type(last) == expected
+
+
+def test_next_workout_type_cycles_forever():
+    day = "Legs"
+    seen = []
+    for _ in range(6):
+        day = next_workout_type(day)
+        seen.append(day)
+    assert seen == ["Push", "Pull", "Legs", "Push", "Pull", "Legs"]
+
+
+def test_workout_type_from_muscle():
+    assert workout_type_from_muscle(["Quads", "Abs"]) == "Legs"
+    assert workout_type_from_muscle(["Hams"]) == "Legs"
+    assert workout_type_from_muscle(["Push"]) == "Push"
+    assert workout_type_from_muscle([]) is None
+    assert workout_type_from_muscle(["SomethingElse"]) is None

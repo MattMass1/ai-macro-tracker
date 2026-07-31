@@ -24,6 +24,9 @@ WORKOUT_TYPES = ("Push", "Pull", "Legs", "Abs", "Cardio", "Full Body")
 
 MUSCLE_GROUPS = ("Quads", "Hams", "Push", "Pull", "Abs")
 
+#: The user's 3-day split. Workout days cycle in this order.
+WORKOUT_ROTATION = ("Push", "Pull", "Legs")
+
 MAX_SETS = 4
 MAX_WORKOUT_WEIGHT = 2000.0
 MAX_REPS = 300
@@ -37,6 +40,19 @@ WORKOUT_TYPE_TO_MUSCLE = {
     "Abs": ["Abs"],
     "Cardio": ["Cardio"],
     "Full Body": ["Full Body"],
+}
+
+#: `Muscle Group` values map onto the `Workout type` taxonomy. Fitness Tracker
+#: rows populate Muscle Group; the Max Reps log carries Workout type.
+MUSCLE_TO_WORKOUT_TYPE = {
+    "Push": "Push",
+    "Pull": "Pull",
+    "Abs": "Abs",
+    "Quads": "Legs",
+    "Hams": "Legs",
+    "Legs": "Legs",
+    "Cardio": "Cardio",
+    "Full Body": "Full Body",
 }
 
 MAX_CALORIES = 10_000.0
@@ -285,6 +301,31 @@ def normalize_workout_type(value: str | None) -> str:
         f"workout_type must be one of {', '.join(WORKOUT_TYPES)} — got "
         f"{str(value).strip()!r}"
     )
+
+
+def next_workout_type(last_type: str | None) -> str:
+    """The next day in the Push → Pull → Legs rotation.
+
+    `last_type` is the most recent logged workout's type (or None when there
+    is no history). Anything outside the rotation (Abs, Cardio, unknown)
+    falls back to Push, since those days do not advance the main split.
+    """
+    if last_type is None:
+        return WORKOUT_ROTATION[0]
+    candidate = str(last_type).strip().lower()
+    for index, allowed in enumerate(WORKOUT_ROTATION):
+        if allowed.lower() == candidate:
+            return WORKOUT_ROTATION[(index + 1) % len(WORKOUT_ROTATION)]
+    return WORKOUT_ROTATION[0]
+
+
+def workout_type_from_muscle(muscle_groups: list[str]) -> str | None:
+    """Best-effort Workout type for a row tagged only with Muscle Group."""
+    for muscle in muscle_groups:
+        mapped = MUSCLE_TO_WORKOUT_TYPE.get(muscle)
+        if mapped:
+            return mapped
+    return None
 
 
 def normalize_muscle_group(value: str | list[str] | None) -> list[str]:

@@ -14,6 +14,7 @@ import type {
   LogWorkoutBody,
   Preset,
   WorkoutEntry,
+  WorkoutPlanPayload,
   WorkoutsPayload,
 } from "./types";
 
@@ -125,6 +126,11 @@ export function deleteMeal(pageId: string): Promise<DayPayload> {
 /** GET /api/exercises — every known exercise with its workout type tag. */
 export function getExercises(): Promise<{ exercises: KnownExercise[] }> {
   return call<{ exercises: KnownExercise[] }>("/api/exercises");
+}
+
+/** GET /api/plan — the upcoming Push/Pull/Legs rotation with exercises. */
+export function getPlan(): Promise<WorkoutPlanPayload> {
+  return call<WorkoutPlanPayload>("/api/plan");
 }
 
 /** GET /api/workouts/{date} — workout entries for one YYYY-MM-DD. */

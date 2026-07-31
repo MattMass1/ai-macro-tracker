@@ -123,6 +123,79 @@ async def fetch_known_exercises() -> list[dict[str, Any]]:
     ]
 
 
+async def last_workout_type() -> str | None:
+    """The workout type of the most recent Fitness Tracker entry.
+
+    Uses `Date (user input)` as the primary sort; rows without a date fall
+    back to `created_time`. Old rows only carry Muscle Group, so the type is
+    derived via the shared mapping when the Workout type tag is empty.
+    """
+    pages = await notion_client().query_data_source(CONFIG.fitness_ds_id)
+
+    def sort_key(page: Mapping[str, Any]) -> str:
+        return (
+            notion_api.read_date(page, notion_api.P_DATE_INPUT)
+            or (page.get("created_time") or "")[:10]
+            or ""
+        )
+
+    if not pages:
+        return None
+    pages.sort(key=sort_key, reverse=True)
+    newest = pages[0]
+    types = notion_api.read_multi_select(newest, notion_api.P_WORKOUT_TYPE)
+    if types:
+        return next(
+            (t for t in domain.WORKOUT_ROTATION if t in types),
+            types[0],
+        )
+    muscles = notion_api.read_multi_select(newest, notion_api.P_MUSCLE_GROUP)
+    return domain.workout_type_from_muscle(muscles)
+
+
+async def workout_plan_payload() -> dict[str, Any]:
+    """The upcoming Push → Pull → Legs rotation with exercises per day.
+
+    The plan derives from the most recent logged workout; Abs/Cardio days do
+    not advance the split. Exercises come from the PR log (Max Reps) tagged
+    with the planned type, plus an Abs/core list that can be done any day.
+    `upcoming` lists the next `window` rotation days in order so the user can
+    read ahead and never look up exercise names.
+    """
+    last_type = await last_workout_type()
+    known = await fetch_known_exercises()
+
+    def exercises_for(workout_type: str) -> list[dict[str, Any]]:
+        return [
+            {"name": ex["name"]}
+            for ex in known
+            if workout_type in ex["workout_type"]
+        ]
+
+    window = 5  # a 5-day training week at most cycles the split twice
+    upcoming: list[dict[str, Any]] = []
+    day_type = domain.next_workout_type(last_type)
+    for _ in range(window):
+        upcoming.append(
+            {
+                "type": day_type,
+                "exercises": exercises_for(day_type),
+            }
+        )
+        day_type = domain.next_workout_type(day_type)
+
+    return {
+        "rotation": list(domain.WORKOUT_ROTATION),
+        "last_workout": last_type,
+        "upcoming": upcoming,
+        "core": [
+            {"name": ex["name"]}
+            for ex in known
+            if "Abs" in ex["workout_type"]
+        ],
+    }
+
+
 async def write_workout(
     exercise: str,
     sets: Any,
@@ -812,6 +885,11 @@ async def api_delete_meal(request: Request) -> Any:
 @api_route("/api/exercises", methods=["GET"])
 async def api_exercises(request: Request) -> Any:
     return {"exercises": await fetch_known_exercises()}
+
+
+@api_route("/api/plan", methods=["GET"])
+async def api_plan(request: Request) -> Any:
+    return await workout_plan_payload()
 
 
 @api_route("/api/workout", methods=["POST"])

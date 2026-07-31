@@ -9,6 +9,7 @@ import MealList from "@/components/MealList";
 import PresetGrid from "@/components/PresetGrid";
 import WorkoutList from "@/components/WorkoutList";
 import WorkoutLogger from "@/components/WorkoutLogger";
+import WorkoutPlan from "@/components/WorkoutPlan";
 import type {
   DayPayload,
   KnownExercise,
@@ -350,6 +351,8 @@ export default function TodayPage() {
         </>
       ) : (
         <>
+          <WorkoutPlan day={data.date} />
+
           <WorkoutLogger
             exercises={exercises}
             pending={pendingWorkouts.length > 0}

@@ -14,6 +14,7 @@ import {
   deleteWorkout,
   getDay,
   getExercises,
+  getPlan,
   getPresets,
   getToday,
   getWorkouts,
@@ -57,6 +58,9 @@ export async function GET(_request: Request, context: Context) {
     }
     if (path.length === 1 && path[0] === "exercises") {
       return NextResponse.json(await getExercises(), { headers: noStore });
+    }
+    if (path.length === 1 && path[0] === "plan") {
+      return NextResponse.json(await getPlan(), { headers: noStore });
     }
     if (path.length === 2 && path[0] === "workouts") {
       return NextResponse.json(await getWorkouts(path[1]), { headers: noStore });

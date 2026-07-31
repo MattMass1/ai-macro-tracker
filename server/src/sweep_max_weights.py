@@ -32,6 +32,7 @@ from typing import Any, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from domain import MUSCLE_TO_WORKOUT_TYPE  # noqa: E402
 from notion import (  # noqa: E402
     NotionClient,
     date_prop,
@@ -58,19 +59,7 @@ P_DATE_INPUT = "Date (user input)"
 
 WEIGHT_COLS = [f"Weight {i}" for i in range(1, 5)]
 
-#: `Muscle Group` values map onto the `Workout type` taxonomy. The Fitness
-#: Tracker rows only populate Muscle Group; the Max Reps log carries Workout
-#: type so the PWA can group exercises into Push/Pull/Legs days.
-MUSCLE_TO_WORKOUT_TYPE = {
-    "Push": "Push",
-    "Pull": "Pull",
-    "Abs": "Abs",
-    "Quads": "Legs",
-    "Hams": "Legs",
-    "Legs": "Legs",
-    "Cardio": "Cardio",
-    "Full Body": "Full Body",
-}
+P_EXERCISE = "Exercise"  # Max Reps title
 
 
 def _load_env() -> None:

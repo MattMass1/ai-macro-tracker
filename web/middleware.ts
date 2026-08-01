@@ -40,6 +40,6 @@ export const config = {
   // Everything except Next internals and the static icons/manifest, which iOS
   // must be able to read before the app is unlocked.
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|manifest.json|icon-192.png|icon-512.png|apple-touch-icon.png).*)",
+    "/((?!_next/static|_next/image|favicon.ico|manifest.json|sw.js|icon-192.png|icon-512.png|apple-touch-icon.png).*)",
   ],
 };

@@ -41,7 +41,20 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="min-h-dvh bg-bg text-text">{children}</body>
+      <body className="min-h-dvh bg-bg text-text">
+        {children}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              if ("serviceWorker" in navigator) {
+                window.addEventListener("load", function () {
+                  navigator.serviceWorker.register("/sw.js").catch(function () {});
+                });
+              }
+            `,
+          }}
+        />
+      </body>
     </html>
   );
 }

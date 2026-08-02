@@ -12,7 +12,8 @@ import json
 import os
 import sys
 import tempfile
-from datetime import date as _date
+import asyncio
+from datetime import date as _date, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -106,6 +107,24 @@ async def fetch_workouts(day: _date) -> list[dict[str, Any]]:
     return [notion_api.workout_from_page(page) for page in pages]
 
 
+async def fetch_workouts_in_range(start: _date, end: _date) -> list[dict[str, Any]]:
+    pages = await notion_client().query_data_source(
+        CONFIG.fitness_ds_id,
+        filter=notion_api.workout_date_range_filter(start, end),
+        sorts=[{"property": notion_api.P_DATE_INPUT, "direction": "ascending"}],
+    )
+    return [notion_api.workout_from_page(page) for page in pages]
+
+
+async def fetch_prs() -> list[dict[str, Any]]:
+    pages = await notion_client().query_data_source(
+        CONFIG.maxreps_ds_id,
+        sorts=[{"property": notion_api.P_MAX_WEIGHT, "direction": "descending"}],
+    )
+    prs = [notion_api.pr_from_page(page) for page in pages]
+    return [pr for pr in prs if pr["exercise"]][:5]
+
+
 async def fetch_known_exercises() -> list[dict[str, Any]]:
     """Every exercise with its workout type, from the PR log (Max Reps).
 
@@ -196,6 +215,47 @@ async def workout_plan_payload() -> dict[str, Any]:
             for ex in known
             if "Abs" in ex["workout_type"]
         ],
+    }
+
+
+async def workout_stats_payload() -> dict[str, Any]:
+    """One compact read containing every Workout dashboard metric."""
+    today = domain.effective_date()
+    rows, prs, plan = await asyncio.gather(
+        fetch_workouts_in_range(today - timedelta(days=6), today),
+        fetch_prs(),
+        workout_plan_payload(),
+    )
+    aggregates = domain.workout_week_stats(rows, today)
+    today_rows = [row for row in rows if row.get("date") == today.isoformat()]
+    exercises: dict[str, dict[str, Any]] = {}
+    for row in today_rows:
+        name = row.get("exercise") or "Exercise"
+        item = exercises.setdefault(name, {"name": name, "sets": 0, "weight": "0", "reps": "0"})
+        sets = row.get("sets") or []
+        item["sets"] += len(sets)
+        if sets:
+            best = max(sets, key=lambda value: float(value.get("weight") or 0))
+            item["weight"] = f'{float(best.get("weight") or 0):g}'
+            item["reps"] = f'{float(best.get("reps") or 0):g}'
+
+    upcoming = plan.get("upcoming") or []
+    compact_plan = [
+        {"type": item["type"], "exercises": [ex["name"] for ex in item["exercises"]]}
+        for item in upcoming
+    ]
+    return {
+        "today": {
+            "date": today.isoformat(),
+            "entries": len(today_rows),
+            "exercises": list(exercises.values()),
+        },
+        **aggregates,
+        "prs": prs,
+        "plan": {
+            "today": compact_plan[0] if compact_plan else {"type": "Push", "exercises": []},
+            "next": compact_plan[1:],
+        },
     }
 
 
@@ -962,6 +1022,11 @@ async def api_exercises(request: Request) -> Any:
 @api_route("/api/plan", methods=["GET"])
 async def api_plan(request: Request) -> Any:
     return await workout_plan_payload()
+
+
+@api_route("/api/workout-stats", methods=["GET"])
+async def api_workout_stats(request: Request) -> Any:
+    return await workout_stats_payload()
 
 
 @api_route("/api/workout", methods=["POST"])

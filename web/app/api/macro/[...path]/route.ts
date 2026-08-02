@@ -19,6 +19,7 @@ import {
   getPresets,
   getToday,
   getWorkouts,
+  getWorkoutStats,
   logMeal,
   logPreset,
   logWorkout,
@@ -63,6 +64,9 @@ export async function GET(_request: Request, context: Context) {
     }
     if (path.length === 1 && path[0] === "plan") {
       return NextResponse.json(await getPlan(), { headers: noStore });
+    }
+    if (path.length === 1 && path[0] === "workout-stats") {
+      return NextResponse.json(await getWorkoutStats(), { headers: noStore });
     }
     if (path.length === 1 && path[0] === "brief") {
       const date = new URL(_request.url).searchParams.get("date") ?? undefined;

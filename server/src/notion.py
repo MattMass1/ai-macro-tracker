@@ -474,6 +474,16 @@ def date_range_filter(start: date, end: date) -> dict[str, Any]:
     }
 
 
+def workout_date_range_filter(start: date, end: date) -> dict[str, Any]:
+    """Inclusive date filter for the Fitness Tracker's user-input date."""
+    return {
+        "and": [
+            {"property": P_DATE_INPUT, "date": {"on_or_after": start.isoformat()}},
+            {"property": P_DATE_INPUT, "date": {"on_or_before": end.isoformat()}},
+        ]
+    }
+
+
 def read_multi_select(page: Mapping[str, Any], name: str) -> list[str]:
     prop = (page.get("properties") or {}).get(name) or {}
     return [
@@ -508,6 +518,15 @@ def workout_from_page(page: Mapping[str, Any]) -> dict[str, Any]:
         "sets": sets,
         "date": read_date(page, P_DATE_INPUT),
         "created_time": page.get("created_time", ""),
+    }
+
+
+def pr_from_page(page: Mapping[str, Any]) -> dict[str, Any]:
+    """One Exercise Max Reps row in the compact shape used by widgets."""
+    return {
+        "exercise": read_title(page, P_EXERCISE),
+        "max_weight": read_number(page, P_MAX_WEIGHT),
+        "date": read_date(page, P_DATE_ACHIEVED),
     }
 
 

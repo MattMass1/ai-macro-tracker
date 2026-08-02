@@ -108,6 +108,30 @@ export type WorkoutPlanPayload = {
   core: { name: string }[];
 };
 
+export type WorkoutStatsPayload = {
+  today: {
+    date: string;
+    entries: number;
+    exercises: { name: string; sets: number; weight: string; reps: string }[];
+  };
+  week: {
+    days_logged: number;
+    total_sets: number;
+    total_volume: number;
+    streak_days: number;
+  };
+  coverage: {
+    muscle_groups: Record<string, number>;
+    workout_types: Record<string, number>;
+    untouched: string[];
+  };
+  prs: { exercise: string; max_weight: number; date: string }[];
+  plan: {
+    today: { type: string; exercises: string[] };
+    next: { type: string; exercises: string[] }[];
+  };
+};
+
 export type BriefPayload = {
   text: string | null;
   date: string;

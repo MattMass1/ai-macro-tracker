@@ -16,6 +16,7 @@ import type {
   Preset,
   WorkoutEntry,
   WorkoutPlanPayload,
+  WorkoutStatsPayload,
   WorkoutsPayload,
 } from "./types";
 
@@ -146,6 +147,11 @@ export function getExercises(): Promise<{ exercises: KnownExercise[] }> {
 /** GET /api/plan — the upcoming Push/Pull/Legs rotation with exercises. */
 export function getPlan(): Promise<WorkoutPlanPayload> {
   return call<WorkoutPlanPayload>("/api/plan");
+}
+
+/** GET /api/workout-stats — the complete Workout dashboard snapshot. */
+export function getWorkoutStats(): Promise<WorkoutStatsPayload> {
+  return call<WorkoutStatsPayload>("/api/workout-stats");
 }
 
 /** GET /api/workouts/{date} — workout entries for one YYYY-MM-DD. */

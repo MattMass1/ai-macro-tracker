@@ -10,7 +10,7 @@ import MealList from "@/components/MealList";
 import PresetGrid from "@/components/PresetGrid";
 import WorkoutList from "@/components/WorkoutList";
 import WorkoutLogger from "@/components/WorkoutLogger";
-import WorkoutPlan from "@/components/WorkoutPlan";
+import WorkoutDashboard from "@/components/WorkoutDashboard";
 import type {
   DayPayload,
   KnownExercise,
@@ -102,6 +102,7 @@ export default function TodayPage() {
   const [pendingMeals, setPendingMeals] = useState<string[]>([]);
   const [pendingWorkouts, setPendingWorkouts] = useState<string[]>([]);
   const [workoutError, setWorkoutError] = useState<string | null>(null);
+  const [workoutRevision, setWorkoutRevision] = useState(0);
   const [actionError, setActionError] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   const [, forceTick] = useState(0);
@@ -226,6 +227,7 @@ export default function TodayPage() {
         return;
       }
       await mutateWorkouts();
+      setWorkoutRevision((value) => value + 1);
     },
     [data, mutateWorkouts],
   );
@@ -247,6 +249,7 @@ export default function TodayPage() {
           );
         }
         await mutateWorkouts();
+        setWorkoutRevision((value) => value + 1);
       } catch (caught) {
         setWorkoutError(
           caught instanceof Error ? caught.message : "Could not delete that entry",
@@ -354,7 +357,7 @@ export default function TodayPage() {
         </>
       ) : (
         <>
-          <WorkoutPlan day={data.date} />
+          <WorkoutDashboard revision={workoutRevision} />
 
           <WorkoutLogger
             exercises={exercises}

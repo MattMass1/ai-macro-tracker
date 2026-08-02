@@ -372,3 +372,56 @@ def validate_sets(sets: Any) -> list[dict[str, float]]:
     if all(s["weight"] == 0 and s["reps"] == 0 for s in cleaned):
         raise MacroError("at least one set needs a weight or reps value")
     return cleaned
+
+
+def workout_week_stats(
+    rows: Iterable[Mapping[str, Any]], today: date
+) -> dict[str, Any]:
+    """Aggregate a rolling workout week without coupling business rules to Notion."""
+    rows = list(rows)
+    logged_dates = {str(row.get("date", ""))[:10] for row in rows if row.get("date")}
+    total_sets = sum(len(row.get("sets") or []) for row in rows)
+    total_volume = sum(
+        _num(item.get("weight")) * _num(item.get("reps"))
+        for row in rows
+        for item in (row.get("sets") or [])
+    )
+
+    streak = 0
+    cursor = today
+    while cursor.isoformat() in logged_dates:
+        streak += 1
+        cursor -= timedelta(days=1)
+
+    muscle_days = {group: set() for group in MUSCLE_GROUPS}
+    type_days = {workout_type: set() for workout_type in WORKOUT_TYPES}
+    for row in rows:
+        day = str(row.get("date", ""))[:10]
+        if not day:
+            continue
+        muscles = list(row.get("muscle_group") or [])
+        types = list(row.get("workout_type") or [])
+        derived_type = workout_type_from_muscle(muscles)
+        if not types and derived_type:
+            types = [derived_type]
+        for muscle in muscles:
+            if muscle in muscle_days:
+                muscle_days[muscle].add(day)
+        for workout_type in types:
+            if workout_type in type_days:
+                type_days[workout_type].add(day)
+
+    muscle_counts = {key: len(value) for key, value in muscle_days.items()}
+    return {
+        "week": {
+            "days_logged": len(logged_dates),
+            "total_sets": total_sets,
+            "total_volume": round(total_volume, 2),
+            "streak_days": streak,
+        },
+        "coverage": {
+            "muscle_groups": muscle_counts,
+            "workout_types": {key: len(value) for key, value in type_days.items()},
+            "untouched": [key for key, value in muscle_counts.items() if value == 0],
+        },
+    }

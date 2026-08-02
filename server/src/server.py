@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import functools
 import hmac
+import json
+import os
 import sys
+import tempfile
 from datetime import date as _date
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
@@ -751,6 +754,56 @@ async def log_workout(
 # REST API for the PWA
 # --------------------------------------------------------------------------- #
 
+
+class BriefStorageError(RuntimeError):
+    """A clean, user-facing failure while reading or writing daily briefs."""
+
+
+def read_brief(day: _date) -> dict[str, Any]:
+    path = CONFIG.briefs_dir / f"{day.isoformat()}.json"
+    try:
+        if not path.exists():
+            return {"text": None, "date": day.isoformat()}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise BriefStorageError(
+            f"Could not read the brief for {day.isoformat()}"
+        ) from exc
+    text = payload.get("text") if isinstance(payload, dict) else None
+    if not isinstance(text, str):
+        raise BriefStorageError(f"The brief for {day.isoformat()} is invalid")
+    return {"text": text, "date": day.isoformat()}
+
+
+def write_brief(text: str, day: _date) -> dict[str, Any]:
+    directory = CONFIG.briefs_dir
+    temp_path: str | None = None
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=directory,
+            prefix=f".{day.isoformat()}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = handle.name
+            json.dump({"text": text, "date": day.isoformat()}, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, directory / f"{day.isoformat()}.json")
+    except OSError as exc:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        raise BriefStorageError(
+            f"Could not store the brief for {day.isoformat()}"
+        ) from exc
+    return {"text": text, "date": day.isoformat()}
+
 CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, X-App-Token",
@@ -806,6 +859,10 @@ def api_route(path: str, methods: list[str]):
             except NotionError as exc:
                 return _with_cors(
                     JSONResponse({"error": str(exc)}, status_code=502), request
+                )
+            except BriefStorageError as exc:
+                return _with_cors(
+                    JSONResponse({"error": str(exc)}, status_code=500), request
                 )
             status = 200
             if isinstance(payload, tuple):
@@ -867,6 +924,21 @@ async def api_log(request: Request) -> Any:
         meal=body.get("meal"),
         day_value=body.get("date"),
     )
+
+
+@api_route("/api/brief", methods=["GET", "POST"])
+async def api_brief(request: Request) -> Any:
+    if request.method == "GET":
+        date_value = request.query_params.get("date")
+        day = domain.resolve_date(date_value, "date")
+        return read_brief(day)
+
+    body = await _json_body(request)
+    text = body.get("text")
+    if not isinstance(text, str):
+        raise MacroError("text must be a string")
+    day = domain.resolve_date(body.get("date"), "date")
+    return write_brief(text, day)
 
 
 @api_route("/api/meal/{page_id}", methods=["DELETE"])

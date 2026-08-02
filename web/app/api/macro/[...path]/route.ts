@@ -12,6 +12,7 @@ import {
   ApiError,
   deleteMeal,
   deleteWorkout,
+  getBrief,
   getDay,
   getExercises,
   getPlan,
@@ -21,6 +22,7 @@ import {
   logMeal,
   logPreset,
   logWorkout,
+  postBrief,
 } from "@/lib/api";
 import type {
   LogMealBody,
@@ -62,6 +64,10 @@ export async function GET(_request: Request, context: Context) {
     if (path.length === 1 && path[0] === "plan") {
       return NextResponse.json(await getPlan(), { headers: noStore });
     }
+    if (path.length === 1 && path[0] === "brief") {
+      const date = new URL(_request.url).searchParams.get("date") ?? undefined;
+      return NextResponse.json(await getBrief(date), { headers: noStore });
+    }
     if (path.length === 2 && path[0] === "workouts") {
       return NextResponse.json(await getWorkouts(path[1]), { headers: noStore });
     }
@@ -89,6 +95,15 @@ export async function POST(request: Request, context: Context) {
     }
     if (path.length === 1 && path[0] === "workout") {
       return NextResponse.json(await logWorkout(body as LogWorkoutBody));
+    }
+    if (path.length === 1 && path[0] === "brief") {
+      const brief = body as { text?: unknown; date?: unknown };
+      return NextResponse.json(
+        await postBrief(
+          brief.text as string,
+          typeof brief.date === "string" ? brief.date : undefined,
+        ),
+      );
     }
     return NextResponse.json({ error: "Unknown endpoint" }, { status: 404 });
   } catch (error) {

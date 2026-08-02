@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import useSWR from "swr";
 
+import DailyBrief from "@/components/DailyBrief";
 import DayHeader from "@/components/DayHeader";
 import MacroRings from "@/components/MacroRings";
 import MealList from "@/components/MealList";
@@ -317,6 +318,8 @@ export default function TodayPage() {
 
       {tab === "macros" ? (
         <>
+          <DailyBrief day={data.date} />
+
           <MacroRings
             totals={data.totals ?? ZERO}
             targets={data.targets ?? ZERO}

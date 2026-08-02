@@ -7,6 +7,7 @@
  */
 
 import type {
+  BriefPayload,
   DayPayload,
   KnownExercise,
   LogMealBody,
@@ -94,6 +95,20 @@ async function call<T>(
 /** GET /api/today — the current logging day, with presets. */
 export function getToday(): Promise<DayPayload> {
   return call<DayPayload>("/api/today");
+}
+
+/** GET /api/brief — the brief for a date, or the current logging day. */
+export function getBrief(date?: string): Promise<BriefPayload> {
+  const query = date ? `?date=${encodeURIComponent(date)}` : "";
+  return call<BriefPayload>(`/api/brief${query}`);
+}
+
+/** POST /api/brief — store the brief for a date or the current logging day. */
+export function postBrief(text: string, date?: string): Promise<BriefPayload> {
+  return call<BriefPayload>("/api/brief", {
+    method: "POST",
+    body: { text, ...(date ? { date } : {}) },
+  });
 }
 
 /** GET /api/day/{date} — one specific YYYY-MM-DD. */

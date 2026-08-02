@@ -107,3 +107,8 @@ export type WorkoutPlanPayload = {
   upcoming: { type: string; exercises: { name: string }[] }[];
   core: { name: string }[];
 };
+
+export type BriefPayload = {
+  text: string | null;
+  date: string;
+};

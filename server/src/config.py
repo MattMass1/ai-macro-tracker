@@ -61,6 +61,7 @@ class Config:
     app_shared_token: str
     local_tz: str
     day_rollover_hour: int
+    briefs_dir: Path
     port: int
     allowed_origins: list[str] = field(default_factory=list)
 
@@ -88,6 +89,7 @@ def load_config() -> Config:
         app_shared_token=_require("APP_SHARED_TOKEN", missing),
         local_tz=os.environ.get("LOCAL_TZ", "America/New_York").strip(),
         day_rollover_hour=int(os.environ.get("DAY_ROLLOVER_HOUR", "4")),
+        briefs_dir=Path(os.environ.get("BRIEFS_DIR", "/opt/data/briefs")),
         port=int(os.environ.get("PORT", "8000")),
         allowed_origins=[
             origin.strip()

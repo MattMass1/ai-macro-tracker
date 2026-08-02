@@ -65,7 +65,7 @@ export default function WorkoutDashboard({ revision }: { revision: number }) {
   };
 
   if (isLoading && !data) {
-    return <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">{Array.from({ length: 3 }, (_, i) => <div key={i} className="h-32 animate-pulse rounded-2xl bg-surface" />)}</div>;
+    return <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">{Array.from({ length: 5 }, (_, i) => <div key={i} className="h-32 animate-pulse rounded-2xl bg-surface" />)}</div>;
   }
   if (error || !data) {
     return <Card><p className="text-sm text-muted">Workout widgets are unavailable right now.</p></Card>;
@@ -75,21 +75,24 @@ export default function WorkoutDashboard({ revision }: { revision: number }) {
   const maxCoverage = Math.max(1, ...MUSCLES.map((muscle) => data.coverage.muscle_groups[muscle] ?? 0));
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-      <Card className="col-span-2 sm:col-span-3">
-        <div className="flex items-center justify-between gap-2"><Label>Training status</Label><span className="numeral text-[0.65rem] text-muted">{data.today.date.slice(5)}</span></div>
-
-        <div className="mt-2 grid grid-cols-3 gap-1 text-center text-[0.65rem]">
-          <span className="rounded-lg bg-surface-2 px-1.5 py-1"><b className="numeral text-xs">{data.week.days_logged}</b><span className="ml-1 text-muted">days</span></span>
-          <span className="rounded-lg bg-surface-2 px-1.5 py-1"><b className="numeral text-xs">{data.week.total_sets}</b><span className="ml-1 text-muted">sets</span></span>
-          <span className="rounded-lg bg-surface-2 px-1.5 py-1"><b className="numeral text-xs">{data.week.streak_days}</b><span className="ml-1 text-muted">streak</span>{data.week.streak_days >= 2 ? " 🔥" : ""}</span>
-        </div>
-
+      <Card>
+        <div className="flex items-center justify-between gap-2"><Label>Today</Label><span className="numeral text-[0.65rem] text-muted">{data.today.date.slice(5)}</span></div>
+        <div className="mt-2 flex items-end gap-1.5"><span className="numeral text-3xl font-bold">{data.today.entries}</span><span className="pb-1 text-xs text-muted">entries</span></div>
         <div className="mt-2 flex flex-wrap gap-1">
-          {data.today.exercises.map((item) => <span key={item.name} className="max-w-full truncate rounded-full bg-surface-2 px-2 py-1 text-[0.65rem]">{item.name} · {item.sets} sets</span>)}
-          {data.today.exercises.length === 0 && <span className="text-xs text-muted">No workout logged yet</span>}
+          {data.today.exercises.slice(0, 3).map((item) => <span key={item.name} className="max-w-full truncate rounded-full bg-surface-2 px-2 py-1 text-[0.65rem]">{item.name} · {item.sets}s</span>)}
+          {data.today.exercises.length === 0 && <span className="text-xs text-muted">Ready when you are</span>}
         </div>
+      </Card>
 
-        <div className="mt-2 space-y-1">{MUSCLES.map((muscle) => { const count = data.coverage.muscle_groups[muscle] ?? 0; return <div key={muscle} className="grid grid-cols-[2.8rem_1fr_1.25rem] items-center gap-1.5 text-[0.65rem]"><span>{muscle}</span><div className="h-1.5 overflow-hidden rounded-full bg-surface-2"><div className="h-full rounded-full" style={{ width: `${(count / maxCoverage) * 100}%`, backgroundColor: COLORS[muscle] }} /></div><span className="numeral rounded-full bg-surface-2 text-center">{count}</span></div>; })}</div>
+      <Card>
+        <Label>Week</Label>
+        <div className="mt-2 flex items-end gap-1.5"><span className="numeral text-4xl font-bold">{data.week.days_logged}</span><span className="pb-1 text-xs text-muted">/ 7 days</span></div>
+        <div className="mt-3 grid grid-cols-2 gap-1 text-xs"><span className="rounded-lg bg-surface-2 p-1.5"><b className="numeral">{data.week.total_sets}</b><br/><span className="text-muted">sets</span></span><span className="rounded-lg bg-surface-2 p-1.5"><b className="numeral">{data.week.streak_days}</b> {data.week.streak_days >= 2 ? "🔥" : ""}<br/><span className="text-muted">streak</span></span></div>
+      </Card>
+
+      <Card className="col-span-2 sm:col-span-1">
+        <Label>Coverage</Label>
+        <div className="mt-2 space-y-1.5">{MUSCLES.map((muscle) => { const count = data.coverage.muscle_groups[muscle] ?? 0; return <div key={muscle} className="grid grid-cols-[2.8rem_1fr_1.25rem] items-center gap-1.5 text-[0.65rem]"><span>{muscle}</span><div className="h-1.5 overflow-hidden rounded-full bg-surface-2"><div className="h-full rounded-full" style={{ width: `${(count / maxCoverage) * 100}%`, backgroundColor: COLORS[muscle] }} /></div><span className="numeral rounded-full bg-surface-2 text-center">{count}</span></div>; })}</div>
         {data.coverage.untouched.length > 0 && <p className="mt-2 truncate text-[0.65rem] text-[#fbbf24]">Not hit: {data.coverage.untouched.join(", ")}</p>}
       </Card>
 

@@ -116,6 +116,25 @@ async def fetch_workouts_in_range(start: _date, end: _date) -> list[dict[str, An
     return [notion_api.workout_from_page(page) for page in pages]
 
 
+async def fetch_last_workout(exercise: str) -> dict[str, Any] | None:
+    """Most recent Fitness Tracker row matching an exercise exactly."""
+    clean_exercise = domain.validate_name(exercise, "exercise")
+    pages = await notion_client().query_data_source(
+        CONFIG.fitness_ds_id,
+        filter={
+            "property": notion_api.P_EXERCISE_NAME,
+            "title": {"equals": clean_exercise},
+        },
+        sorts=[
+            {"property": notion_api.P_DATE_INPUT, "direction": "descending"},
+            {"timestamp": "created_time", "direction": "descending"},
+        ],
+    )
+    if not pages:
+        return None
+    return notion_api.workout_from_page(pages[0])
+
+
 async def fetch_prs() -> list[dict[str, Any]]:
     pages = await notion_client().query_data_source(
         CONFIG.maxreps_ds_id,
@@ -1038,6 +1057,19 @@ async def api_log_workout(request: Request) -> Any:
         workout_type=body.get("workout_type"),
         day_value=body.get("date"),
     )
+
+
+@api_route("/api/workouts/last", methods=["GET"])
+async def api_last_workout(request: Request) -> Any:
+    row = await fetch_last_workout(request.query_params.get("exercise", ""))
+    if row is None:
+        return {"sets": []}
+    return {
+        "exercise": row["exercise"],
+        "sets": row["sets"][:4],
+        "date": row["date"],
+        "workout_type": row["workout_type"],
+    }
 
 
 @api_route("/api/workouts/{date}", methods=["GET"])

@@ -18,11 +18,13 @@ import type {
   Meal,
   Preset,
   WorkoutEntry,
+  WorkoutPlanPayload,
   WorkoutSet,
 } from "@/lib/types";
 
 const TODAY_KEY = "/api/macro/today";
 const EXERCISES_KEY = "/api/macro/exercises";
+const PLAN_KEY = "/api/macro/plan";
 const POLL_MS = 15_000;
 
 async function fetcher<T>(url: string): Promise<T> {
@@ -88,13 +90,19 @@ export default function TodayPage() {
   );
   const exercises = exercisesData?.exercises ?? [];
 
-  const { data: workoutsData, mutate: mutateWorkouts } = useSWR<
-    { date: string; day_label: string; workouts: WorkoutEntry[] }
-  >(
-    () => (data ? `/api/macro/workouts/${data.date}` : null),
-    fetcher,
-    { refreshInterval: POLL_MS, revalidateOnFocus: true },
-  );
+  const { data: planData } = useSWR<WorkoutPlanPayload>(PLAN_KEY, fetcher, {
+    revalidateOnFocus: false,
+    dedupingInterval: 300_000,
+  });
+
+  const { data: workoutsData, mutate: mutateWorkouts } = useSWR<{
+    date: string;
+    day_label: string;
+    workouts: WorkoutEntry[];
+  }>(() => (data ? `/api/macro/workouts/${data.date}` : null), fetcher, {
+    refreshInterval: POLL_MS,
+    revalidateOnFocus: true,
+  });
   const workouts = workoutsData?.workouts ?? [];
 
   const [tab, setTab] = useState<"macros" | "workout">("macros");
@@ -159,7 +167,9 @@ export default function TodayPage() {
         // Roll back to the pre-tap numbers, then say why.
         await mutate(data, { revalidate: false });
         setActionError(
-          caught instanceof Error ? caught.message : "Could not log that preset",
+          caught instanceof Error
+            ? caught.message
+            : "Could not log that preset",
         );
       } finally {
         setPendingPresets((names) =>
@@ -195,7 +205,9 @@ export default function TodayPage() {
       } catch (caught) {
         await mutate(data, { revalidate: false });
         setActionError(
-          caught instanceof Error ? caught.message : "Could not delete that entry",
+          caught instanceof Error
+            ? caught.message
+            : "Could not delete that entry",
         );
       } finally {
         setPendingMeals((ids) => ids.filter((id) => id !== meal.id));
@@ -252,7 +264,9 @@ export default function TodayPage() {
         setWorkoutRevision((value) => value + 1);
       } catch (caught) {
         setWorkoutError(
-          caught instanceof Error ? caught.message : "Could not delete that entry",
+          caught instanceof Error
+            ? caught.message
+            : "Could not delete that entry",
         );
       } finally {
         setPendingWorkouts((ids) => ids.filter((id) => id !== workout.id));
@@ -361,6 +375,7 @@ export default function TodayPage() {
 
           <WorkoutLogger
             exercises={exercises}
+            todayPlan={planData?.upcoming[0]}
             pending={pendingWorkouts.length > 0}
             error={workoutError}
             onLog={logWorkoutEntry}

@@ -101,6 +101,13 @@ export type WorkoutsPayload = {
   workouts: WorkoutEntry[];
 };
 
+export type LastWorkoutPayload = {
+  exercise?: string;
+  sets: WorkoutSet[];
+  date?: string;
+  workout_type?: string[];
+};
+
 export type WorkoutPlanPayload = {
   rotation: string[];
   last_workout: string | null;

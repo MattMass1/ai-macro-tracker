@@ -15,6 +15,7 @@ import {
   getBrief,
   getDay,
   getExercises,
+  getLastWorkout,
   getPlan,
   getPresets,
   getToday,
@@ -25,11 +26,7 @@ import {
   logWorkout,
   postBrief,
 } from "@/lib/api";
-import type {
-  LogMealBody,
-  LogPresetBody,
-  LogWorkoutBody,
-} from "@/lib/types";
+import type { LogMealBody, LogPresetBody, LogWorkoutBody } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,7 +35,10 @@ type Context = { params: Promise<{ path: string[] }> };
 
 function fail(error: unknown) {
   if (error instanceof ApiError) {
-    return NextResponse.json({ error: error.message }, { status: error.status });
+    return NextResponse.json(
+      { error: error.message },
+      { status: error.status },
+    );
   }
   const message =
     error instanceof Error ? error.message : "Unexpected proxy failure";
@@ -73,7 +73,16 @@ export async function GET(_request: Request, context: Context) {
       return NextResponse.json(await getBrief(date), { headers: noStore });
     }
     if (path.length === 2 && path[0] === "workouts") {
-      return NextResponse.json(await getWorkouts(path[1]), { headers: noStore });
+      if (path[1] === "last") {
+        const exercise =
+          new URL(_request.url).searchParams.get("exercise") ?? "";
+        return NextResponse.json(await getLastWorkout(exercise), {
+          headers: noStore,
+        });
+      }
+      return NextResponse.json(await getWorkouts(path[1]), {
+        headers: noStore,
+      });
     }
     return NextResponse.json({ error: "Unknown endpoint" }, { status: 404 });
   } catch (error) {

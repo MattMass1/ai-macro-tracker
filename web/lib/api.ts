@@ -10,6 +10,7 @@ import type {
   BriefPayload,
   DayPayload,
   KnownExercise,
+  LastWorkoutPayload,
   LogMealBody,
   LogPresetBody,
   LogWorkoutBody,
@@ -156,8 +157,13 @@ export function getWorkoutStats(): Promise<WorkoutStatsPayload> {
 
 /** GET /api/workouts/{date} — workout entries for one YYYY-MM-DD. */
 export function getWorkouts(date: string): Promise<WorkoutsPayload> {
-  return call<WorkoutsPayload>(
-    `/api/workouts/${encodeURIComponent(date)}`,
+  return call<WorkoutsPayload>(`/api/workouts/${encodeURIComponent(date)}`);
+}
+
+/** GET /api/workouts/last — most recent entry for an exact exercise name. */
+export function getLastWorkout(exercise: string): Promise<LastWorkoutPayload> {
+  return call<LastWorkoutPayload>(
+    `/api/workouts/last?exercise=${encodeURIComponent(exercise)}`,
   );
 }
 

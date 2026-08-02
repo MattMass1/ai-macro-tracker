@@ -1,12 +1,17 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
-import type { KnownExercise, WorkoutSet } from "@/lib/types";
+import type {
+  KnownExercise,
+  LastWorkoutPayload,
+  WorkoutSet,
+} from "@/lib/types";
 import { WORKOUT_TYPES } from "@/lib/types";
 
 type Props = {
   exercises: KnownExercise[];
+  todayPlan?: { type: string; exercises: { name: string }[] };
   pending: boolean;
   error: string | null;
   onLog: (exercise: string, sets: WorkoutSet[], workoutType: string) => void;
@@ -37,6 +42,7 @@ function typeEmoji(workoutType: string): string {
  */
 export default function WorkoutLogger({
   exercises,
+  todayPlan,
   pending,
   error,
   onLog,
@@ -44,6 +50,10 @@ export default function WorkoutLogger({
   const [exercise, setExercise] = useState("");
   const [workoutType, setWorkoutType] = useState<string>("Push");
   const [sets, setSets] = useState<WorkoutSet[]>([{ ...EMPTY_SET }]);
+  const [lastWorkout, setLastWorkout] = useState<LastWorkoutPayload | null>(
+    null,
+  );
+  const requestId = useRef(0);
 
   const known = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -62,10 +72,33 @@ export default function WorkoutLogger({
     return [...groups.entries()];
   }, [exercises]);
 
-  const pickExercise = (name: string) => {
+  const loadLastWorkout = async (name: string, fill: boolean) => {
+    const currentRequest = ++requestId.current;
+    setLastWorkout(null);
+    try {
+      const response = await fetch(
+        `/api/macro/workouts/last?exercise=${encodeURIComponent(name)}`,
+        { cache: "no-store" },
+      );
+      if (!response.ok) return;
+      const payload = (await response.json()) as LastWorkoutPayload;
+      if (currentRequest !== requestId.current) return;
+      const capped = payload.sets.slice(0, 4);
+      setLastWorkout(capped.length > 0 ? { ...payload, sets: capped } : null);
+      if (fill && capped.length > 0) setSets(capped);
+    } catch {
+      // Last-session lookup is optional and should never block logging.
+    }
+  };
+
+  const pickExercise = (name: string, plannedType?: string, fill = false) => {
     setExercise(name);
-    const types = known.get(name);
-    if (types && types.length > 0) setWorkoutType(types[0]);
+    if (plannedType) setWorkoutType(plannedType);
+    else {
+      const types = known.get(name);
+      if (types && types.length > 0) setWorkoutType(types[0]);
+    }
+    void loadLastWorkout(name, fill);
   };
 
   const updateSet = (index: number, field: keyof WorkoutSet, value: string) => {
@@ -77,13 +110,13 @@ export default function WorkoutLogger({
   };
 
   const addSet = () => {
-    setSets((prev) =>
-      prev.length < 4 ? [...prev, { ...EMPTY_SET }] : prev,
-    );
+    setSets((prev) => (prev.length < 4 ? [...prev, { ...EMPTY_SET }] : prev));
   };
 
   const removeSet = (index: number) => {
-    setSets((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== index) : prev));
+    setSets((prev) =>
+      prev.length > 1 ? prev.filter((_, i) => i !== index) : prev,
+    );
   };
 
   const hasValues = sets.some((set) => set.weight > 0 || set.reps > 0);
@@ -104,9 +137,40 @@ export default function WorkoutLogger({
         Log an exercise
       </h2>
 
-      <label className="mb-1 block text-xs text-muted" htmlFor="exercise">
-        Exercise
-      </label>
+      {todayPlan && todayPlan.exercises.length > 0 && (
+        <div className="mb-3">
+          <p className="mb-1.5 text-xs font-semibold text-muted">
+            Today: {todayPlan.type.toUpperCase()}
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {todayPlan.exercises.map(({ name }) => (
+              <button
+                key={name}
+                type="button"
+                onClick={() => pickExercise(name, todayPlan.type, true)}
+                className="rounded-full bg-surface-2 px-2.5 py-1.5 text-xs active:opacity-70"
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mb-1 flex items-center justify-between">
+        <label className="block text-xs text-muted" htmlFor="exercise">
+          Exercise
+        </label>
+        {lastWorkout && (
+          <button
+            type="button"
+            onClick={() => setSets(lastWorkout.sets.map((set) => ({ ...set })))}
+            className="text-xs font-semibold text-protein"
+          >
+            Fill last time
+          </button>
+        )}
+      </div>
       <input
         id="exercise"
         list="known-exercises"
@@ -114,7 +178,13 @@ export default function WorkoutLogger({
         onChange={(e) => {
           setExercise(e.target.value);
           const types = known.get(e.target.value);
-          if (types && types.length > 0) setWorkoutType(types[0]);
+          if (types && types.length > 0) {
+            setWorkoutType(types[0]);
+            void loadLastWorkout(e.target.value, false);
+          } else {
+            requestId.current += 1;
+            setLastWorkout(null);
+          }
         }}
         placeholder="Barbell Bench Press"
         className="mb-3 w-full rounded-xl bg-surface-2 px-3 py-2.5 text-sm outline-none placeholder:text-muted/50 focus:ring-2 focus:ring-protein/40"
@@ -195,7 +265,10 @@ export default function WorkoutLogger({
       </div>
 
       {error && (
-        <p role="alert" className="mt-3 rounded-xl border border-over/40 bg-over/10 p-2.5 text-xs text-over">
+        <p
+          role="alert"
+          className="mt-3 rounded-xl border border-over/40 bg-over/10 p-2.5 text-xs text-over"
+        >
           {error}
         </p>
       )}

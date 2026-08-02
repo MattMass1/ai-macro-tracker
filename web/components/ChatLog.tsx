@@ -8,12 +8,31 @@ type ChatMessage = { id: number; role: "user" | "assistant"; text: string };
 
 export default function ChatLog({ onLogged }: { onLogged: () => void | Promise<void> }) {
   const [open, setOpen] = useState(false);
+  const [rendered, setRendered] = useState(false);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([
     { id: 0, role: "assistant", text: "Tell me what you ate and I’ll log it." },
   ]);
   const endRef = useRef<HTMLDivElement>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function showSheet() {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    setRendered(true);
+    requestAnimationFrame(() => requestAnimationFrame(() => setOpen(true)));
+  }
+
+  function hideSheet() {
+    setOpen(false);
+    closeTimer.current = setTimeout(() => setRendered(false), 300);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (closeTimer.current) clearTimeout(closeTimer.current);
+    };
+  }, []);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -64,14 +83,23 @@ export default function ChatLog({ onLogged }: { onLogged: () => void | Promise<v
 
   return (
     <>
-      {open && (
-        <div className="fixed inset-0 z-40 bg-black/45" onClick={() => setOpen(false)}>
+      {rendered && (
+        <div
+          className={`fixed inset-0 z-40 transition-colors duration-300 ${
+            open ? "bg-black/45" : "bg-black/0"
+          }`}
+          onClick={hideSheet}
+        >
           <section
             role="dialog"
+            aria-modal="true"
             aria-label="Chat and log food"
-            className="safe-x safe-bottom absolute inset-x-0 bottom-0 mx-auto flex max-h-[60vh] max-w-md flex-col rounded-t-2xl border border-line bg-surface pt-4 shadow-2xl"
+            className={`sheet-safe-area absolute inset-x-0 bottom-0 mx-auto flex max-h-[min(60dvh,calc(100dvh-env(safe-area-inset-top)-1rem))] max-w-md flex-col rounded-t-3xl border border-line bg-surface pt-2 shadow-2xl transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] ${
+              open ? "translate-y-0" : "translate-y-full"
+            }`}
             onClick={(event) => event.stopPropagation()}
           >
+            <div className="mx-auto mb-2 h-[5px] w-9 shrink-0 rounded-full bg-muted/40" aria-hidden="true" />
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <h2 className="font-semibold">Chat &amp; Log</h2>
@@ -80,14 +108,14 @@ export default function ChatLog({ onLogged }: { onLogged: () => void | Promise<v
               <button
                 type="button"
                 aria-label="Close chat"
-                onClick={() => setOpen(false)}
+                onClick={hideSheet}
                 className="min-h-10 min-w-10 rounded-full text-xl text-muted"
               >
                 ×
               </button>
             </div>
 
-            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pb-3">
+            <div className="momentum-scroll min-h-0 flex-1 space-y-2 overflow-y-auto pb-3 overscroll-contain">
               {messages.map((message) => (
                 <div
                   key={message.id}
@@ -115,7 +143,7 @@ export default function ChatLog({ onLogged }: { onLogged: () => void | Promise<v
                 placeholder="had a Barebells and coffee"
                 aria-label="Food message"
                 disabled={sending}
-                className="min-w-0 flex-1 rounded-xl bg-surface-2 px-3 text-sm outline-none placeholder:text-muted focus:ring-1 focus:ring-protein"
+                className="min-w-0 flex-1 rounded-xl bg-surface-2 px-3 text-base outline-none placeholder:text-muted focus:ring-1 focus:ring-protein/70"
               />
               <button
                 type="submit"
@@ -132,8 +160,8 @@ export default function ChatLog({ onLogged }: { onLogged: () => void | Promise<v
       <button
         type="button"
         aria-label="Open Chat and Log"
-        onClick={() => setOpen(true)}
-        className="fixed bottom-[max(1.25rem,env(safe-area-inset-bottom))] right-[max(1.25rem,env(safe-area-inset-right))] z-30 flex h-14 w-14 items-center justify-center rounded-full bg-protein text-2xl text-black shadow-xl active:scale-95"
+        onClick={showSheet}
+        className="fixed bottom-[calc(env(safe-area-inset-bottom)+1.25rem)] right-[max(1.25rem,env(safe-area-inset-right))] z-30 flex h-14 w-14 items-center justify-center rounded-full bg-protein text-2xl text-black shadow-xl active:scale-[0.97]"
       >
         💬
       </button>

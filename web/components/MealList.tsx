@@ -68,7 +68,9 @@ export default function MealList({ meals, pending, onDelete }: Props) {
           return (
             <li
               key={meal.id}
-              className={`rounded-2xl bg-surface p-3 ${busy ? "opacity-50" : ""}`}
+              className={`rounded-2xl bg-surface p-3 transition-[transform,box-shadow] duration-150 active:scale-[0.99] ${
+                asking ? "ring-1 ring-over/50" : ""
+              } ${busy ? "opacity-50" : ""}`}
               onPointerDown={() => startPress(meal.id)}
               onPointerUp={cancelPress}
               onPointerLeave={cancelPress}

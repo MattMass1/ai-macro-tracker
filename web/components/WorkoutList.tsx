@@ -70,7 +70,7 @@ export default function WorkoutList({ workouts, pending, onDelete }: Props) {
               onPointerUp={cancelPress}
               onPointerLeave={cancelPress}
               onContextMenu={(e) => e.preventDefault()}
-              className={`rounded-2xl bg-surface p-3 ${
+              className={`rounded-2xl bg-surface p-3 transition-[transform,box-shadow] duration-150 active:scale-[0.99] ${
                 confirmingThis ? "ring-2 ring-over/60" : ""
               }`}
             >

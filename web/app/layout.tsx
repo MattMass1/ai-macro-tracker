@@ -23,6 +23,7 @@ export const metadata: Metadata = {
   other: {
     "apple-mobile-web-app-capable": "yes",
     "apple-mobile-web-app-status-bar-style": "black-translucent",
+    "apple-touch-fullscreen": "yes",
     "mobile-web-app-capable": "yes",
   },
 };

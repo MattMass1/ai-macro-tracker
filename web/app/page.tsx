@@ -326,8 +326,10 @@ export default function TodayPage() {
             key={key}
             type="button"
             onClick={() => setTab(key)}
-            className={`min-h-10 rounded-xl text-sm font-semibold transition-colors ${
-              tab === key ? "bg-surface-2 text-protein" : "text-muted"
+            className={`relative min-h-11 rounded-xl text-sm font-semibold ${
+              tab === key
+                ? "bg-surface-2 text-protein shadow-sm after:absolute after:inset-x-8 after:bottom-1 after:h-0.5 after:rounded-full after:bg-protein"
+                : "text-muted"
             }`}
           >
             {key === "macros" ? "🥗 Macros" : "💪 Workout"}

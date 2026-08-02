@@ -197,7 +197,7 @@ export default function WorkoutLogger({
           }
         }}
         placeholder="Barbell Bench Press"
-        className="mb-3 w-full rounded-xl bg-surface-2 px-3 py-2.5 text-sm outline-none placeholder:text-muted/50 focus:ring-2 focus:ring-protein/40"
+        className="mb-3 w-full rounded-xl bg-surface-2 px-3 py-2.5 text-base outline-none placeholder:text-muted/50 focus:ring-2 focus:ring-protein/40"
       />
       <datalist id="known-exercises">
         {grouped.map(([type, names]) => (
@@ -256,7 +256,7 @@ export default function WorkoutLogger({
               onChange={(e) => updateSet(index, "weight", e.target.value)}
               placeholder="lbs"
               aria-label={`Set ${index + 1} weight`}
-              className="min-w-0 flex-1 rounded-xl bg-surface-2 px-3 py-2.5 text-sm outline-none placeholder:text-muted/50 focus:ring-2 focus:ring-protein/40"
+              className="min-w-0 flex-1 rounded-xl bg-surface-2 px-3 py-2.5 text-base outline-none placeholder:text-muted/50 focus:ring-2 focus:ring-protein/40"
             />
             <span className="text-xs text-muted">×</span>
             <input
@@ -265,7 +265,7 @@ export default function WorkoutLogger({
               onChange={(e) => updateSet(index, "reps", e.target.value)}
               placeholder="reps"
               aria-label={`Set ${index + 1} reps`}
-              className="min-w-0 flex-1 rounded-xl bg-surface-2 px-3 py-2.5 text-sm outline-none placeholder:text-muted/50 focus:ring-2 focus:ring-protein/40"
+              className="min-w-0 flex-1 rounded-xl bg-surface-2 px-3 py-2.5 text-base outline-none placeholder:text-muted/50 focus:ring-2 focus:ring-protein/40"
             />
             {sets.length > 1 && (
               <button

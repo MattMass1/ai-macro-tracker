@@ -14,7 +14,11 @@ type Props = {
   todayPlan?: { type: string; exercises: { name: string }[] };
   pending: boolean;
   error: string | null;
-  onLog: (exercise: string, sets: WorkoutSet[], workoutType: string) => void;
+  onLog: (
+    exercise: string,
+    sets: WorkoutSet[],
+    workoutType: string,
+  ) => Promise<boolean>;
 };
 
 const EMPTY_SET: WorkoutSet = { weight: 0, reps: 0 };
@@ -72,7 +76,7 @@ export default function WorkoutLogger({
     return [...groups.entries()];
   }, [exercises]);
 
-  const loadLastWorkout = async (name: string, fill: boolean) => {
+  const loadLastWorkout = async (name: string) => {
     const currentRequest = ++requestId.current;
     setLastWorkout(null);
     try {
@@ -85,20 +89,20 @@ export default function WorkoutLogger({
       if (currentRequest !== requestId.current) return;
       const capped = payload.sets.slice(0, 4);
       setLastWorkout(capped.length > 0 ? { ...payload, sets: capped } : null);
-      if (fill && capped.length > 0) setSets(capped);
     } catch {
       // Last-session lookup is optional and should never block logging.
     }
   };
 
-  const pickExercise = (name: string, plannedType?: string, fill = false) => {
+  const pickExercise = (name: string, plannedType?: string) => {
     setExercise(name);
+    setSets([{ ...EMPTY_SET }]);
     if (plannedType) setWorkoutType(plannedType);
     else {
       const types = known.get(name);
       if (types && types.length > 0) setWorkoutType(types[0]);
     }
-    void loadLastWorkout(name, fill);
+    void loadLastWorkout(name);
   };
 
   const updateSet = (index: number, field: keyof WorkoutSet, value: string) => {
@@ -121,14 +125,20 @@ export default function WorkoutLogger({
 
   const hasValues = sets.some((set) => set.weight > 0 || set.reps > 0);
 
-  const submit = () => {
+  const submit = async () => {
     if (!exercise.trim()) return;
     if (!hasValues) return;
-    onLog(
+    const logged = await onLog(
       exercise.trim(),
       sets.filter((set) => set.weight > 0 || set.reps > 0),
       workoutType,
     );
+    if (logged) {
+      requestId.current += 1;
+      setExercise("");
+      setSets([{ ...EMPTY_SET }]);
+      setLastWorkout(null);
+    }
   };
 
   return (
@@ -147,7 +157,7 @@ export default function WorkoutLogger({
               <button
                 key={name}
                 type="button"
-                onClick={() => pickExercise(name, todayPlan.type, true)}
+                onClick={() => pickExercise(name, todayPlan.type)}
                 className="rounded-full bg-surface-2 px-2.5 py-1.5 text-xs active:opacity-70"
               >
                 {name}
@@ -180,7 +190,7 @@ export default function WorkoutLogger({
           const types = known.get(e.target.value);
           if (types && types.length > 0) {
             setWorkoutType(types[0]);
-            void loadLastWorkout(e.target.value, false);
+            void loadLastWorkout(e.target.value);
           } else {
             requestId.current += 1;
             setLastWorkout(null);
@@ -204,7 +214,14 @@ export default function WorkoutLogger({
           <button
             key={type}
             type="button"
-            onClick={() => setWorkoutType(type)}
+            onClick={() => {
+              if (type === workoutType) return;
+              requestId.current += 1;
+              setWorkoutType(type);
+              setExercise("");
+              setSets([{ ...EMPTY_SET }]);
+              setLastWorkout(null);
+            }}
             className={`min-h-9 rounded-full px-3 text-xs font-semibold transition-colors ${
               workoutType === type
                 ? "bg-protein text-black"

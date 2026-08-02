@@ -13,9 +13,12 @@ import os
 import sys
 import tempfile
 import asyncio
+import re
 from datetime import date as _date, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
+
+import httpx  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -315,7 +318,7 @@ async def write_workout(
 async def day_payload(
     day: _date,
     include_presets: bool = False,
-    ensure: Mapping[str, Any] | None = None,
+    ensure: Mapping[str, Any] | list[Mapping[str, Any]] | None = None,
     exclude: str | None = None,
 ) -> dict[str, Any]:
     """The canonical day view every client renders.
@@ -329,8 +332,9 @@ async def day_payload(
     meals = await fetch_meals(day)
     if exclude:
         meals = [meal for meal in meals if meal["id"] != exclude]
-    if ensure and not any(meal["id"] == ensure["id"] for meal in meals):
-        meals = [dict(ensure), *meals]
+    ensured = ensure if isinstance(ensure, list) else ([ensure] if ensure else [])
+    known_ids = {meal["id"] for meal in meals}
+    meals = [dict(meal) for meal in ensured if meal["id"] not in known_ids] + meals
     targets = await fetch_targets(day)
     totals = domain.sum_macros(meals)
     payload: dict[str, Any] = {
@@ -367,11 +371,14 @@ async def write_meal(
     macro_source: str,
     meal: str | None,
     day_value: str | None,
+    allow_estimate: bool = False,
 ) -> dict[str, Any]:
     """Validate, write one row, and return the day's corrected numbers."""
     clean_name = domain.validate_name(name)
     macros = domain.validate_macros(calories, protein, carbs, fat)
-    source = domain.validate_macro_source(macro_source)
+    source = (macro_source or "").strip() if allow_estimate else domain.validate_macro_source(macro_source)
+    if not source:
+        source = "Chat & Log"
     meal_name = domain.normalize_meal(meal)
     day = domain.resolve_date(day_value)
 
@@ -405,6 +412,88 @@ async def write_meal(
     if warning:
         payload["warning"] = warning
     return payload
+
+
+KNOWN_CHAT_FOODS = """Moe's cookie 170 kcal, 2g protein, 23g carbs, 8g fat
+Fairlife 30g shake 150/30/3/2.5
+Barebells 200/20/21/7
+Rice Krispies Treat 90/1/16/3
+TJ olive oil butter 80/0/0/9
+TJ artisan roll 200/8/38/2
+93/7 ground beef about 42.5 kcal/oz
+sweet potato about 86 kcal/100g
+3 large eggs 216/19/1/14
+McNuggets 10pc 410/24/25/25
+Michelob Ultra 95 kcal, 0g protein, 2.6g carbs, 0g fat"""
+
+
+def _extract_chat_items(content: str) -> tuple[list[Any], str | None]:
+    """Accept a bare JSON array (preferred), fenced JSON, or prose for non-food chat."""
+    cleaned = content.strip()
+    fenced = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", cleaned, re.DOTALL)
+    candidate = fenced.group(1) if fenced else cleaned
+    try:
+        parsed = json.loads(candidate)
+        if isinstance(parsed, list):
+            return parsed, None
+    except (json.JSONDecodeError, TypeError):
+        pass
+    array = re.search(r"\[.*\]", cleaned, re.DOTALL)
+    if array:
+        try:
+            parsed = json.loads(array.group(0))
+            if isinstance(parsed, list):
+                reply = (cleaned[: array.start()] + cleaned[array.end() :]).strip()
+                return parsed, reply or None
+        except json.JSONDecodeError:
+            pass
+    return [], cleaned or None
+
+
+async def parse_chat_message(message: str) -> tuple[list[Any], str | None]:
+    if not CONFIG.nous_access_token:
+        raise MacroError("Chat is not configured yet. Add NOUS_ACCESS_TOKEN to the server environment.")
+    day = domain.effective_date()
+    meals, targets, presets = await asyncio.gather(
+        fetch_meals(day), fetch_targets(day), fetch_presets()
+    )
+    totals = domain.sum_macros(meals)
+    preset_context = [
+        {key: preset[key] for key in ("name", "calories", "protein", "carbs", "fat", "meal")}
+        for preset in presets
+    ]
+    system = f"""You parse food messages for Matthew's macro tracker.
+Current totals: {json.dumps(totals)}. Targets: {json.dumps(targets)}.
+Available presets: {json.dumps(preset_context)}.
+Known foods (values are calories/protein/carbs/fat unless labeled):
+{KNOWN_CHAT_FOODS}
+
+For a food-related message, output ONLY a JSON array with one object per item:
+[{{"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"meal":"Breakfast|Lunch|Dinner|Snack","note":"source"}}]
+Use a matching preset or known-food value when possible. Infer the meal from context and time; default to Snack. For an ambiguous or unknown food, make a reasonable macro estimate and set note exactly to ESTIMATE. Coffee without stated additions is 5 kcal with zero macros. Never add commentary around a food JSON array.
+If the message is a greeting, question, or otherwise not asking to log food, output [] followed by one short plain-text reply. Do not invent food items."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://inference-api.nousresearch.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {CONFIG.nous_access_token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek/deepseek-v4-flash",
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": message},
+                    ],
+                    "temperature": 0.1,
+                },
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+        raise MacroError("I couldn't parse that right now. Please try again in a moment.") from exc
+    return _extract_chat_items(str(content))
 
 
 async def find_preset(preset_name: str) -> dict[str, Any]:
@@ -1003,6 +1092,59 @@ async def api_log(request: Request) -> Any:
         meal=body.get("meal"),
         day_value=body.get("date"),
     )
+
+
+@api_route("/api/chat", methods=["POST"])
+async def api_chat(request: Request) -> Any:
+    body = await _json_body(request)
+    message = body.get("message")
+    if not isinstance(message, str) or not message.strip():
+        raise MacroError("message is required")
+    if len(message.strip()) > 1000:
+        raise MacroError("message must be 1000 characters or fewer")
+
+    raw_items, conversational_reply = await parse_chat_message(message.strip())
+    if not raw_items:
+        current = await day_payload(domain.effective_date())
+        return {
+            "reply": conversational_reply or "Tell me what you ate and I'll log it.",
+            "logged": [],
+            "totals": current["totals"],
+        }
+
+    day = domain.effective_date()
+    validated: list[tuple[str, dict[str, float], str, str]] = []
+    for raw in raw_items[:10]:
+        if not isinstance(raw, dict):
+            raise MacroError("I couldn't understand one of those food items. Please rephrase it.")
+        clean_name = domain.validate_name(str(raw.get("name", "")))
+        macros = domain.validate_macros(
+            raw.get("calories"), raw.get("protein"), raw.get("carbs"), raw.get("fat")
+        )
+        meal_name = domain.normalize_meal(raw.get("meal"))
+        validated.append(
+            (clean_name, macros, str(raw.get("note") or "Chat & Log"), meal_name)
+        )
+
+    logged: list[dict[str, Any]] = []
+    for clean_name, macros, note, meal_name in validated:
+        result = await write_meal(
+            clean_name,
+            macros["calories"], macros["protein"], macros["carbs"], macros["fat"],
+            note, meal_name, day.isoformat(),
+            allow_estimate=True,
+        )
+        logged.append(result["logged"])
+
+    current = await day_payload(day, ensure=logged)
+    names = ", ".join(f'{item["name"]} {item["calories"]:g} kcal ✓' for item in logged)
+    totals = current["totals"]
+    targets = current["targets"]
+    return {
+        "reply": f'Logged {len(logged)} item{"s" if len(logged) != 1 else ""} — {names}. Total now {totals["calories"]:g}/{targets["calories"]:g} kcal.',
+        "logged": logged,
+        "totals": totals,
+    }
 
 
 @api_route("/api/brief", methods=["GET", "POST"])

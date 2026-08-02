@@ -57,6 +57,12 @@ export type LogPresetBody = {
   meal?: string;
 };
 
+export type ChatPayload = {
+  reply: string;
+  logged: Meal[];
+  totals: Macros;
+};
+
 export type WorkoutSet = {
   weight: number;
   reps: number;

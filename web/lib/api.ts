@@ -8,6 +8,7 @@
 
 import type {
   BriefPayload,
+  ChatPayload,
   DayPayload,
   KnownExercise,
   LastWorkoutPayload,
@@ -131,6 +132,16 @@ export function logPreset(body: LogPresetBody): Promise<DayPayload> {
 /** POST /api/log — manual entry with a cited macro source. */
 export function logMeal(body: LogMealBody): Promise<DayPayload> {
   return call<DayPayload>("/api/log", { method: "POST", body });
+}
+
+/** POST /api/chat — parse natural-language food and log the resulting items. */
+export function postChat(message: string): Promise<ChatPayload> {
+  return call<ChatPayload>("/api/chat", { method: "POST", body: { message } });
+}
+
+/** Convenience name for callers treating chat as a request/response operation. */
+export function getChat(message: string): Promise<ChatPayload> {
+  return postChat(message);
 }
 
 /** DELETE /api/meal/{page_id} — archive one entry. */

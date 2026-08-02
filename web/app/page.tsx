@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import useSWR from "swr";
 
 import DailyBrief from "@/components/DailyBrief";
+import ChatLog from "@/components/ChatLog";
 import DayHeader from "@/components/DayHeader";
 import MacroRings from "@/components/MacroRings";
 import MealList from "@/components/MealList";
@@ -218,7 +219,7 @@ export default function TodayPage() {
 
   const logWorkoutEntry = useCallback(
     async (exercise: string, sets: WorkoutSet[], workoutType: string) => {
-      if (!data) return;
+      if (!data) return false;
       setWorkoutError(null);
       const response = await fetch("/api/macro/workout", {
         method: "POST",
@@ -236,10 +237,11 @@ export default function TodayPage() {
           (payload as { error?: string } | null)?.error ??
             `Logging ${exercise} failed (${response.status})`,
         );
-        return;
+        return false;
       }
       await mutateWorkouts();
       setWorkoutRevision((value) => value + 1);
+      return true;
     },
     [data, mutateWorkouts],
   );
@@ -365,9 +367,14 @@ export default function TodayPage() {
           />
 
           <p className="pt-2 text-center text-[0.7rem] text-muted">
-            Day rolls over at 4am. Text Poke to log anything that isn&rsquo;t a
-            preset.
+            Day rolls over at 4am. Use Chat &amp; Log for anything that isn&rsquo;t a preset.
           </p>
+
+          <ChatLog
+            onLogged={async () => {
+              await mutate();
+            }}
+          />
         </>
       ) : (
         <>

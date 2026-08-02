@@ -24,6 +24,7 @@ import {
   logMeal,
   logPreset,
   logWorkout,
+  postChat,
   postBrief,
 } from "@/lib/api";
 import type { LogMealBody, LogPresetBody, LogWorkoutBody } from "@/lib/types";
@@ -105,6 +106,10 @@ export async function POST(request: Request, context: Context) {
     }
     if (path.length === 1 && path[0] === "log") {
       return NextResponse.json(await logMeal(body as LogMealBody));
+    }
+    if (path.length === 1 && path[0] === "chat") {
+      const chat = body as { message?: unknown };
+      return NextResponse.json(await postChat(chat.message as string));
     }
     if (path.length === 1 && path[0] === "workout") {
       return NextResponse.json(await logWorkout(body as LogWorkoutBody));

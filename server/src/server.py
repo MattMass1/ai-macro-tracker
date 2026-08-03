@@ -972,6 +972,124 @@ def write_brief(text: str, day: _date) -> dict[str, Any]:
         ) from exc
     return {"text": text, "date": day.isoformat()}
 
+
+def _brief_page_title(page: Mapping[str, Any]) -> str:
+    for prop in (page.get("properties") or {}).values():
+        if prop.get("type") == "title" or "title" in prop:
+            return "".join(
+                item.get("plain_text", "") for item in (prop.get("title") or [])
+            ).strip()
+    return ""
+
+
+async def find_brief_page(day: _date) -> dict[str, Any] | None:
+    title = f"Brief {day.isoformat()}"
+    for block in await notion_client().block_children(CONFIG.parent_page_id):
+        if (
+            block.get("type") == "child_page"
+            and (block.get("child_page") or {}).get("title") == title
+        ):
+            return await notion_client().get_page(block["id"])
+
+    # Search is a fallback for API responses where the child block is omitted.
+    parent_id = CONFIG.parent_page_id.replace("-", "")
+    pages = await notion_client().search_pages(title)
+    return next(
+        (
+            page
+            for page in pages
+            if _brief_page_title(page) == title
+            and str((page.get("parent") or {}).get("page_id", "")).replace("-", "")
+            == parent_id
+        ),
+        None,
+    )
+
+
+def _brief_properties(text: str, day: _date) -> dict[str, Any]:
+    return {
+        "title": notion_api.title_prop(f"Brief {day.isoformat()}"),
+        "text": notion_api.rich_text_prop(text),
+        "date": notion_api.date_prop(day),
+    }
+
+
+def _brief_children(text: str, day: _date) -> list[dict[str, Any]]:
+    children: list[dict[str, Any]] = [
+        {
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": notion_api.rich_text(f"date: {day.isoformat()}"),
+                "icon": {"type": "emoji", "emoji": "📅"},
+            },
+        }
+    ]
+    chunks = [text[index : index + 2000] for index in range(0, len(text), 2000)]
+    for chunk in chunks or [""]:
+        children.append(
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": notion_api.rich_text(chunk) if chunk else []},
+            }
+        )
+    return children
+
+
+async def write_brief_to_notion(text: str, day: _date) -> None:
+    client = notion_client()
+    existing = await find_brief_page(day)
+    properties = _brief_properties(text, day)
+    try:
+        if existing:
+            await client.update_page(existing["id"], properties)
+        else:
+            await client.create_page(
+                CONFIG.parent_page_id,
+                properties,
+                parent_type="page_id",
+            )
+        return
+    except NotionError as exc:
+        # Standalone child pages have no schema for custom properties. Notion
+        # rejects `text`/`date`, so retain those values as page content without
+        # requiring the new database that this integration intentionally avoids.
+        if exc.status != 400 or exc.code != "validation_error":
+            raise
+
+    title_only = {"title": properties["title"]}
+    children = _brief_children(text, day)
+    if not existing:
+        await client.create_page(
+            CONFIG.parent_page_id,
+            title_only,
+            children=children,
+            parent_type="page_id",
+        )
+        return
+
+    await client.update_page(existing["id"], title_only)
+    for block in await client.block_children(existing["id"]):
+        await client.delete_block(block["id"])
+    await client.append_children(existing["id"], children)
+
+
+async def read_brief_from_notion(day: _date) -> dict[str, Any]:
+    page = await find_brief_page(day)
+    if not page:
+        return {"text": None, "date": day.isoformat()}
+    if "text" in (page.get("properties") or {}):
+        text = notion_api.read_rich_text(page, "text")
+    else:
+        blocks = await notion_client().block_children(page["id"])
+        text = "".join(
+            "".join(item.get("plain_text", "") for item in block["paragraph"].get("rich_text", []))
+            for block in blocks
+            if block.get("type") == "paragraph"
+        )
+    return {"text": text, "date": day.isoformat()}
+
 CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, X-App-Token",
@@ -1152,14 +1270,25 @@ async def api_brief(request: Request) -> Any:
     if request.method == "GET":
         date_value = request.query_params.get("date")
         day = domain.resolve_date(date_value, "date")
-        return read_brief(day)
+        local = read_brief(day)
+        if local["text"] is not None:
+            return local
+        try:
+            return await read_brief_from_notion(day)
+        except NotionError:
+            return local
 
     body = await _json_body(request)
     text = body.get("text")
     if not isinstance(text, str):
         raise MacroError("text must be a string")
     day = domain.resolve_date(body.get("date"), "date")
-    return write_brief(text, day)
+    result = write_brief(text, day)
+    try:
+        await write_brief_to_notion(text, day)
+    except NotionError:
+        pass
+    return result
 
 
 @api_route("/api/meal/{page_id}", methods=["DELETE"])

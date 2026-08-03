@@ -275,12 +275,15 @@ class NotionClient:
 
     async def create_page(
         self,
-        data_source_id: str,
+        parent_id: str,
         properties: Mapping[str, Any],
         children: list[Mapping[str, Any]] | None = None,
+        parent_type: str = "data_source_id",
     ) -> dict[str, Any]:
+        if parent_type not in {"data_source_id", "page_id"}:
+            raise ValueError(f"Unsupported page parent type: {parent_type}")
         body: dict[str, Any] = {
-            "parent": {"type": "data_source_id", "data_source_id": data_source_id},
+            "parent": {"type": parent_type, parent_type: parent_id},
             "properties": dict(properties),
         }
         if children:
@@ -300,6 +303,9 @@ class NotionClient:
             body["archived"] = archived
         return await self.request("PATCH", f"/pages/{page_id}", body)
 
+    async def get_page(self, page_id: str) -> dict[str, Any]:
+        return await self.request("GET", f"/pages/{page_id}")
+
     async def archive_page(self, page_id: str) -> dict[str, Any]:
         return await self.update_page(page_id, archived=True)
 
@@ -311,6 +317,20 @@ class NotionClient:
             f"/blocks/{page_id}/children",
             {"children": [dict(block) for block in children]},
         )
+
+    async def block_children(self, block_id: str) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            suffix = f"?start_cursor={cursor}&page_size=100" if cursor else "?page_size=100"
+            payload = await self.request("GET", f"/blocks/{block_id}/children{suffix}")
+            results.extend(payload.get("results", []))
+            if not payload.get("has_more") or not payload.get("next_cursor"):
+                return results
+            cursor = payload["next_cursor"]
+
+    async def delete_block(self, block_id: str) -> dict[str, Any]:
+        return await self.request("DELETE", f"/blocks/{block_id}")
 
     # -------------------------- schema / databases ------------------------- #
 
@@ -359,6 +379,25 @@ class NotionClient:
         while True:
             body: dict[str, Any] = {
                 "filter": {"property": "object", "value": "data_source"},
+                "page_size": 100,
+            }
+            if query:
+                body["query"] = query
+            if cursor:
+                body["start_cursor"] = cursor
+            payload = await self.request("POST", "/search", body)
+            results.extend(payload.get("results", []))
+            if not payload.get("has_more") or not payload.get("next_cursor"):
+                return results
+            cursor = payload["next_cursor"]
+
+    async def search_pages(self, query: str = "") -> list[dict[str, Any]]:
+        """Search accessible pages, following `next_cursor` until exhausted."""
+        results: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            body: dict[str, Any] = {
+                "filter": {"property": "object", "value": "page"},
                 "page_size": 100,
             }
             if query:

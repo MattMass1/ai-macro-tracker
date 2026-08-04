@@ -450,9 +450,26 @@ def _extract_chat_items(content: str) -> tuple[list[Any], str | None]:
     return [], cleaned or None
 
 
+def get_fresh_nous_token() -> str:
+    """Resolve the current Nous token without relying on startup-cached config."""
+    try:
+        auth = json.loads(Path("/opt/data/auth.json").read_text(encoding="utf-8"))
+        token = str(auth["credential_pool"]["nous"][0]["access_token"]).strip()
+        if token:
+            return token
+    except (OSError, ValueError, TypeError, KeyError, IndexError):
+        pass
+
+    token = os.environ.get("NOUS_ACCESS_TOKEN", "").strip()
+    if token:
+        return token
+    raise MacroError(
+        "Chat is not configured yet. Add NOUS_ACCESS_TOKEN to the server environment."
+    )
+
+
 async def parse_chat_message(message: str) -> tuple[list[Any], str | None]:
-    if not CONFIG.nous_access_token:
-        raise MacroError("Chat is not configured yet. Add NOUS_ACCESS_TOKEN to the server environment.")
+    nous_access_token = get_fresh_nous_token()
     day = domain.effective_date()
     meals, targets, presets = await asyncio.gather(
         fetch_meals(day), fetch_targets(day), fetch_presets()
@@ -473,24 +490,31 @@ For a food-related message, output ONLY a JSON array with one object per item:
 Use a matching preset or known-food value when possible. Infer the meal from context and time; default to Snack. For an ambiguous or unknown food, make a reasonable macro estimate and set note exactly to ESTIMATE. Coffee without stated additions is 5 kcal with zero macros. Never add commentary around a food JSON array.
 If the message is a greeting, question, or otherwise not asking to log food, output [] followed by one short plain-text reply. Do not invent food items."""
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                "https://inference-api.nousresearch.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {CONFIG.nous_access_token}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "deepseek/deepseek-v4-flash",
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": message},
-                    ],
-                    "temperature": 0.1,
-                },
-            )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
+        for retry_delay in (0.5, 1.5, None):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        "https://inference-api.nousresearch.com/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {nous_access_token}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": "deepseek/deepseek-v4-flash",
+                            "messages": [
+                                {"role": "system", "content": system},
+                                {"role": "user", "content": message},
+                            ],
+                            "temperature": 0.1,
+                        },
+                    )
+                    response.raise_for_status()
+                    content = response.json()["choices"][0]["message"]["content"]
+                break
+            except httpx.TransportError:
+                if retry_delay is None:
+                    raise
+                await asyncio.sleep(retry_delay)
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
         raise MacroError("I couldn't parse that right now. Please try again in a moment.") from exc
     return _extract_chat_items(str(content))

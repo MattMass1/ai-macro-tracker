@@ -60,6 +60,9 @@ class Config:
     parent_page_id: str
     app_shared_token: str
     nous_access_token: str
+    nous_refresh_token: str
+    nous_client_id: str
+    nous_portal_url: str
     local_tz: str
     day_rollover_hour: int
     briefs_dir: Path
@@ -114,6 +117,14 @@ def load_config() -> Config:
         parent_page_id=os.environ.get("PARENT_PAGE_ID", DEFAULT_PARENT_PAGE_ID).strip(),
         app_shared_token=_require("APP_SHARED_TOKEN", missing),
         nous_access_token=nous_access_token,
+        nous_refresh_token=os.environ.get("NOUS_REFRESH_TOKEN", "").strip(),
+        nous_client_id=(
+            os.environ.get("NOUS_CLIENT_ID", "").strip() or "hermes-cli-vps"
+        ),
+        nous_portal_url=(
+            os.environ.get("NOUS_PORTAL_URL", "").strip()
+            or "https://portal.nousresearch.com"
+        ),
         local_tz=os.environ.get("LOCAL_TZ", "America/New_York").strip(),
         day_rollover_hour=int(os.environ.get("DAY_ROLLOVER_HOUR", "4")),
         briefs_dir=Path(os.environ.get("BRIEFS_DIR", "/opt/data/briefs")),

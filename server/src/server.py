@@ -14,6 +14,7 @@ import sys
 import tempfile
 import asyncio
 import re
+import time
 from datetime import date as _date, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
@@ -450,8 +451,16 @@ def _extract_chat_items(content: str) -> tuple[list[Any], str | None]:
     return [], cleaned or None
 
 
-def get_fresh_nous_token() -> str:
-    """Resolve the current Nous token without relying on startup-cached config."""
+_cached_nous_token: str | None = None
+_cached_nous_token_at = 0.0
+_cached_nous_original_token: str | None = None
+_last_nous_refresh_attempt_at = float("-inf")
+_NOUS_REFRESH_MIN_INTERVAL = 10 * 60
+_NOUS_PROACTIVE_REFRESH_AGE = 50 * 60
+
+
+def _original_nous_token() -> str:
+    """Resolve the local-file or environment token without startup caching."""
     try:
         auth = json.loads(Path("/opt/data/auth.json").read_text(encoding="utf-8"))
         token = str(auth["credential_pool"]["nous"][0]["access_token"]).strip()
@@ -468,8 +477,119 @@ def get_fresh_nous_token() -> str:
     )
 
 
+def _live_refresh_token() -> str:
+    """Latest persisted refresh token (rotates on each refresh)."""
+    try:
+        env_path = Path(__file__).resolve().parent.parent / ".env"
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            key, sep, value = raw.partition("=")
+            if sep and key.strip() == "NOUS_REFRESH_TOKEN":
+                return value.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return CONFIG.nous_refresh_token
+
+
+def _persist_nous_refresh_token(new_rt: str) -> None:
+    """Persist a rotated Nous refresh token to server/.env (and Render env).
+
+    Nous rotates the refresh token on every refresh (OAuth 2.1). The in-file
+    copy must track the latest or the next refresh fails with
+    'refresh_token_reused'. Best-effort — never raise.
+    """
+    try:
+        env_path = Path(__file__).resolve().parent.parent / ".env"
+        lines = [
+            ln for ln in env_path.read_text(encoding="utf-8").splitlines()
+            if not ln.startswith("NOUS_REFRESH_TOKEN=")
+        ]
+        lines.append(f"NOUS_REFRESH_TOKEN={new_rt}")
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+
+
+async def get_fresh_nous_token(force_refresh: bool = False) -> str:
+    """Resolve and, when needed, refresh the Nous OAuth access token."""
+    global _cached_nous_token, _cached_nous_token_at
+    global _cached_nous_original_token, _last_nous_refresh_attempt_at
+
+    original_token = _original_nous_token()
+    if (
+        _cached_nous_original_token is not None
+        and original_token != _cached_nous_original_token
+    ):
+        _cached_nous_token = None
+        _cached_nous_token_at = 0.0
+        _cached_nous_original_token = None
+    now = time.monotonic()
+    cached_age = now - _cached_nous_token_at
+    should_refresh = force_refresh or (
+        _cached_nous_token is not None
+        and cached_age >= _NOUS_PROACTIVE_REFRESH_AGE
+    )
+    can_refresh = (
+        bool(CONFIG.nous_refresh_token)
+        and now - _last_nous_refresh_attempt_at >= _NOUS_REFRESH_MIN_INTERVAL
+    )
+
+    if should_refresh and can_refresh:
+        _last_nous_refresh_attempt_at = now
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{CONFIG.nous_portal_url.rstrip('/')}/api/oauth/token",
+                    headers={"x-nous-refresh-token": _live_refresh_token()},
+                    data={
+                        "grant_type": "refresh_token",
+                        "client_id": CONFIG.nous_client_id,
+                    },
+                )
+            if response.status_code == 200:
+                body = response.json()
+                refreshed_token = str(body.get("access_token", "")).strip()
+                if refreshed_token:
+                    _cached_nous_token = refreshed_token
+                    _cached_nous_token_at = time.monotonic()
+                    _cached_nous_original_token = original_token
+                    # Nous rotates the refresh token on every refresh (OAuth
+                    # 2.1 reuse detection) — persist the new one so the chain
+                    # doesn't break on the next refresh.
+                    new_rt = str(body.get("refresh_token", "")).strip()
+                    if new_rt and new_rt != _live_refresh_token():
+                        _persist_nous_refresh_token(new_rt)
+                    return refreshed_token
+            return original_token
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+            return original_token
+
+    if _cached_nous_token is not None and _cached_nous_token_at:
+        return _cached_nous_token
+    return original_token
+
+
+async def _post_nous_chat(token: str, payload: dict[str, Any]) -> httpx.Response:
+    """POST chat payload with the existing transport-error backoff."""
+    for retry_delay in (0.5, 1.5, None):
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                return await client.post(
+                    "https://inference-api.nousresearch.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+        except httpx.TransportError:
+            if retry_delay is None:
+                raise
+            await asyncio.sleep(retry_delay)
+    raise RuntimeError("unreachable")
+
+
 async def parse_chat_message(message: str) -> tuple[list[Any], str | None]:
-    nous_access_token = get_fresh_nous_token()
+    nous_access_token = await get_fresh_nous_token()
     day = domain.effective_date()
     meals, targets, presets = await asyncio.gather(
         fetch_meals(day), fetch_targets(day), fetch_presets()
@@ -490,31 +610,20 @@ For a food-related message, output ONLY a JSON array with one object per item:
 Use a matching preset or known-food value when possible. Infer the meal from context and time; default to Snack. For an ambiguous or unknown food, make a reasonable macro estimate and set note exactly to ESTIMATE. Coffee without stated additions is 5 kcal with zero macros. Never add commentary around a food JSON array.
 If the message is a greeting, question, or otherwise not asking to log food, output [] followed by one short plain-text reply. Do not invent food items."""
     try:
-        for retry_delay in (0.5, 1.5, None):
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.post(
-                        "https://inference-api.nousresearch.com/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {nous_access_token}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": "deepseek/deepseek-v4-flash",
-                            "messages": [
-                                {"role": "system", "content": system},
-                                {"role": "user", "content": message},
-                            ],
-                            "temperature": 0.1,
-                        },
-                    )
-                    response.raise_for_status()
-                    content = response.json()["choices"][0]["message"]["content"]
-                break
-            except httpx.TransportError:
-                if retry_delay is None:
-                    raise
-                await asyncio.sleep(retry_delay)
+        payload = {
+            "model": "deepseek/deepseek-v4-flash",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": message},
+            ],
+            "temperature": 0.1,
+        }
+        response = await _post_nous_chat(nous_access_token, payload)
+        if response.status_code == 401:
+            nous_access_token = await get_fresh_nous_token(force_refresh=True)
+            response = await _post_nous_chat(nous_access_token, payload)
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
         raise MacroError("I couldn't parse that right now. Please try again in a moment.") from exc
     return _extract_chat_items(str(content))

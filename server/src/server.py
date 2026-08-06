@@ -168,7 +168,7 @@ async def fetch_known_exercises() -> list[dict[str, Any]]:
     ]
 
 
-async def last_workout_type() -> str | None:
+async def last_workout_type(before: str | None = None) -> str | None:
     """The workout type of the most recent split-advancing entry.
 
     Uses `Date (user input)` as the primary sort; rows without a date fall
@@ -186,6 +186,8 @@ async def last_workout_type() -> str | None:
 
     pages.sort(key=sort_key, reverse=True)
     for page in pages:
+        if before is not None and sort_key(page) >= before:
+            continue
         types = notion_api.read_multi_select(page, notion_api.P_WORKOUT_TYPE)
         if types:
             workout_type = next(
@@ -209,7 +211,11 @@ async def workout_plan_payload() -> dict[str, Any]:
     `upcoming` lists the next `window` rotation days in order so the user can
     read ahead and never look up exercise names.
     """
-    last_type = await last_workout_type()
+    today = domain.effective_date().isoformat()
+    last_type, rotation_anchor = await asyncio.gather(
+        last_workout_type(),
+        last_workout_type(before=today),
+    )
     known = await fetch_known_exercises()
 
     def exercises_for(workout_type: str) -> list[dict[str, Any]]:
@@ -221,7 +227,7 @@ async def workout_plan_payload() -> dict[str, Any]:
 
     window = 5  # a 5-day training week at most cycles the split twice
     upcoming: list[dict[str, Any]] = []
-    day_type = domain.next_workout_type(last_type)
+    day_type = domain.next_workout_type(rotation_anchor)
     for _ in range(window):
         upcoming.append(
             {

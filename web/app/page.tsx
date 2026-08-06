@@ -92,8 +92,8 @@ export default function TodayPage() {
   const exercises = exercisesData?.exercises ?? [];
 
   const { data: planData } = useSWR<WorkoutPlanPayload>(PLAN_KEY, fetcher, {
-    revalidateOnFocus: false,
-    dedupingInterval: 300_000,
+    refreshInterval: POLL_MS,
+    revalidateOnFocus: true,
   });
 
   const { data: workoutsData, mutate: mutateWorkouts } = useSWR<{

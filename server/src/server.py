@@ -478,7 +478,22 @@ def _original_nous_token() -> str:
 
 
 def _live_refresh_token() -> str:
-    """Latest persisted refresh token (rotates on each refresh)."""
+    """The current refresh token.
+
+    Priority: /opt/data/auth.json first — the Hermes gateway refreshes this
+    file's credential pool on every rotation, so its refresh_token is always
+    current (the gateway rotates the RT hourly, which invalidates any copy we
+    store). Fall back to the persisted server/.env copy (works when the local
+    server refreshed itself and the gateway hasn't touched the chain since),
+    then the startup env value.
+    """
+    try:
+        auth = json.loads(Path("/opt/data/auth.json").read_text(encoding="utf-8"))
+        token = str(auth["credential_pool"]["nous"][0]["refresh_token"]).strip()
+        if token:
+            return token
+    except (OSError, ValueError, TypeError, KeyError, IndexError):
+        pass
     try:
         env_path = Path(__file__).resolve().parent.parent / ".env"
         for raw in env_path.read_text(encoding="utf-8").splitlines():
@@ -491,12 +506,14 @@ def _live_refresh_token() -> str:
 
 
 def _persist_nous_refresh_token(new_rt: str) -> None:
-    """Persist a rotated Nous refresh token to server/.env (and Render env).
+    """Best-effort RT persistence, only when auth.json is NOT available.
 
-    Nous rotates the refresh token on every refresh (OAuth 2.1). The in-file
-    copy must track the latest or the next refresh fails with
-    'refresh_token_reused'. Best-effort — never raise.
+    On the VM, auth.json is the source of truth and the gateway rotates the
+    RT hourly — persisting our rotated copy would fight the gateway and go
+    stale. On Render (no auth.json), the env copy is all we have, so write it.
     """
+    if Path("/opt/data/auth.json").exists():
+        return
     try:
         env_path = Path(__file__).resolve().parent.parent / ".env"
         lines = [

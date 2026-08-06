@@ -169,7 +169,7 @@ async def fetch_known_exercises() -> list[dict[str, Any]]:
 
 
 async def last_workout_type() -> str | None:
-    """The workout type of the most recent Fitness Tracker entry.
+    """The workout type of the most recent split-advancing entry.
 
     Uses `Date (user input)` as the primary sort; rows without a date fall
     back to `created_time`. Old rows only carry Muscle Group, so the type is
@@ -184,18 +184,20 @@ async def last_workout_type() -> str | None:
             or ""
         )
 
-    if not pages:
-        return None
     pages.sort(key=sort_key, reverse=True)
-    newest = pages[0]
-    types = notion_api.read_multi_select(newest, notion_api.P_WORKOUT_TYPE)
-    if types:
-        return next(
-            (t for t in domain.WORKOUT_ROTATION if t in types),
-            types[0],
-        )
-    muscles = notion_api.read_multi_select(newest, notion_api.P_MUSCLE_GROUP)
-    return domain.workout_type_from_muscle(muscles)
+    for page in pages:
+        types = notion_api.read_multi_select(page, notion_api.P_WORKOUT_TYPE)
+        if types:
+            workout_type = next(
+                (t for t in domain.WORKOUT_ROTATION if t in types),
+                types[0],
+            )
+        else:
+            muscles = notion_api.read_multi_select(page, notion_api.P_MUSCLE_GROUP)
+            workout_type = domain.workout_type_from_muscle(muscles)
+        if workout_type in domain.WORKOUT_ROTATION:
+            return workout_type
+    return None
 
 
 async def workout_plan_payload() -> dict[str, Any]:

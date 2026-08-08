@@ -63,6 +63,12 @@ export type ChatPayload = {
   totals: Macros;
 };
 
+export type VisionPayload = Macros & {
+  name: string;
+  note: string;
+  meal?: string;
+};
+
 export type WorkoutSet = {
   weight: number;
   reps: number;

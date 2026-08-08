@@ -20,6 +20,7 @@ import type {
   WorkoutPlanPayload,
   WorkoutStatsPayload,
   WorkoutsPayload,
+  VisionPayload,
 } from "./types";
 
 export class ApiError extends Error {
@@ -137,6 +138,14 @@ export function logMeal(body: LogMealBody): Promise<DayPayload> {
 /** POST /api/chat — parse natural-language food and log the resulting items. */
 export function postChat(message: string): Promise<ChatPayload> {
   return call<ChatPayload>("/api/chat", { method: "POST", body: { message } });
+}
+
+/** POST /api/vision-log — identify food and estimate macros from a photo. */
+export function postVisionLog(image: string, meal?: string): Promise<VisionPayload> {
+  return call<VisionPayload>("/api/vision-log", {
+    method: "POST",
+    body: { image, ...(meal ? { meal } : {}) },
+  });
 }
 
 /** Convenience name for callers treating chat as a request/response operation. */

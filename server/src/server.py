@@ -459,6 +459,24 @@ def _extract_chat_items(content: str) -> tuple[list[Any], str | None]:
     return [], cleaned or None
 
 
+def _extract_vision_result(content: str) -> dict[str, Any]:
+    """Extract the single JSON object requested from the vision response."""
+    cleaned = content.strip()
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
+    candidates = [fenced.group(1)] if fenced else [cleaned]
+    embedded = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if embedded and embedded.group(0) not in candidates:
+        candidates.append(embedded.group(0))
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            continue
+    raise MacroError("I couldn't analyze that photo. Please try another one.")
+
+
 _cached_nous_token: str | None = None
 _cached_nous_token_at = 0.0
 _cached_nous_original_token: str | None = None
@@ -652,6 +670,62 @@ If the message is a greeting, question, or otherwise not asking to log food, out
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
         raise MacroError("I couldn't parse that right now. Please try again in a moment.") from exc
     return _extract_chat_items(str(content))
+
+
+async def analyze_food_image(image: str, meal_hint: str | None = None) -> dict[str, Any]:
+    """Ask the Nous-hosted vision model for one conservative macro estimate."""
+    if not image.startswith("data:image/") or ";base64," not in image:
+        raise MacroError("Please provide a valid food photo.")
+    if len(image.encode("utf-8")) > 2_800_000:
+        raise MacroError("That photo is too large. Please choose a smaller image.")
+
+    meal = domain.normalize_meal(meal_hint) if meal_hint else None
+    system = """You are a food logging assistant. Look at this food image and identify what food or meal is shown. Return ONLY a JSON object with: {"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"note":"ESTIMATE — vision model"}. Estimate macros conservatively — when unsure, estimate low on protein and high on calories. If you cannot identify the food, return {"error":"Could not identify food"}."""
+    prompt = "Identify this food and estimate its macros."
+    if meal:
+        prompt += f" The user says this is for {meal}."
+    payload = {
+        "model": "google/gemini-3.6-flash",
+        "messages": [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": image}},
+                ],
+            },
+        ],
+        "temperature": 0.1,
+    }
+    try:
+        token = await get_fresh_nous_token()
+        response = await _post_nous_chat(token, payload)
+        if response.status_code == 401:
+            token = await get_fresh_nous_token(force_refresh=True)
+            response = await _post_nous_chat(token, payload)
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        result = _extract_vision_result(str(content))
+    except MacroError:
+        raise
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+        raise MacroError(
+            "I couldn't analyze that photo right now. Please try again in a moment."
+        ) from exc
+
+    if result.get("error"):
+        raise MacroError("I couldn't identify food in that photo. Try a clearer angle.")
+    clean_name = domain.validate_name(str(result.get("name", "")))
+    macros = domain.validate_macros(
+        result.get("calories"), result.get("protein"), result.get("carbs"), result.get("fat")
+    )
+    return {
+        "name": clean_name,
+        **macros,
+        "note": "ESTIMATE — vision model",
+        **({"meal": meal} if meal else {}),
+    }
 
 
 async def find_preset(preset_name: str) -> dict[str, Any]:
@@ -1368,6 +1442,19 @@ async def api_log(request: Request) -> Any:
         meal=body.get("meal"),
         day_value=body.get("date"),
     )
+
+
+@api_route("/api/vision-log", methods=["POST"])
+@api_route("/api/macro/vision-log", methods=["POST"])
+async def api_vision_log(request: Request) -> Any:
+    body = await _json_body(request)
+    image = body.get("image")
+    if not isinstance(image, str) or not image:
+        raise MacroError("image is required")
+    meal_hint = body.get("meal")
+    if meal_hint is not None and not isinstance(meal_hint, str):
+        raise MacroError("meal must be a string")
+    return await analyze_food_image(image, meal_hint)
 
 
 @api_route("/api/chat", methods=["POST"])

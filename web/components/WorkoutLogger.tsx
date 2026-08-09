@@ -78,6 +78,11 @@ export default function WorkoutLogger({
     return [...groups.entries()];
   }, [exercises]);
 
+  const chipExercises = useMemo(() => {
+    const fromGroup = grouped.find(([type]) => type === workoutType);
+    return fromGroup ? fromGroup[1] : todayPlan?.exercises.map((e) => e.name) ?? [];
+  }, [grouped, workoutType, todayPlan]);
+
   const loadLastWorkout = async (name: string) => {
     const currentRequest = ++requestId.current;
     setLastWorkout(null);
@@ -151,17 +156,17 @@ export default function WorkoutLogger({
         Log an exercise
       </h2>
 
-      {todayPlan && todayPlan.exercises.length > 0 && (
+      {chipExercises.length > 0 && (
         <div className="mb-3">
           <p className="mb-1.5 text-xs font-semibold text-muted">
-            Today: {todayPlan.type.toUpperCase()}
+            Quick pick: {workoutType.toUpperCase()}
           </p>
           <div className="flex flex-wrap gap-1.5">
-            {todayPlan.exercises.map(({ name }) => (
+            {chipExercises.map((name) => (
               <button
                 key={name}
                 type="button"
-                onClick={() => pickExercise(name, todayPlan.type)}
+                onClick={() => pickExercise(name, workoutType)}
                 className="rounded-full bg-surface-2 px-2.5 py-1.5 text-xs active:opacity-70"
               >
                 {name}

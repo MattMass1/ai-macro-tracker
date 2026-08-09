@@ -35,6 +35,8 @@ function typeEmoji(workoutType: string): string {
       return "💪";
     case "Cardio":
       return "🏃";
+    case "Rest":
+      return "🛌";
     default:
       return "💪";
   }
@@ -124,13 +126,15 @@ export default function WorkoutLogger({
   };
 
   const hasValues = sets.some((set) => set.weight > 0 || set.reps > 0);
+  const isRest = workoutType === "Rest";
 
   const submit = async () => {
-    if (!exercise.trim()) return;
-    if (!hasValues) return;
+    if (!isRest && (!exercise.trim() || !hasValues)) return;
     const logged = await onLog(
-      exercise.trim(),
-      sets.filter((set) => set.weight > 0 || set.reps > 0),
+      isRest ? "Rest Day" : exercise.trim(),
+      isRest
+        ? []
+        : sets.filter((set) => set.weight > 0 || set.reps > 0),
       workoutType,
     );
     if (logged) {
@@ -210,7 +214,7 @@ export default function WorkoutLogger({
       </datalist>
 
       <div className="mb-3 flex flex-wrap gap-2">
-        {WORKOUT_TYPES.map((type) => (
+        {[...WORKOUT_TYPES, "Rest"].map((type) => (
           <button
             key={type}
             type="button"
@@ -233,53 +237,59 @@ export default function WorkoutLogger({
         ))}
       </div>
 
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs text-muted">Sets</span>
-        {sets.length < 4 && (
-          <button
-            type="button"
-            onClick={addSet}
-            className="text-xs font-semibold text-protein"
-          >
-            + Add set
-          </button>
-        )}
-      </div>
-
-      <div className="space-y-2">
-        {sets.map((set, index) => (
-          <div key={index} className="flex items-center gap-2">
-            <span className="numeral w-6 text-xs text-muted">{index + 1}</span>
-            <input
-              inputMode="decimal"
-              value={set.weight || ""}
-              onChange={(e) => updateSet(index, "weight", e.target.value)}
-              placeholder="lbs"
-              aria-label={`Set ${index + 1} weight`}
-              className="min-w-0 flex-1 rounded-xl bg-surface-2 px-3 py-2.5 text-base outline-none placeholder:text-muted/50 focus:ring-2 focus:ring-protein/40"
-            />
-            <span className="text-xs text-muted">×</span>
-            <input
-              inputMode="numeric"
-              value={set.reps || ""}
-              onChange={(e) => updateSet(index, "reps", e.target.value)}
-              placeholder="reps"
-              aria-label={`Set ${index + 1} reps`}
-              className="min-w-0 flex-1 rounded-xl bg-surface-2 px-3 py-2.5 text-base outline-none placeholder:text-muted/50 focus:ring-2 focus:ring-protein/40"
-            />
-            {sets.length > 1 && (
+      {!isRest && (
+        <>
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-xs text-muted">Sets</span>
+            {sets.length < 4 && (
               <button
                 type="button"
-                onClick={() => removeSet(index)}
-                aria-label={`Remove set ${index + 1}`}
-                className="min-h-9 min-w-9 rounded-xl text-muted active:bg-surface-2"
+                onClick={addSet}
+                className="text-xs font-semibold text-protein"
               >
-                ✕
+                + Add set
               </button>
             )}
           </div>
-        ))}
-      </div>
+
+          <div className="space-y-2">
+            {sets.map((set, index) => (
+              <div key={index} className="flex items-center gap-2">
+                <span className="numeral w-6 text-xs text-muted">
+                  {index + 1}
+                </span>
+                <input
+                  inputMode="decimal"
+                  value={set.weight || ""}
+                  onChange={(e) => updateSet(index, "weight", e.target.value)}
+                  placeholder="lbs"
+                  aria-label={`Set ${index + 1} weight`}
+                  className="min-w-0 flex-1 rounded-xl bg-surface-2 px-3 py-2.5 text-base outline-none placeholder:text-muted/50 focus:ring-2 focus:ring-protein/40"
+                />
+                <span className="text-xs text-muted">×</span>
+                <input
+                  inputMode="numeric"
+                  value={set.reps || ""}
+                  onChange={(e) => updateSet(index, "reps", e.target.value)}
+                  placeholder="reps"
+                  aria-label={`Set ${index + 1} reps`}
+                  className="min-w-0 flex-1 rounded-xl bg-surface-2 px-3 py-2.5 text-base outline-none placeholder:text-muted/50 focus:ring-2 focus:ring-protein/40"
+                />
+                {sets.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => removeSet(index)}
+                    aria-label={`Remove set ${index + 1}`}
+                    className="min-h-9 min-w-9 rounded-xl text-muted active:bg-surface-2"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       {error && (
         <p
@@ -292,11 +302,11 @@ export default function WorkoutLogger({
 
       <button
         type="button"
-        disabled={pending || !exercise.trim() || !hasValues}
+        disabled={pending || (!isRest && (!exercise.trim() || !hasValues))}
         onClick={submit}
         className="mt-3 min-h-11 w-full rounded-xl bg-protein px-4 font-semibold text-black active:opacity-80 disabled:opacity-40"
       >
-        {pending ? "Logging…" : "Log workout"}
+        {pending ? "Logging…" : isRest ? "Log rest day" : "Log workout"}
       </button>
     </section>
   );

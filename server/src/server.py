@@ -212,7 +212,7 @@ async def workout_plan_payload() -> dict[str, Any]:
     read ahead and never look up exercise names.
     """
     today = domain.effective_date().isoformat()
-    last_type, rotation_anchor = await asyncio.gather(
+    todays_last, rotation_anchor = await asyncio.gather(
         last_workout_type(),
         last_workout_type(before=today),
     )
@@ -227,7 +227,11 @@ async def workout_plan_payload() -> dict[str, Any]:
 
     window = 5  # a 5-day training week at most cycles the split twice
     upcoming: list[dict[str, Any]] = []
-    day_type = domain.next_workout_type(rotation_anchor)
+    day_type = (
+        todays_last
+        if todays_last in domain.WORKOUT_ROTATION
+        else domain.next_workout_type(rotation_anchor)
+    )
     for _ in range(window):
         upcoming.append(
             {
@@ -239,7 +243,7 @@ async def workout_plan_payload() -> dict[str, Any]:
 
     return {
         "rotation": list(domain.WORKOUT_ROTATION),
-        "last_workout": last_type,
+        "last_workout": todays_last,
         "upcoming": upcoming,
         "core": [
             {"name": ex["name"]}
@@ -298,9 +302,17 @@ async def write_workout(
 ) -> dict[str, Any]:
     """Validate, write one Fitness Tracker row, and return it."""
     clean_exercise = domain.validate_name(exercise, "exercise")
-    cleaned_sets = domain.validate_sets(sets)
-    type_name = domain.normalize_workout_type(workout_type)
-    muscle_group = domain.normalize_muscle_group([type_name])
+    is_rest = str(workout_type or "").strip().lower() == "rest"
+    if is_rest:
+        if sets != []:
+            raise domain.MacroError("rest days require sets=[]")
+        cleaned_sets: list[dict[str, float]] = []
+        type_name = "Rest"
+        muscle_group: list[str] = []
+    else:
+        cleaned_sets = domain.validate_sets(sets)
+        type_name = domain.normalize_workout_type(workout_type)
+        muscle_group = domain.normalize_muscle_group([type_name])
     day = domain.resolve_date(day_value, "date")
 
     page = await notion_client().create_page(

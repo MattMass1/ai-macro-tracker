@@ -643,8 +643,35 @@ async def _post_nous_chat(token: str, payload: dict[str, Any]) -> httpx.Response
     raise RuntimeError("unreachable")
 
 
+def _openai_access_token() -> str:
+    token = os.environ.get("OPENAI_ACCESS_TOKEN", "").strip()
+    if not token:
+        raise MacroError(
+            "Chat is not configured yet. Add OPENAI_ACCESS_TOKEN to the server environment."
+        )
+    return token
+
+
+async def _post_openai_chat(token: str, payload: dict[str, Any]) -> httpx.Response:
+    for retry_delay in (0.5, 1.5, None):
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                return await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+        except httpx.TransportError:
+            if retry_delay is None:
+                raise
+            await asyncio.sleep(retry_delay)
+    raise RuntimeError("unreachable")
+
+
 async def parse_chat_message(message: str) -> tuple[list[Any], str | None]:
-    nous_access_token = await get_fresh_nous_token()
     day = domain.effective_date()
     meals, targets, presets = await asyncio.gather(
         fetch_meals(day), fetch_targets(day), fetch_presets()
@@ -666,17 +693,14 @@ Use a matching preset or known-food value when possible. Infer the meal from con
 If the message is a greeting, question, or otherwise not asking to log food, output [] followed by one short plain-text reply. Do not invent food items."""
     try:
         payload = {
-            "model": "deepseek/deepseek-v4-flash",
+            "model": "gpt-5.6-luna",
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": message},
             ],
-            "temperature": 0.1,
         }
-        response = await _post_nous_chat(nous_access_token, payload)
-        if response.status_code == 401:
-            nous_access_token = await get_fresh_nous_token(force_refresh=True)
-            response = await _post_nous_chat(nous_access_token, payload)
+        token = _openai_access_token()
+        response = await _post_openai_chat(token, payload)
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:

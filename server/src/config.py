@@ -59,10 +59,6 @@ class Config:
     maxreps_ds_id: str
     parent_page_id: str
     app_shared_token: str
-    nous_access_token: str
-    nous_refresh_token: str
-    nous_client_id: str
-    nous_portal_url: str
     local_tz: str
     day_rollover_hour: int
     briefs_dir: Path
@@ -82,31 +78,6 @@ def load_config() -> Config:
     _load_dotenv()
     missing: list[str] = []
 
-    nous_access_token = os.environ.get("NOUS_ACCESS_TOKEN", "").strip()
-    if not nous_access_token:
-        local_env = Path("/opt/data/.env")
-        try:
-            for raw in local_env.read_text(encoding="utf-8").splitlines():
-                key, separator, value = raw.strip().partition("=")
-                if separator and key.strip() == "NOUS_ACCESS_TOKEN":
-                    nous_access_token = value.strip().strip('"').strip("'")
-                    break
-        except OSError:
-            pass
-    if not nous_access_token:
-        auth_path = Path("/opt/data/auth.json")
-        try:
-            import json
-
-            auth = json.loads(auth_path.read_text(encoding="utf-8"))
-            nous_access_token = str(
-                auth.get("credential_pool", {}).get("nous", [{}])[0].get(
-                    "access_token", ""
-                )
-            ).strip()
-        except (OSError, ValueError, TypeError, IndexError, AttributeError):
-            pass
-
     cfg = Config(
         notion_token=_require("NOTION_TOKEN", missing),
         nutrition_ds_id=_require("NUTRITION_DS_ID", missing, DEFAULT_NUTRITION_DS_ID),
@@ -116,15 +87,6 @@ def load_config() -> Config:
         maxreps_ds_id=_require("MAXREPS_DS_ID", missing, DEFAULT_MAXREPS_DS_ID),
         parent_page_id=os.environ.get("PARENT_PAGE_ID", DEFAULT_PARENT_PAGE_ID).strip(),
         app_shared_token=_require("APP_SHARED_TOKEN", missing),
-        nous_access_token=nous_access_token,
-        nous_refresh_token=os.environ.get("NOUS_REFRESH_TOKEN", "").strip(),
-        nous_client_id=(
-            os.environ.get("NOUS_CLIENT_ID", "").strip() or "hermes-cli-vps"
-        ),
-        nous_portal_url=(
-            os.environ.get("NOUS_PORTAL_URL", "").strip()
-            or "https://portal.nousresearch.com"
-        ),
         local_tz=os.environ.get("LOCAL_TZ", "America/New_York").strip(),
         day_rollover_hour=int(os.environ.get("DAY_ROLLOVER_HOUR", "4")),
         briefs_dir=Path(os.environ.get("BRIEFS_DIR", "/opt/data/briefs")),

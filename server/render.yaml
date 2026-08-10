@@ -22,6 +22,8 @@ services:
         value: 3415aac7-7d31-8176-8d64-eb008a13e919
       - key: APP_SHARED_TOKEN
         generateValue: true
+      - key: OPENAI_ACCESS_TOKEN
+        sync: false
       - key: LOCAL_TZ
         value: America/New_York
       - key: DAY_ROLLOVER_HOUR

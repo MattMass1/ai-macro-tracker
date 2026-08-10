@@ -14,7 +14,6 @@ import sys
 import tempfile
 import asyncio
 import re
-import time
 from datetime import date as _date, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
@@ -489,160 +488,6 @@ def _extract_vision_result(content: str) -> dict[str, Any]:
     raise MacroError("I couldn't analyze that photo. Please try another one.")
 
 
-_cached_nous_token: str | None = None
-_cached_nous_token_at = 0.0
-_cached_nous_original_token: str | None = None
-_last_nous_refresh_attempt_at = float("-inf")
-_NOUS_REFRESH_MIN_INTERVAL = 10 * 60
-_NOUS_PROACTIVE_REFRESH_AGE = 50 * 60
-
-
-def _original_nous_token() -> str:
-    """Resolve the local-file or environment token without startup caching."""
-    try:
-        auth = json.loads(Path("/opt/data/auth.json").read_text(encoding="utf-8"))
-        token = str(auth["credential_pool"]["nous"][0]["access_token"]).strip()
-        if token:
-            return token
-    except (OSError, ValueError, TypeError, KeyError, IndexError):
-        pass
-
-    token = os.environ.get("NOUS_ACCESS_TOKEN", "").strip()
-    if token:
-        return token
-    raise MacroError(
-        "Chat is not configured yet. Add NOUS_ACCESS_TOKEN to the server environment."
-    )
-
-
-def _live_refresh_token() -> str:
-    """The current refresh token.
-
-    Priority: /opt/data/auth.json first — the Hermes gateway refreshes this
-    file's credential pool on every rotation, so its refresh_token is always
-    current (the gateway rotates the RT hourly, which invalidates any copy we
-    store). Fall back to the persisted server/.env copy (works when the local
-    server refreshed itself and the gateway hasn't touched the chain since),
-    then the startup env value.
-    """
-    try:
-        auth = json.loads(Path("/opt/data/auth.json").read_text(encoding="utf-8"))
-        token = str(auth["credential_pool"]["nous"][0]["refresh_token"]).strip()
-        if token:
-            return token
-    except (OSError, ValueError, TypeError, KeyError, IndexError):
-        pass
-    try:
-        env_path = Path(__file__).resolve().parent.parent / ".env"
-        for raw in env_path.read_text(encoding="utf-8").splitlines():
-            key, sep, value = raw.partition("=")
-            if sep and key.strip() == "NOUS_REFRESH_TOKEN":
-                return value.strip().strip('"').strip("'")
-    except OSError:
-        pass
-    return CONFIG.nous_refresh_token
-
-
-def _persist_nous_refresh_token(new_rt: str) -> None:
-    """Best-effort RT persistence, only when auth.json is NOT available.
-
-    On the VM, auth.json is the source of truth and the gateway rotates the
-    RT hourly — persisting our rotated copy would fight the gateway and go
-    stale. On Render (no auth.json), the env copy is all we have, so write it.
-    """
-    if Path("/opt/data/auth.json").exists():
-        return
-    try:
-        env_path = Path(__file__).resolve().parent.parent / ".env"
-        lines = [
-            ln for ln in env_path.read_text(encoding="utf-8").splitlines()
-            if not ln.startswith("NOUS_REFRESH_TOKEN=")
-        ]
-        lines.append(f"NOUS_REFRESH_TOKEN={new_rt}")
-        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    except (OSError, ValueError):
-        pass
-
-
-async def get_fresh_nous_token(force_refresh: bool = False) -> str:
-    """Resolve and, when needed, refresh the Nous OAuth access token."""
-    global _cached_nous_token, _cached_nous_token_at
-    global _cached_nous_original_token, _last_nous_refresh_attempt_at
-
-    original_token = _original_nous_token()
-    if (
-        _cached_nous_original_token is not None
-        and original_token != _cached_nous_original_token
-    ):
-        _cached_nous_token = None
-        _cached_nous_token_at = 0.0
-        _cached_nous_original_token = None
-    now = time.monotonic()
-    cached_age = now - _cached_nous_token_at
-    should_refresh = force_refresh or (
-        _cached_nous_token is not None
-        and cached_age >= _NOUS_PROACTIVE_REFRESH_AGE
-    )
-    can_refresh = (
-        bool(CONFIG.nous_refresh_token)
-        and now - _last_nous_refresh_attempt_at >= _NOUS_REFRESH_MIN_INTERVAL
-    )
-
-    if should_refresh and can_refresh:
-        _last_nous_refresh_attempt_at = now
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{CONFIG.nous_portal_url.rstrip('/')}/api/oauth/token",
-                    headers={"x-nous-refresh-token": _live_refresh_token()},
-                    data={
-                        "grant_type": "refresh_token",
-                        "client_id": CONFIG.nous_client_id,
-                    },
-                )
-            if response.status_code == 200:
-                body = response.json()
-                refreshed_token = str(body.get("access_token", "")).strip()
-                if refreshed_token:
-                    _cached_nous_token = refreshed_token
-                    _cached_nous_token_at = time.monotonic()
-                    _cached_nous_original_token = original_token
-                    # Nous rotates the refresh token on every refresh (OAuth
-                    # 2.1 reuse detection) — persist the new one so the chain
-                    # doesn't break on the next refresh.
-                    new_rt = str(body.get("refresh_token", "")).strip()
-                    if new_rt and new_rt != _live_refresh_token():
-                        _persist_nous_refresh_token(new_rt)
-                    return refreshed_token
-            return original_token
-        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-            return original_token
-
-    if _cached_nous_token is not None and _cached_nous_token_at:
-        return _cached_nous_token
-    return original_token
-
-
-async def _post_nous_chat(token: str, payload: dict[str, Any]) -> httpx.Response:
-    """POST chat payload with the existing transport-error backoff."""
-    for retry_delay in (0.5, 1.5, None):
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                return await client.post(
-                    "https://inference-api.nousresearch.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-        except httpx.TransportError:
-            if retry_delay is None:
-                raise
-            await asyncio.sleep(retry_delay)
-    raise RuntimeError("unreachable")
-
-
 def _openai_access_token() -> str:
     token = os.environ.get("OPENAI_ACCESS_TOKEN", "").strip()
     if not token:
@@ -709,7 +554,7 @@ If the message is a greeting, question, or otherwise not asking to log food, out
 
 
 async def analyze_food_image(image: str, meal_hint: str | None = None) -> dict[str, Any]:
-    """Ask the Nous-hosted vision model for one conservative macro estimate."""
+    """Ask OpenAI's vision-capable chat model for one conservative macro estimate."""
     if not image.startswith("data:image/") or ";base64," not in image:
         raise MacroError("Please provide a valid food photo.")
     if len(image.encode("utf-8")) > 2_800_000:
@@ -721,7 +566,7 @@ async def analyze_food_image(image: str, meal_hint: str | None = None) -> dict[s
     if meal:
         prompt += f" The user says this is for {meal}."
     payload = {
-        "model": "google/gemini-3.6-flash",
+        "model": "gpt-5.6-luna",
         "messages": [
             {"role": "system", "content": system},
             {
@@ -732,14 +577,10 @@ async def analyze_food_image(image: str, meal_hint: str | None = None) -> dict[s
                 ],
             },
         ],
-        "temperature": 0.1,
     }
     try:
-        token = await get_fresh_nous_token()
-        response = await _post_nous_chat(token, payload)
-        if response.status_code == 401:
-            token = await get_fresh_nous_token(force_refresh=True)
-            response = await _post_nous_chat(token, payload)
+        token = _openai_access_token()
+        response = await _post_openai_chat(token, payload)
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]
         result = _extract_vision_result(str(content))

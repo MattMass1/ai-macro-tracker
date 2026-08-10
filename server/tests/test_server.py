@@ -207,3 +207,36 @@ async def test_write_sends_exact_property_names_and_a_source_paragraph(lagging):
     assert body["properties"]["Date"] == {"date": {"start": "2026-07-20"}}
     paragraph = body["children"][0]["paragraph"]["rich_text"][0]["text"]["content"]
     assert paragraph == "Macro source: FDA FoodData Central: chicken breast, roasted"
+
+
+async def test_vision_log_uses_openai_token_and_vision_model(monkeypatch):
+    captured = {}
+
+    async def fake_post(token, payload):
+        captured["token"] = token
+        captured["payload"] = payload
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+            json={
+                "choices": [{
+                    "message": {
+                        "content": '{"name":"Chicken bowl","calories":500,"protein":40,"carbs":45,"fat":18}'
+                    }
+                }]
+            },
+        )
+
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "openai-test-token")
+    monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
+
+    result = await srv.analyze_food_image("data:image/jpeg;base64,AAAA", "lunch")
+
+    assert captured["token"] == "openai-test-token"
+    assert captured["payload"]["model"] == "gpt-5.6-luna"
+    assert captured["payload"]["messages"][1]["content"][1] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/jpeg;base64,AAAA"},
+    }
+    assert result["name"] == "Chicken bowl"
+    assert result["meal"] == "Lunch"

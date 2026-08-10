@@ -209,13 +209,41 @@ async def workout_plan_payload() -> dict[str, Any]:
     with the planned type, plus an Abs/core list that can be done any day.
     `upcoming` lists the next `window` rotation days in order so the user can
     read ahead and never look up exercise names.
+
+    Smart rotation adjustment: when the user logs a workout type that differs
+    from what was scheduled, the rotation anchor shifts so tomorrow continues
+    from after the logged type instead of from the stale anchor. This prevents
+    duplicate days (e.g. two Legs days in a row) and keeps the rotation
+    aligned with what the user actually trained.
     """
-    today = domain.effective_date().isoformat()
-    todays_last, rotation_anchor = await asyncio.gather(
-        last_workout_type(),
+    today_date = domain.effective_date()
+    today = today_date.isoformat()
+    todays_workouts, rotation_anchor, known = await asyncio.gather(
+        fetch_workouts(today_date),
         last_workout_type(before=today),
+        fetch_known_exercises(),
     )
-    known = await fetch_known_exercises()
+
+    # ── Extract today's logged workout type ──────────────────────────────
+    todays_logged_type: str | None = None
+    for w in todays_workouts:
+        types = w.get("workout_type") or []
+        for t in types:
+            if t in domain.WORKOUT_ROTATION:
+                todays_logged_type = t
+                break
+        if todays_logged_type is None:
+            muscles = w.get("muscle_group") or []
+            derived = domain.workout_type_from_muscle(muscles)
+            if derived and derived in domain.WORKOUT_ROTATION:
+                todays_logged_type = derived
+        if todays_logged_type:
+            break
+
+    # Also resolve the global last workout for backward-compat `last_workout`
+    todays_last: str | None = todays_logged_type
+    if todays_last is None:
+        todays_last = await last_workout_type()
 
     def exercises_for(workout_type: str) -> list[dict[str, Any]]:
         return [
@@ -226,19 +254,49 @@ async def workout_plan_payload() -> dict[str, Any]:
 
     window = 5  # a 5-day training week at most cycles the split twice
     upcoming: list[dict[str, Any]] = []
-    day_type = (
-        todays_last
-        if todays_last in domain.WORKOUT_ROTATION
-        else domain.next_workout_type(rotation_anchor)
-    )
-    for _ in range(window):
+
+    # ── Smart rotation adjustment ────────────────────────────────────────
+    scheduled = domain.next_workout_type(rotation_anchor)
+    if todays_logged_type and todays_logged_type in domain.WORKOUT_ROTATION:
+        # Today has a rotation-type workout — always show it as the first day.
         upcoming.append(
             {
-                "type": day_type,
-                "exercises": exercises_for(day_type),
+                "type": todays_logged_type,
+                "exercises": exercises_for(todays_logged_type),
             }
         )
-        day_type = domain.next_workout_type(day_type)
+        if todays_logged_type != scheduled:
+            # User logged a different type than scheduled — shift the anchor
+            # so tomorrow starts after what was actually trained today.
+            try:
+                idx = domain.WORKOUT_ROTATION.index(todays_logged_type)
+                day_type = domain.WORKOUT_ROTATION[
+                    (idx + 1) % len(domain.WORKOUT_ROTATION)
+                ]
+            except ValueError:
+                day_type = domain.next_workout_type(todays_logged_type)
+        else:
+            # Logged matches scheduled — advance normally from logged type.
+            day_type = domain.next_workout_type(todays_logged_type)
+        for _ in range(window - 1):
+            upcoming.append(
+                {
+                    "type": day_type,
+                    "exercises": exercises_for(day_type),
+                }
+            )
+            day_type = domain.next_workout_type(day_type)
+    else:
+        # No rotation-type workout logged today — fall back to the anchor.
+        day_type = scheduled
+        for _ in range(window):
+            upcoming.append(
+                {
+                    "type": day_type,
+                    "exercises": exercises_for(day_type),
+                }
+            )
+            day_type = domain.next_workout_type(day_type)
 
     return {
         "rotation": list(domain.WORKOUT_ROTATION),

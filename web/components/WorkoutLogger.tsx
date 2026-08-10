@@ -23,6 +23,23 @@ type Props = {
 
 const EMPTY_SET: WorkoutSet = { weight: 0, reps: 0 };
 
+/** Default abs / cardio exercises always available as quick-pick chips. */
+const ABS_DEFAULTS = [
+  "Crunches",
+  "Hanging Leg Raises",
+  "Planks",
+  "Cable Crunches",
+  "Russian Twists",
+  "Ab Wheel",
+];
+
+const CARDIO_DEFAULTS = [
+  "Treadmill",
+  "Bike",
+  "Stairmaster",
+  "Rowing Machine",
+];
+
 function typeEmoji(workoutType: string): string {
   switch (workoutType) {
     case "Push":
@@ -82,6 +99,22 @@ export default function WorkoutLogger({
     const fromGroup = grouped.find(([type]) => type === workoutType);
     return fromGroup ? fromGroup[1] : todayPlan?.exercises.map((e) => e.name) ?? [];
   }, [grouped, workoutType, todayPlan]);
+
+  /** Abs / cardio chips: defaults merged with known exercises so history
+   *  exercises also appear alongside the static defaults. */
+  const absChips = useMemo(() => {
+    const fromKnown = exercises
+      .filter((ex) => ex.workout_type.includes("Abs"))
+      .map((ex) => ex.name);
+    return [...new Set([...ABS_DEFAULTS, ...fromKnown])];
+  }, [exercises]);
+
+  const cardioChips = useMemo(() => {
+    const fromKnown = exercises
+      .filter((ex) => ex.workout_type.includes("Cardio"))
+      .map((ex) => ex.name);
+    return [...new Set([...CARDIO_DEFAULTS, ...fromKnown])];
+  }, [exercises]);
 
   const loadLastWorkout = async (name: string) => {
     const currentRequest = ++requestId.current;
@@ -172,6 +205,46 @@ export default function WorkoutLogger({
                 {name}
               </button>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Abs / Cardio add-on chips: appear as add-ons for strength days,
+          standalone for Rest, and complementary for Abs/Cardio types. */}
+      {(absChips.length > 0 || cardioChips.length > 0) && (
+        <div className="mb-3">
+          <p className="mb-1.5 text-xs font-semibold text-muted">
+            {workoutType === "Rest"
+              ? "Quick add"
+              : workoutType === "Abs"
+                ? "Add-on · Cardio"
+                : workoutType === "Cardio"
+                  ? "Add-on · Abs"
+                  : "Add-ons"}
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {workoutType !== "Abs" &&
+              absChips.map((name) => (
+                <button
+                  key={`abs-${name}`}
+                  type="button"
+                  onClick={() => pickExercise(name, "Abs")}
+                  className="rounded-full bg-surface-2 px-2.5 py-1.5 text-xs active:opacity-70"
+                >
+                  💪 {name}
+                </button>
+              ))}
+            {workoutType !== "Cardio" &&
+              cardioChips.map((name) => (
+                <button
+                  key={`cardio-${name}`}
+                  type="button"
+                  onClick={() => pickExercise(name, "Cardio")}
+                  className="rounded-full bg-surface-2 px-2.5 py-1.5 text-xs active:opacity-70"
+                >
+                  🏃 {name}
+                </button>
+              ))}
           </div>
         </div>
       )}

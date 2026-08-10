@@ -313,8 +313,10 @@ async def workout_plan_payload() -> dict[str, Any]:
 async def workout_stats_payload() -> dict[str, Any]:
     """One compact read containing every Workout dashboard metric."""
     today = domain.effective_date()
+    week_start = today - timedelta(days=today.weekday())
     rows, prs, plan = await asyncio.gather(
-        fetch_workouts_in_range(today - timedelta(days=6), today),
+        # Keep enough history to calculate a useful qualifying-week streak.
+        fetch_workouts_in_range(week_start - timedelta(days=52 * 7), today),
         fetch_prs(),
         workout_plan_payload(),
     )

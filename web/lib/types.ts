@@ -134,10 +134,12 @@ export type WorkoutStatsPayload = {
     exercises: { name: string; sets: number; weight: string; reps: string }[];
   };
   week: {
+    week_start: string;
+    week_label: string;
     days_logged: number;
     total_sets: number;
     total_volume: number;
-    streak_days: number;
+    streak_weeks: number;
   };
   coverage: {
     muscle_groups: Record<string, number>;

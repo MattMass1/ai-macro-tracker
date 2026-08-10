@@ -85,9 +85,9 @@ export default function WorkoutDashboard({ revision }: { revision: number }) {
       </Card>
 
       <Card>
-        <Label>Week</Label>
+        <div className="flex items-center justify-between gap-2"><Label>Week</Label><span className="numeral text-[0.65rem] text-muted">{data.week.week_label}</span></div>
         <div className="mt-2 flex items-end gap-1.5"><span className="numeral text-4xl font-bold">{data.week.days_logged}</span><span className="pb-1 text-xs text-muted">/ 7 days</span></div>
-        <div className="mt-3 grid grid-cols-2 gap-1 text-xs"><span className="rounded-lg bg-surface-2 p-1.5"><b className="numeral">{data.week.total_sets}</b><br/><span className="text-muted">sets</span></span><span className="rounded-lg bg-surface-2 p-1.5"><b className="numeral">{data.week.streak_days}</b> {data.week.streak_days >= 2 ? "🔥" : ""}<br/><span className="text-muted">streak</span></span></div>
+        <div className="mt-3 grid grid-cols-2 gap-1 text-xs"><span className="rounded-lg bg-surface-2 p-1.5"><b className="numeral">{data.week.total_sets}</b><br/><span className="text-muted">sets</span></span><span className="rounded-lg bg-surface-2 p-1.5"><b className="numeral">{data.week.streak_weeks}</b> {data.week.streak_weeks >= 2 ? "🔥" : ""}<br/><span className="text-muted">week streak</span></span></div>
       </Card>
 
       <Card className="col-span-2 sm:col-span-1">

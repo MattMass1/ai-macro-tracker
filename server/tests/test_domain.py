@@ -70,6 +70,38 @@ def test_day_label():
     assert day_label(date(2026, 1, 5)) == "Monday, January 5"
 
 
+def test_workout_streak_counts_only_completed_monday_to_sunday_weeks():
+    rows = [
+        {"date": "2026-07-27"},
+        {"date": "2026-07-29"},
+        {"date": "2026-08-02"},
+        {"date": "2026-08-03"},
+        {"date": "2026-08-05"},
+        {"date": "2026-08-09"},
+        # The in-progress week qualifies so far, but must not count yet.
+        {"date": "2026-08-10"},
+        {"date": "2026-08-12"},
+        {"date": "2026-08-14"},
+    ]
+
+    assert domain.workout_week_stats(rows, date(2026, 8, 10))["week"]["streak_weeks"] == 2
+    assert domain.workout_week_stats(rows, date(2026, 8, 16))["week"]["streak_weeks"] == 2
+
+
+def test_workout_streak_includes_the_week_after_sunday_has_elapsed():
+    rows = [
+        {"date": "2026-08-03"},
+        {"date": "2026-08-05"},
+        {"date": "2026-08-09"},
+        {"date": "2026-08-10"},
+        {"date": "2026-08-12"},
+        {"date": "2026-08-16"},
+    ]
+
+    assert domain.workout_week_stats(rows, date(2026, 8, 16))["week"]["streak_weeks"] == 1
+    assert domain.workout_week_stats(rows, date(2026, 8, 17))["week"]["streak_weeks"] == 2
+
+
 # --------------------------------------------------------------------------- #
 # Dates
 # --------------------------------------------------------------------------- #

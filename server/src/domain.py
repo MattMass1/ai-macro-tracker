@@ -377,28 +377,59 @@ def validate_sets(sets: Any) -> list[dict[str, float]]:
 def workout_week_stats(
     rows: Iterable[Mapping[str, Any]], today: date
 ) -> dict[str, Any]:
-    """Aggregate a rolling workout week without coupling business rules to Notion."""
+    """Aggregate the current ISO week and its completed qualifying-week streak.
+
+    Weeks run Monday through Sunday. A qualifying week has workouts logged on
+    at least three distinct days. The current week is always in progress and
+    is therefore excluded from the streak until the following Monday.
+    """
     rows = list(rows)
-    logged_dates = {str(row.get("date", ""))[:10] for row in rows if row.get("date")}
-    total_sets = sum(len(row.get("sets") or []) for row in rows)
+    week_start = today - timedelta(days=today.weekday())
+    week_end = week_start + timedelta(days=6)
+
+    dated_rows: list[tuple[date, Mapping[str, Any]]] = []
+    for row in rows:
+        raw_date = str(row.get("date", ""))[:10]
+        if not raw_date:
+            continue
+        try:
+            dated_rows.append((date.fromisoformat(raw_date), row))
+        except ValueError:
+            continue
+
+    current_rows = [
+        row for row_date, row in dated_rows if week_start <= row_date <= week_end
+    ]
+    logged_dates = {
+        row_date.isoformat()
+        for row_date, _row in dated_rows
+        if week_start <= row_date <= week_end
+    }
+    total_sets = sum(len(row.get("sets") or []) for row in current_rows)
     total_volume = sum(
         _num(item.get("weight")) * _num(item.get("reps"))
-        for row in rows
+        for row in current_rows
         for item in (row.get("sets") or [])
     )
 
+    weekly_days: dict[date, set[date]] = {}
+    for row_date, _row in dated_rows:
+        row_week = row_date - timedelta(days=row_date.weekday())
+        weekly_days.setdefault(row_week, set()).add(row_date)
     streak = 0
-    cursor = today
-    while cursor.isoformat() in logged_dates:
+    # The current Monday-Sunday window has not fully elapsed yet, including on
+    # Sunday. Only begin with the immediately preceding completed week.
+    cursor = week_start - timedelta(days=7)
+    while len(weekly_days.get(cursor, set())) >= 3:
         streak += 1
-        cursor -= timedelta(days=1)
+        cursor -= timedelta(days=7)
 
     muscle_days = {group: set() for group in MUSCLE_GROUPS}
     type_days = {workout_type: set() for workout_type in WORKOUT_TYPES}
-    for row in rows:
-        day = str(row.get("date", ""))[:10]
-        if not day:
+    for row_date, row in dated_rows:
+        if not week_start <= row_date <= week_end:
             continue
+        day = row_date.isoformat()
         muscles = list(row.get("muscle_group") or [])
         types = list(row.get("workout_type") or [])
         derived_type = workout_type_from_muscle(muscles)
@@ -414,10 +445,12 @@ def workout_week_stats(
     muscle_counts = {key: len(value) for key, value in muscle_days.items()}
     return {
         "week": {
+            "week_start": week_start.isoformat(),
+            "week_label": f"Week of {week_start.strftime('%b')} {week_start.day}",
             "days_logged": len(logged_dates),
             "total_sets": total_sets,
             "total_volume": round(total_volume, 2),
-            "streak_days": streak,
+            "streak_weeks": streak,
         },
         "coverage": {
             "muscle_groups": muscle_counts,

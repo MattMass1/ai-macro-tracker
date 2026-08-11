@@ -167,6 +167,33 @@ async def fetch_known_exercises() -> list[dict[str, Any]]:
     ]
 
 
+def get_default_exercises_for_type(workout_type: str) -> list[str]:
+    """Exercises that should always be available for a workout type."""
+    defaults = {
+        "Push": [
+            "High-to-Low Cable Fly (cable/rope)",
+            "Cable Decline Press (cable/rope)",
+            "Dips (forward lean, bodyweight)",
+            "Decline DB Bench Press",
+        ],
+        "Abs": [
+            "Crunches",
+            "Hanging Leg Raises",
+            "Planks",
+            "Cable Crunches",
+            "Russian Twists",
+            "Ab Wheel",
+        ],
+        "Cardio": [
+            "Treadmill",
+            "Bike",
+            "Stairmaster",
+            "Rowing Machine",
+        ],
+    }
+    return defaults.get(workout_type, [])
+
+
 async def last_workout_type(before: str | None = None) -> str | None:
     """The workout type of the most recent split-advancing entry.
 
@@ -246,11 +273,13 @@ async def workout_plan_payload() -> dict[str, Any]:
         todays_last = await last_workout_type()
 
     def exercises_for(workout_type: str) -> list[dict[str, Any]]:
-        return [
-            {"name": ex["name"]}
-            for ex in known
-            if workout_type in ex["workout_type"]
-        ]
+        names = get_default_exercises_for_type(workout_type)
+        seen = set(names)
+        for ex in known:
+            if workout_type in ex["workout_type"] and ex["name"] not in seen:
+                names.append(ex["name"])
+                seen.add(ex["name"])
+        return [{"name": name} for name in names]
 
     window = 5  # a 5-day training week at most cycles the split twice
     upcoming: list[dict[str, Any]] = []
@@ -302,11 +331,7 @@ async def workout_plan_payload() -> dict[str, Any]:
         "rotation": list(domain.WORKOUT_ROTATION),
         "last_workout": todays_last,
         "upcoming": upcoming,
-        "core": [
-            {"name": ex["name"]}
-            for ex in known
-            if "Abs" in ex["workout_type"]
-        ],
+        "core": exercises_for("Abs"),
     }
 
 

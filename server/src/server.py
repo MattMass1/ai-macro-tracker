@@ -176,6 +176,14 @@ def get_default_exercises_for_type(workout_type: str) -> list[str]:
             "Dips (forward lean, bodyweight)",
             "Decline DB Bench Press",
         ],
+        "Legs": [
+            "Barbell Squat",
+            "Hack Squats",
+            "Leg Press",
+            "Leg Curls",
+            "Back Extension",
+            "Smith Machine Squats",
+        ],
         "Abs": [
             "Crunches",
             "Hanging Leg Raises",

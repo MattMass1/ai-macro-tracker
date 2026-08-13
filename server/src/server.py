@@ -467,6 +467,7 @@ async def day_payload(
                 "protein": preset["protein"],
                 "carbs": preset["carbs"],
                 "fat": preset["fat"],
+                "fiber": preset["fiber"],
                 "meal": preset["meal"],
                 "sort_order": preset["sort_order"],
             }
@@ -485,10 +486,11 @@ async def write_meal(
     meal: str | None,
     day_value: str | None,
     allow_estimate: bool = False,
+    fiber: Any = 0,
 ) -> dict[str, Any]:
     """Validate, write one row, and return the day's corrected numbers."""
     clean_name = domain.validate_name(name)
-    macros = domain.validate_macros(calories, protein, carbs, fat)
+    macros = domain.validate_macros(calories, protein, carbs, fat, fiber)
     source = (macro_source or "").strip() if allow_estimate else domain.validate_macro_source(macro_source)
     if not source:
         source = "Chat & Log"
@@ -504,6 +506,7 @@ async def write_meal(
             macros["protein"],
             macros["carbs"],
             macros["fat"],
+            macros["fiber"],
             day,
         ),
         children=[notion_api.paragraph_block(f"Macro source: {source}")],
@@ -616,7 +619,7 @@ async def parse_chat_message(message: str) -> tuple[list[Any], str | None]:
     )
     totals = domain.sum_macros(meals)
     preset_context = [
-        {key: preset[key] for key in ("name", "calories", "protein", "carbs", "fat", "meal")}
+        {key: preset[key] for key in ("name", "calories", "protein", "carbs", "fat", "fiber", "meal")}
         for preset in presets
     ]
     system = f"""You parse food messages for Matthew's macro tracker.
@@ -626,7 +629,7 @@ Known foods (values are calories/protein/carbs/fat unless labeled):
 {KNOWN_CHAT_FOODS}
 
 For a food-related message, output ONLY a JSON array with one object per item:
-[{{"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"meal":"Breakfast|Lunch|Dinner|Snack","note":"source"}}]
+[{{"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"meal":"Breakfast|Lunch|Dinner|Snack","note":"source"}}]
 Use a matching preset or known-food value when possible. Infer the meal from context and time; default to Snack. For an ambiguous or unknown food, make a reasonable macro estimate and set note exactly to ESTIMATE. Coffee without stated additions is 5 kcal with zero macros. Never add commentary around a food JSON array.
 If the message is a greeting, question, or otherwise not asking to log food, output [] followed by one short plain-text reply. Do not invent food items."""
     try:
@@ -654,7 +657,7 @@ async def analyze_food_image(image: str, meal_hint: str | None = None) -> dict[s
         raise MacroError("That photo is too large. Please choose a smaller image.")
 
     meal = domain.normalize_meal(meal_hint) if meal_hint else None
-    system = """You are a food logging assistant. Look at this food image and identify what food or meal is shown. Return ONLY a JSON object with: {"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"note":"ESTIMATE — vision model"}. Estimate macros conservatively — when unsure, estimate low on protein and high on calories. If you cannot identify the food, return {"error":"Could not identify food"}."""
+    system = """You are a food logging assistant. Look at this food image and identify what food or meal is shown. Return ONLY a JSON object with: {"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"note":"ESTIMATE — vision model"}. Estimate macros conservatively — when unsure, estimate low on protein and high on calories. If you cannot identify the food, return {"error":"Could not identify food"}."""
     prompt = "Identify this food and estimate its macros."
     if meal:
         prompt += f" The user says this is for {meal}."
@@ -688,7 +691,7 @@ async def analyze_food_image(image: str, meal_hint: str | None = None) -> dict[s
         raise MacroError("I couldn't identify food in that photo. Try a clearer angle.")
     clean_name = domain.validate_name(str(result.get("name", "")))
     macros = domain.validate_macros(
-        result.get("calories"), result.get("protein"), result.get("carbs"), result.get("fat")
+        result.get("calories"), result.get("protein"), result.get("carbs"), result.get("fat"), result.get("fiber", 0)
     )
     return {
         "name": clean_name,
@@ -733,6 +736,7 @@ async def log_preset_servings(
         protein=preset["protein"] * count,
         carbs=preset["carbs"] * count,
         fat=preset["fat"] * count,
+        fiber=preset["fiber"] * count,
         macro_source=f"Meal Preset: {preset['name']}",
         meal=meal or preset["meal"],
         day_value=day_value,
@@ -770,6 +774,7 @@ async def log_meal(
     macro_source: str,
     meal: str = "Snack",
     date: str | None = None,
+    fiber: float = 0,
 ) -> dict[str, Any]:
     """Log one food or meal to the Notion nutrition log and return the day's totals.
 
@@ -797,7 +802,7 @@ async def log_meal(
     number was transcribed wrong.
     """
     return await write_meal(
-        name, calories, protein, carbs, fat, macro_source, meal, date
+        name, calories, protein, carbs, fat, macro_source, meal, date, fiber=fiber
     )
 
 
@@ -845,6 +850,7 @@ async def list_presets() -> dict[str, Any]:
                     "protein": preset["protein"],
                     "carbs": preset["carbs"],
                     "fat": preset["fat"],
+                    "fiber": preset["fiber"],
                 },
                 "sort_order": preset["sort_order"],
             }
@@ -863,6 +869,7 @@ async def save_preset(
     fat: float,
     meal: str = "Dinner",
     emoji: str = "🍽️",
+    fiber: float | None = None,
 ) -> dict[str, Any]:
     """Create or update a reusable meal preset so it can be logged in one tap.
 
@@ -878,9 +885,10 @@ async def save_preset(
         fat: Grams of fat per serving.
         meal: Default meal slot — Breakfast, Lunch, Dinner, or Snack.
         emoji: Single emoji shown on the app's quick-add tile.
+        fiber: Grams of fiber per serving. When updating an existing preset,
+            omitted fiber preserves its current value; new presets must provide it.
     """
     clean_name = domain.validate_name(name, "name")
-    macros = domain.validate_macros(calories, protein, carbs, fat)
     meal_name = domain.normalize_meal(meal, default="Dinner")
     glyph = (emoji or "🍽️").strip()[:4] or "🍽️"
 
@@ -894,6 +902,18 @@ async def save_preset(
         ),
         None,
     )
+    if fiber is None:
+        if existing is None:
+            raise domain.MacroError(
+                "fiber is required when creating a new preset; pass the explicit fiber value"
+            )
+        existing_fiber = (existing.get("properties") or {}).get(notion_api.P_FIBER)
+        if not existing_fiber or existing_fiber.get("number") is None:
+            raise domain.MacroError(
+                "fiber is required because the existing preset has no stored fiber value"
+            )
+        fiber = float(existing_fiber["number"])
+    macros = domain.validate_macros(calories, protein, carbs, fat, fiber)
 
     properties = {
         notion_api.P_NAME: notion_api.title_prop(clean_name),
@@ -902,6 +922,7 @@ async def save_preset(
         notion_api.P_PROTEIN: notion_api.number_prop(macros["protein"]),
         notion_api.P_CARBS: notion_api.number_prop(macros["carbs"]),
         notion_api.P_FAT: notion_api.number_prop(macros["fat"]),
+        notion_api.P_FIBER: notion_api.number_prop(macros["fiber"]),
         notion_api.P_MEAL: notion_api.select_prop(meal_name),
         notion_api.P_ACTIVE: notion_api.checkbox_prop(True),
     }
@@ -1058,6 +1079,7 @@ async def set_targets(
     carbs: float,
     fat: float,
     effective_date: str | None = None,
+    fiber: float | None = None,
 ) -> dict[str, Any]:
     """Set new daily macro targets from a given date onward.
 
@@ -1071,9 +1093,32 @@ async def set_targets(
         fat: Daily fat target in grams.
         effective_date: YYYY-MM-DD the new targets start on. Defaults to the
             current logging day.
+        fiber: Daily fiber target. When omitted, preserves the target currently
+            in effect; if none exists, it must be provided explicitly.
     """
-    macros = domain.validate_macros(calories, protein, carbs, fat)
     day = domain.resolve_date(effective_date, "effective_date")
+    if fiber is None:
+        existing_target_pages = await notion_client().query_data_source(
+            CONFIG.targets_ds_id,
+            filter={
+                "property": notion_api.P_EFFECTIVE_DATE,
+                "date": {"on_or_before": day.isoformat()},
+            },
+            sorts=[{"property": notion_api.P_EFFECTIVE_DATE, "direction": "descending"}],
+        )
+        if not existing_target_pages:
+            raise domain.MacroError(
+                "fiber is required when no existing target is in effect; pass the explicit fiber value"
+            )
+        existing_fiber = (existing_target_pages[0].get("properties") or {}).get(
+            notion_api.P_FIBER
+        )
+        if not existing_fiber or existing_fiber.get("number") is None:
+            raise domain.MacroError(
+                "fiber is required because the existing target has no stored fiber value"
+            )
+        fiber = float(existing_fiber["number"])
+    macros = domain.validate_macros(calories, protein, carbs, fat, fiber)
     page = await notion_client().create_page(
         CONFIG.targets_ds_id,
         {
@@ -1083,6 +1128,7 @@ async def set_targets(
             notion_api.P_PROTEIN: notion_api.number_prop(macros["protein"]),
             notion_api.P_CARBS: notion_api.number_prop(macros["carbs"]),
             notion_api.P_FAT: notion_api.number_prop(macros["fat"]),
+            notion_api.P_FIBER: notion_api.number_prop(macros["fiber"]),
         },
     )
     return {
@@ -1408,6 +1454,7 @@ async def api_log(request: Request) -> Any:
         protein=body.get("protein"),
         carbs=body.get("carbs"),
         fat=body.get("fat"),
+        fiber=body.get("fiber", 0),
         macro_source=str(body.get("macro_source", "")),
         meal=body.get("meal"),
         day_value=body.get("date"),
@@ -1452,7 +1499,7 @@ async def api_chat(request: Request) -> Any:
             raise MacroError("I couldn't understand one of those food items. Please rephrase it.")
         clean_name = domain.validate_name(str(raw.get("name", "")))
         macros = domain.validate_macros(
-            raw.get("calories"), raw.get("protein"), raw.get("carbs"), raw.get("fat")
+            raw.get("calories"), raw.get("protein"), raw.get("carbs"), raw.get("fat"), raw.get("fiber", 0)
         )
         meal_name = domain.normalize_meal(raw.get("meal"))
         validated.append(
@@ -1466,6 +1513,7 @@ async def api_chat(request: Request) -> Any:
             macros["calories"], macros["protein"], macros["carbs"], macros["fat"],
             note, meal_name, day.isoformat(),
             allow_estimate=True,
+            fiber=macros["fiber"],
         )
         logged.append(result["logged"])
 

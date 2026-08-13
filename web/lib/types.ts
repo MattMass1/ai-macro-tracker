@@ -3,6 +3,7 @@ export type Macros = {
   protein: number;
   carbs: number;
   fat: number;
+  fiber: number;
 };
 
 export type MacroKey = keyof Macros;
@@ -15,6 +16,7 @@ export type Meal = {
   protein: number;
   carbs: number;
   fat: number;
+  fiber: number;
   date?: string;
   created_time?: string;
 };
@@ -26,6 +28,7 @@ export type Preset = {
   protein: number;
   carbs: number;
   fat: number;
+  fiber: number;
   meal: string;
   sort_order: number;
 };
@@ -47,6 +50,7 @@ export type LogMealBody = {
   protein: number;
   carbs: number;
   fat: number;
+  fiber: number;
   macro_source: string;
   meal?: string;
 };

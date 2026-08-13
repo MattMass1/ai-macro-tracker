@@ -23,7 +23,7 @@ import server as srv  # noqa: E402
 TODAY = srv.domain.effective_date().isoformat()
 
 
-def meal_page(page_id, name, meal, cal, protein, carbs, fat, created):
+def meal_page(page_id, name, meal, cal, protein, carbs, fat, created, fiber=0):
     return {
         "id": page_id,
         "created_time": created,
@@ -34,6 +34,7 @@ def meal_page(page_id, name, meal, cal, protein, carbs, fat, created):
             "Protein (g)": {"number": protein},
             "Carbs (g)": {"number": carbs},
             "Fat (g)": {"number": fat},
+            "Fiber (g)": {"number": fiber},
             "Date": {"date": {"start": TODAY}},
         },
     }
@@ -48,6 +49,7 @@ TARGET_PAGE = {
         "Protein": {"number": 215},
         "Carbs": {"number": 200},
         "Fat": {"number": 70},
+        "Fiber": {"number": 30},
     },
 }
 

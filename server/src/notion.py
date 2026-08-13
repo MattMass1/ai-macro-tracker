@@ -32,6 +32,7 @@ P_CALORIES = "Calories"
 P_PROTEIN_G = "Protein (g)"
 P_CARBS_G = "Carbs (g)"
 P_FAT_G = "Fat (g)"
+P_FIBER = "Fiber"
 P_DATE = "Date"
 
 # `Macro Targets` / `Meal Presets` use unsuffixed macro names.
@@ -447,6 +448,7 @@ def meal_from_page(page: Mapping[str, Any]) -> dict[str, Any]:
         "protein": read_number(page, P_PROTEIN_G),
         "carbs": read_number(page, P_CARBS_G),
         "fat": read_number(page, P_FAT_G),
+        "fiber": read_number(page, P_FIBER),
         "date": read_date(page, P_DATE),
         "created_time": page.get("created_time", ""),
     }
@@ -461,6 +463,7 @@ def target_from_page(page: Mapping[str, Any]) -> dict[str, Any]:
         "protein": read_number(page, P_PROTEIN),
         "carbs": read_number(page, P_CARBS),
         "fat": read_number(page, P_FAT),
+        "fiber": read_number(page, P_FIBER),
     }
 
 
@@ -473,6 +476,7 @@ def preset_from_page(page: Mapping[str, Any]) -> dict[str, Any]:
         "protein": read_number(page, P_PROTEIN),
         "carbs": read_number(page, P_CARBS),
         "fat": read_number(page, P_FAT),
+        "fiber": read_number(page, P_FIBER),
         "meal": read_select(page, P_MEAL) or "Snack",
         "sort_order": read_number(page, P_SORT_ORDER),
         "active": read_checkbox(page, P_ACTIVE),
@@ -486,6 +490,7 @@ def meal_properties(
     protein: float,
     carbs: float,
     fat: float,
+    fiber: float,
     day: date,
 ) -> dict[str, Any]:
     """Properties for a `Nutrition Entries` row. `C` is a formula and is never sent."""
@@ -496,6 +501,7 @@ def meal_properties(
         P_PROTEIN_G: number_prop(protein),
         P_CARBS_G: number_prop(carbs),
         P_FAT_G: number_prop(fat),
+        P_FIBER: number_prop(fiber),
         P_DATE: date_prop(day),
     }
 

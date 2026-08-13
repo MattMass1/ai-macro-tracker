@@ -100,7 +100,7 @@ async def test_create_page_parents_a_data_source():
     client, seen = make_client(lambda request: json_response({"id": "page-1"}))
     await client.create_page(
         "ds-1",
-        meal_properties("Chicken", "Dinner", 300, 55, 0, 7, date(2026, 7, 25)),
+        meal_properties("Chicken", "Dinner", 300, 55, 0, 7, 0, date(2026, 7, 25)),
         children=[notion_api.paragraph_block("Macro source: FDA FoodData Central")],
     )
     request = seen[0]
@@ -265,7 +265,7 @@ def test_meal_from_page_tolerates_an_empty_row():
 
 
 def test_meal_properties_never_writes_the_formula_column():
-    props = meal_properties("Eggs", "Breakfast", 140, 12, 1, 10, date(2026, 7, 25))
+    props = meal_properties("Eggs", "Breakfast", 140, 12, 1, 10, 0, date(2026, 7, 25))
     assert set(props) == {
         "Name",
         "Meal",
@@ -273,6 +273,7 @@ def test_meal_properties_never_writes_the_formula_column():
         "Protein (g)",
         "Carbs (g)",
         "Fat (g)",
+        "Fiber (g)",
         "Date",
     }
     assert props["Date"] == {"date": {"start": "2026-07-25"}}

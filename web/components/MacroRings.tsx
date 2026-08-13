@@ -13,6 +13,7 @@ const COLORS: Record<keyof Macros, string> = {
   protein: "var(--protein)",
   carbs: "var(--carbs)",
   fat: "var(--fat)",
+  fiber: "var(--fiber)",
 };
 
 function round(value: number): string {
@@ -126,7 +127,7 @@ function SmallRing({
 }
 
 /**
- * Four readouts. Protein is the primary metric and gets the hero ring; overage
+ * Five readouts. Protein is the primary metric and gets the hero ring; overage
  * turns the indicator red and shows a negative number rather than clamping.
  */
 export default function MacroRings({ totals, targets, remaining }: Props) {
@@ -172,7 +173,7 @@ export default function MacroRings({ totals, targets, remaining }: Props) {
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <SmallRing
           label="Calories"
           unit=""
@@ -196,6 +197,14 @@ export default function MacroRings({ totals, targets, remaining }: Props) {
           target={targets.fat}
           left={remaining.fat}
           color={COLORS.fat}
+        />
+        <SmallRing
+          label="Fiber"
+          unit="g"
+          consumed={totals.fiber}
+          target={targets.fiber}
+          left={remaining.fiber}
+          color={COLORS.fiber}
         />
       </div>
     </section>

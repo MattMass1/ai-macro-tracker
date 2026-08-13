@@ -40,7 +40,7 @@ async function fetcher<T>(url: string): Promise<T> {
   return payload as T;
 }
 
-const ZERO: Macros = { calories: 0, protein: 0, carbs: 0, fat: 0 };
+const ZERO: Macros = { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
 
 function addMacros(a: Macros, b: Macros, sign: 1 | -1): Macros {
   return {
@@ -48,6 +48,7 @@ function addMacros(a: Macros, b: Macros, sign: 1 | -1): Macros {
     protein: Math.round((a.protein + sign * b.protein) * 100) / 100,
     carbs: Math.round((a.carbs + sign * b.carbs) * 100) / 100,
     fat: Math.round((a.fat + sign * b.fat) * 100) / 100,
+    fiber: Math.round((a.fiber + sign * b.fiber) * 100) / 100,
   };
 }
 
@@ -142,6 +143,7 @@ export default function TodayPage() {
           protein: preset.protein,
           carbs: preset.carbs,
           fat: preset.fat,
+          fiber: preset.fiber,
           created_time: new Date().toISOString(),
         },
         1,

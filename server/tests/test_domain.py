@@ -260,11 +260,12 @@ def test_sum_macros_handles_null_and_missing_numbers():
         "protein": 98.0,
         "carbs": 48.0,
         "fat": 20.5,
+        "fiber": 0.0,
     }
 
 
 def test_sum_macros_of_nothing_is_zero():
-    assert sum_macros([]) == {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+    assert sum_macros([]) == {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0, "fiber": 0.0}
 
 
 def test_remaining_can_go_negative():

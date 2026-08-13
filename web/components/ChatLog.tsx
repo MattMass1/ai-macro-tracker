@@ -180,6 +180,7 @@ export default function ChatLog({ onLogged }: { onLogged: () => void | Promise<v
           protein: vision.protein,
           carbs: vision.carbs,
           fat: vision.fat,
+          fiber: vision.fiber,
           macro_source: "Vision model (estimated from food photo)",
           ...(vision.meal ? { meal: vision.meal } : {}),
         }),
@@ -260,7 +261,7 @@ export default function ChatLog({ onLogged }: { onLogged: () => void | Promise<v
                         <p className="font-semibold">Here’s what I see — log this?</p>
                         <p className="text-sm text-muted">{vision.name}</p>
                         <p className="mt-1 text-sm">
-                          {vision.calories} kcal · {vision.protein}g protein · {vision.carbs}g carbs · {vision.fat}g fat
+                          {vision.calories} kcal · {vision.protein}g protein · {vision.carbs}g carbs · {vision.fat}g fat · {vision.fiber}g fiber
                         </p>
                         <p className="mt-1 text-[11px] text-muted">Vision estimate; portions may vary.</p>
                       </div>

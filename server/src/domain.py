@@ -18,7 +18,7 @@ DAY_ROLLOVER_HOUR = int(os.environ.get("DAY_ROLLOVER_HOUR", "4"))
 
 MEALS = ("Breakfast", "Lunch", "Dinner", "Snack")
 
-MACRO_KEYS = ("calories", "protein", "carbs", "fat")
+MACRO_KEYS = ("calories", "protein", "carbs", "fat", "fiber")
 
 WORKOUT_TYPES = ("Push", "Pull", "Legs", "Abs", "Cardio", "Full Body")
 
@@ -86,7 +86,7 @@ PLACEHOLDER_SOURCES = {
     "?",
 }
 
-DEFAULT_TARGETS = {"calories": 2400.0, "protein": 215.0, "carbs": 200.0, "fat": 70.0}
+DEFAULT_TARGETS = {"calories": 2400.0, "protein": 215.0, "carbs": 200.0, "fat": 70.0, "fiber": 0.0}
 
 
 class MacroError(ValueError):
@@ -186,7 +186,7 @@ def _validate_number(value: Any, field: str, maximum: float) -> float:
 
 
 def validate_macros(
-    calories: Any, protein: Any, carbs: Any, fat: Any
+    calories: Any, protein: Any, carbs: Any, fat: Any, fiber: Any = 0
 ) -> dict[str, float]:
     """Validate the four macro numbers, returning them rounded and coerced to float."""
     return {
@@ -194,6 +194,7 @@ def validate_macros(
         "protein": _validate_number(protein, "protein", MAX_MACRO),
         "carbs": _validate_number(carbs, "carbs", MAX_MACRO),
         "fat": _validate_number(fat, "fat", MAX_MACRO),
+        "fiber": _validate_number(fiber, "fiber", MAX_MACRO),
     }
 
 

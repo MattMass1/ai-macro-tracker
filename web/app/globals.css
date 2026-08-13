@@ -12,6 +12,7 @@
   --protein: #34d399;
   --carbs: #60a5fa;
   --fat: #c084fc;
+  --fiber: #f97316;
   --over: #fb5b5b;
 
   color-scheme: dark;
@@ -28,6 +29,7 @@
   --color-protein: var(--protein);
   --color-carbs: var(--carbs);
   --color-fat: var(--fat);
+  --color-fiber: var(--fiber);
   --color-over: var(--over);
 }
 

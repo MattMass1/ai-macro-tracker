@@ -23,7 +23,7 @@ type Props = {
 
 const EMPTY_SET: WorkoutSet = { weight: 0, reps: 0 };
 
-/** Default abs / cardio exercises always available as quick-pick chips. */
+/** Default exercises always available as quick-pick chips. */
 const ABS_DEFAULTS = [
   "Crunches",
   "Hanging Leg Raises",
@@ -38,6 +38,22 @@ const CARDIO_DEFAULTS = [
   "Bike",
   "Stairmaster",
   "Rowing Machine",
+];
+
+const PUSH_DEFAULTS = [
+  "High-to-Low Cable Fly (cable/rope)",
+  "Cable Decline Press (cable/rope)",
+  "Dips (forward lean, bodyweight)",
+  "Decline DB Bench Press",
+];
+
+const LEGS_DEFAULTS = [
+  "Barbell Squat",
+  "Hack Squats",
+  "Leg Press",
+  "Leg Curls",
+  "Back Extension",
+  "Smith Machine Squats",
 ];
 
 function typeEmoji(workoutType: string): string {
@@ -95,12 +111,7 @@ export default function WorkoutLogger({
     return [...groups.entries()];
   }, [exercises]);
 
-  const chipExercises = useMemo(() => {
-    const fromGroup = grouped.find(([type]) => type === workoutType);
-    return fromGroup ? fromGroup[1] : todayPlan?.exercises.map((e) => e.name) ?? [];
-  }, [grouped, workoutType, todayPlan]);
-
-  /** Abs / cardio chips: defaults merged with known exercises so history
+  /** Workout chips: defaults merged with known exercises so history
    *  exercises also appear alongside the static defaults. */
   const absChips = useMemo(() => {
     const fromKnown = exercises
@@ -115,6 +126,37 @@ export default function WorkoutLogger({
       .map((ex) => ex.name);
     return [...new Set([...CARDIO_DEFAULTS, ...fromKnown])];
   }, [exercises]);
+
+  const pushChips = useMemo(() => {
+    const fromKnown = exercises
+      .filter((ex) => ex.workout_type.includes("Push"))
+      .map((ex) => ex.name);
+    return [...new Set([...PUSH_DEFAULTS, ...fromKnown])];
+  }, [exercises]);
+
+  const legsChips = useMemo(() => {
+    const fromKnown = exercises
+      .filter((ex) => ex.workout_type.includes("Legs"))
+      .map((ex) => ex.name);
+    return [...new Set([...LEGS_DEFAULTS, ...fromKnown])];
+  }, [exercises]);
+
+  const chipExercises = useMemo(() => {
+    if (workoutType === "Push") return pushChips;
+    if (workoutType === "Legs") return legsChips;
+    if (workoutType === "Abs") return absChips;
+    if (workoutType === "Cardio") return cardioChips;
+    const fromGroup = grouped.find(([type]) => type === workoutType);
+    return fromGroup ? fromGroup[1] : todayPlan?.exercises.map((e) => e.name) ?? [];
+  }, [
+    absChips,
+    cardioChips,
+    grouped,
+    legsChips,
+    pushChips,
+    todayPlan,
+    workoutType,
+  ]);
 
   const loadLastWorkout = async (name: string) => {
     const currentRequest = ++requestId.current;

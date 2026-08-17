@@ -14,6 +14,7 @@ import sys
 import tempfile
 import asyncio
 import re
+from contextlib import asynccontextmanager
 from datetime import date as _date, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
@@ -29,23 +30,31 @@ from fastmcp import FastMCP  # noqa: E402
 from fastmcp.exceptions import ToolError  # noqa: E402
 
 import domain  # noqa: E402
-import notion as notion_api  # noqa: E402
 from config import get_config  # noqa: E402
 from domain import MacroError  # noqa: E402
-from notion import NotionClient, NotionError  # noqa: E402
+from store import Store, StoreError  # noqa: E402
 
-CONFIG = get_config()
-
-mcp = FastMCP("macro-tracker")
-
-_client: NotionClient | None = None
+_client: Store | None = None
 
 
-def notion_client() -> NotionClient:
+def store_client() -> Store:
     global _client
     if _client is None:
-        _client = NotionClient(CONFIG.notion_token)
+        _client = Store(CONFIG.database_url)
     return _client
+
+
+@asynccontextmanager
+async def lifespan(_app: Any):
+    try:
+        yield
+    finally:
+        if _client is not None:
+            await _client.aclose()
+
+
+CONFIG = get_config()
+mcp = FastMCP("macro-tracker", lifespan=lifespan)
 
 
 # --------------------------------------------------------------------------- #
@@ -55,95 +64,49 @@ def notion_client() -> NotionClient:
 
 async def fetch_meals(day: _date) -> list[dict[str, Any]]:
     """Every `Nutrition Entries` row for one logging day, newest first."""
-    pages = await notion_client().query_data_source(
-        CONFIG.nutrition_ds_id,
-        filter=notion_api.date_equals_filter(day),
-        sorts=[{"timestamp": "created_time", "direction": "descending"}],
-    )
-    return [notion_api.meal_from_page(page) for page in pages]
+    return await store_client().fetch_meals(day)
 
 
 async def fetch_meals_in_range(start: _date, end: _date) -> list[dict[str, Any]]:
-    pages = await notion_client().query_data_source(
-        CONFIG.nutrition_ds_id,
-        filter=notion_api.date_range_filter(start, end),
-        sorts=[{"property": notion_api.P_DATE, "direction": "ascending"}],
-    )
-    return [notion_api.meal_from_page(page) for page in pages]
+    return await store_client().fetch_meals(start, end)
 
 
 async def fetch_targets(day: _date) -> dict[str, float]:
     """Targets from the latest `Effective Date` that is on or before `day`."""
-    pages = await notion_client().query_data_source(
-        CONFIG.targets_ds_id,
-        filter={
-            "property": notion_api.P_EFFECTIVE_DATE,
-            "date": {"on_or_before": day.isoformat()},
-        },
-        sorts=[{"property": notion_api.P_EFFECTIVE_DATE, "direction": "descending"}],
-    )
-    if not pages:
+    row = await store_client().fetch_targets(day)
+    if not row:
         return dict(domain.DEFAULT_TARGETS)
-    row = notion_api.target_from_page(pages[0])
     return {key: row[key] for key in domain.MACRO_KEYS}
 
 
 async def fetch_presets() -> list[dict[str, Any]]:
     """Active presets ordered by `Sort Order`."""
-    pages = await notion_client().query_data_source(
-        CONFIG.presets_ds_id,
-        filter={"property": notion_api.P_ACTIVE, "checkbox": {"equals": True}},
-        sorts=[{"property": notion_api.P_SORT_ORDER, "direction": "ascending"}],
-    )
-    presets = [notion_api.preset_from_page(page) for page in pages]
+    presets = await store_client().fetch_presets()
     presets.sort(key=lambda preset: (preset["sort_order"], preset["name"].lower()))
     return presets
 
 
 async def fetch_workouts(day: _date) -> list[dict[str, Any]]:
     """Every `Fitness Tracker` row for one day, newest first."""
-    pages = await notion_client().query_data_source(
-        CONFIG.fitness_ds_id,
-        filter={"property": notion_api.P_DATE_INPUT, "date": {"equals": day.isoformat()}},
-        sorts=[{"timestamp": "created_time", "direction": "descending"}],
-    )
-    return [notion_api.workout_from_page(page) for page in pages]
+    return await store_client().fetch_workouts(day, day)
 
 
 async def fetch_workouts_in_range(start: _date, end: _date) -> list[dict[str, Any]]:
-    pages = await notion_client().query_data_source(
-        CONFIG.fitness_ds_id,
-        filter=notion_api.workout_date_range_filter(start, end),
-        sorts=[{"property": notion_api.P_DATE_INPUT, "direction": "ascending"}],
-    )
-    return [notion_api.workout_from_page(page) for page in pages]
+    return await store_client().fetch_workouts(start, end)
 
 
 async def fetch_last_workout(exercise: str) -> dict[str, Any] | None:
     """Most recent Fitness Tracker row matching an exercise exactly."""
     clean_exercise = domain.validate_name(exercise, "exercise")
-    pages = await notion_client().query_data_source(
-        CONFIG.fitness_ds_id,
-        filter={
-            "property": notion_api.P_EXERCISE_NAME,
-            "title": {"equals": clean_exercise},
-        },
-        sorts=[
-            {"property": notion_api.P_DATE_INPUT, "direction": "descending"},
-            {"timestamp": "created_time", "direction": "descending"},
-        ],
-    )
+    pages = await store_client().fetch_workouts(exercise=clean_exercise)
     if not pages:
         return None
-    return notion_api.workout_from_page(pages[0])
+    return pages[0]
 
 
 async def fetch_prs() -> list[dict[str, Any]]:
-    pages = await notion_client().query_data_source(
-        CONFIG.maxreps_ds_id,
-        sorts=[{"property": notion_api.P_MAX_WEIGHT, "direction": "descending"}],
-    )
-    prs = [notion_api.pr_from_page(page) for page in pages]
+    pages = await store_client().fetch_prs()
+    prs = [{"exercise": p["exercise"], "max_weight": p["max_weight"], "date": p.get("date_achieved") or ""} for p in pages]
     return [pr for pr in prs if pr["exercise"]][:5]
 
 
@@ -153,17 +116,14 @@ async def fetch_known_exercises() -> list[dict[str, Any]]:
     The PWA uses this to offer an exercise picker with the correct
     Push/Pull/Legs tag instead of a free-text field.
     """
-    pages = await notion_client().query_data_source(
-        CONFIG.maxreps_ds_id,
-        sorts=[{"property": notion_api.P_EXERCISE, "direction": "ascending"}],
-    )
+    pages = await store_client().fetch_prs()
     return [
         {
-            "name": notion_api.read_title(page, notion_api.P_EXERCISE).strip(),
-            "workout_type": notion_api.read_multi_select(page, notion_api.P_WORKOUT_TYPE),
+            "name": page["exercise"].strip(),
+            "workout_type": page["workout_type"],
         }
         for page in pages
-        if notion_api.read_title(page, notion_api.P_EXERCISE).strip()
+        if page["exercise"].strip()
     ]
 
 
@@ -209,12 +169,11 @@ async def last_workout_type(before: str | None = None) -> str | None:
     back to `created_time`. Old rows only carry Muscle Group, so the type is
     derived via the shared mapping when the Workout type tag is empty.
     """
-    pages = await notion_client().query_data_source(CONFIG.fitness_ds_id)
+    pages = await store_client().fetch_workouts()
 
     def sort_key(page: Mapping[str, Any]) -> str:
         return (
-            notion_api.read_date(page, notion_api.P_DATE_INPUT)
-            or (page.get("created_time") or "")[:10]
+            page.get("date") or str(page.get("created_time") or "")[:10]
             or ""
         )
 
@@ -222,14 +181,14 @@ async def last_workout_type(before: str | None = None) -> str | None:
     for page in pages:
         if before is not None and sort_key(page) >= before:
             continue
-        types = notion_api.read_multi_select(page, notion_api.P_WORKOUT_TYPE)
+        types = page.get("workout_type") or []
         if types:
             workout_type = next(
                 (t for t in domain.WORKOUT_ROTATION if t in types),
                 types[0],
             )
         else:
-            muscles = notion_api.read_multi_select(page, notion_api.P_MUSCLE_GROUP)
+            muscles = page.get("muscle_group") or []
             workout_type = domain.workout_type_from_muscle(muscles)
         if workout_type in domain.WORKOUT_ROTATION:
             return workout_type
@@ -407,16 +366,8 @@ async def write_workout(
         muscle_group = domain.normalize_muscle_group([type_name])
     day = domain.resolve_date(day_value, "date")
 
-    page = await notion_client().create_page(
-        CONFIG.fitness_ds_id,
-        notion_api.workout_properties(
-            clean_exercise,
-            type_name,
-            muscle_group,
-            cleaned_sets,
-            day,
-        ),
-    )
+    page = await store_client().insert_workout(exercise=clean_exercise,
+        workout_type=[type_name], muscle_group=muscle_group, sets=cleaned_sets, day=day)
     return {
         "id": page.get("id", ""),
         "exercise": clean_exercise,
@@ -437,10 +388,7 @@ async def day_payload(
     """The canonical day view every client renders.
 
     `ensure` and `exclude` reconcile the response with a write that just
-    happened. Notion's query index is eventually consistent: a row created
-    milliseconds ago is often missing from the next query, and an archived row
-    often still shows up. Without this, logging a meal would return the totals
-    from *before* it — Poke would then report the wrong number over text.
+    happened. The reconciliation also keeps write responses deterministic.
     """
     meals = await fetch_meals(day)
     if exclude:
@@ -497,20 +445,8 @@ async def write_meal(
     meal_name = domain.normalize_meal(meal)
     day = domain.resolve_date(day_value)
 
-    page = await notion_client().create_page(
-        CONFIG.nutrition_ds_id,
-        notion_api.meal_properties(
-            clean_name,
-            meal_name,
-            macros["calories"],
-            macros["protein"],
-            macros["carbs"],
-            macros["fat"],
-            macros["fiber"],
-            day,
-        ),
-        children=[notion_api.paragraph_block(f"Macro source: {source}")],
-    )
+    page = await store_client().insert_meal(name=clean_name, meal=meal_name,
+        day=day, macro_source=source, **macros)
 
     logged = {
         "id": page.get("id", ""),
@@ -749,7 +685,7 @@ async def log_preset_servings(
 
 
 def tool_errors(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
-    """Surface domain and Notion messages to Poke instead of a masked error."""
+    """Surface domain and database messages to Poke instead of a masked error."""
 
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -757,8 +693,8 @@ def tool_errors(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[An
             return await fn(*args, **kwargs)
         except MacroError as exc:
             raise ToolError(str(exc)) from exc
-        except NotionError as exc:
-            raise ToolError(f"Notion rejected the request. {exc}") from exc
+        except StoreError as exc:
+            raise ToolError(f"Database rejected the request. {exc}") from exc
 
     return wrapper
 
@@ -776,7 +712,7 @@ async def log_meal(
     date: str | None = None,
     fiber: float = 0,
 ) -> dict[str, Any]:
-    """Log one food or meal to the Notion nutrition log and return the day's totals.
+    """Log one food or meal to the nutrition log and return the day's totals.
 
     NEVER estimate or guess macros. Before calling this, look up real numbers:
     the FDA FoodData Central entry for whole foods, or the specific brand's
@@ -892,13 +828,13 @@ async def save_preset(
     meal_name = domain.normalize_meal(meal, default="Dinner")
     glyph = (emoji or "🍽️").strip()[:4] or "🍽️"
 
-    client = notion_client()
-    existing_pages = await client.query_data_source(CONFIG.presets_ds_id)
+    client = store_client()
+    existing_pages = await client.fetch_presets(active_only=False)
     existing = next(
         (
             page
             for page in existing_pages
-            if notion_api.read_title(page).strip().lower() == clean_name.lower()
+            if page["name"].strip().lower() == clean_name.lower()
         ),
         None,
     )
@@ -907,35 +843,25 @@ async def save_preset(
             raise domain.MacroError(
                 "fiber is required when creating a new preset; pass the explicit fiber value"
             )
-        existing_fiber = (existing.get("properties") or {}).get(notion_api.P_FIBER)
-        if not existing_fiber or existing_fiber.get("number") is None:
+        existing_fiber = existing.get("fiber")
+        if existing_fiber is None:
             raise domain.MacroError(
                 "fiber is required because the existing preset has no stored fiber value"
             )
-        fiber = float(existing_fiber["number"])
+        fiber = float(existing_fiber)
     macros = domain.validate_macros(calories, protein, carbs, fat, fiber)
 
-    properties = {
-        notion_api.P_NAME: notion_api.title_prop(clean_name),
-        notion_api.P_EMOJI: notion_api.rich_text_prop(glyph),
-        notion_api.P_CALORIES: notion_api.number_prop(macros["calories"]),
-        notion_api.P_PROTEIN: notion_api.number_prop(macros["protein"]),
-        notion_api.P_CARBS: notion_api.number_prop(macros["carbs"]),
-        notion_api.P_FAT: notion_api.number_prop(macros["fat"]),
-        notion_api.P_FIBER: notion_api.number_prop(macros["fiber"]),
-        notion_api.P_MEAL: notion_api.select_prop(meal_name),
-        notion_api.P_ACTIVE: notion_api.checkbox_prop(True),
-    }
+    properties = {"name": clean_name, "emoji": glyph, "meal": meal_name, **macros}
 
     if existing is None:
         order = 0.0
         for page in existing_pages:
-            order = max(order, notion_api.read_number(page, notion_api.P_SORT_ORDER))
-        properties[notion_api.P_SORT_ORDER] = notion_api.number_prop(order + 1)
-        page = await client.create_page(CONFIG.presets_ds_id, properties)
+            order = max(order, float(page["sort_order"]))
+        properties["sort_order"] = order + 1
+        page = await client.save_preset(properties)
         action = "created"
     else:
-        page = await client.update_page(existing["id"], properties)
+        page = await client.save_preset(properties, existing["id"])
         action = "updated"
 
     return {
@@ -1045,7 +971,7 @@ async def undo_last_meal() -> dict[str, Any]:
             "nothing to undo."
         )
     newest = meals[0]
-    await notion_client().archive_page(newest["id"])
+    await store_client().delete("nutrition_entries", newest["id"])
     payload = await day_payload(day, exclude=newest["id"])
     payload["removed"] = newest
     return payload
@@ -1098,39 +1024,19 @@ async def set_targets(
     """
     day = domain.resolve_date(effective_date, "effective_date")
     if fiber is None:
-        existing_target_pages = await notion_client().query_data_source(
-            CONFIG.targets_ds_id,
-            filter={
-                "property": notion_api.P_EFFECTIVE_DATE,
-                "date": {"on_or_before": day.isoformat()},
-            },
-            sorts=[{"property": notion_api.P_EFFECTIVE_DATE, "direction": "descending"}],
-        )
-        if not existing_target_pages:
+        existing_target = await store_client().fetch_targets(day)
+        if not existing_target:
             raise domain.MacroError(
                 "fiber is required when no existing target is in effect; pass the explicit fiber value"
             )
-        existing_fiber = (existing_target_pages[0].get("properties") or {}).get(
-            notion_api.P_FIBER
-        )
-        if not existing_fiber or existing_fiber.get("number") is None:
+        existing_fiber = existing_target.get("fiber")
+        if existing_fiber is None:
             raise domain.MacroError(
                 "fiber is required because the existing target has no stored fiber value"
             )
-        fiber = float(existing_fiber["number"])
+        fiber = float(existing_fiber)
     macros = domain.validate_macros(calories, protein, carbs, fat, fiber)
-    page = await notion_client().create_page(
-        CONFIG.targets_ds_id,
-        {
-            notion_api.P_NAME: notion_api.title_prop(f"Targets from {day.isoformat()}"),
-            notion_api.P_EFFECTIVE_DATE: notion_api.date_prop(day),
-            notion_api.P_CALORIES: notion_api.number_prop(macros["calories"]),
-            notion_api.P_PROTEIN: notion_api.number_prop(macros["protein"]),
-            notion_api.P_CARBS: notion_api.number_prop(macros["carbs"]),
-            notion_api.P_FAT: notion_api.number_prop(macros["fat"]),
-            notion_api.P_FIBER: notion_api.number_prop(macros["fiber"]),
-        },
-    )
+    page = await store_client().insert_targets(day, macros)
     return {
         "id": page.get("id", ""),
         "effective_date": day.isoformat(),
@@ -1221,122 +1127,12 @@ def write_brief(text: str, day: _date) -> dict[str, Any]:
     return {"text": text, "date": day.isoformat()}
 
 
-def _brief_page_title(page: Mapping[str, Any]) -> str:
-    for prop in (page.get("properties") or {}).values():
-        if prop.get("type") == "title" or "title" in prop:
-            return "".join(
-                item.get("plain_text", "") for item in (prop.get("title") or [])
-            ).strip()
-    return ""
-
-
-async def find_brief_page(day: _date) -> dict[str, Any] | None:
-    title = f"Brief {day.isoformat()}"
-    for block in await notion_client().block_children(CONFIG.parent_page_id):
-        if (
-            block.get("type") == "child_page"
-            and (block.get("child_page") or {}).get("title") == title
-        ):
-            return await notion_client().get_page(block["id"])
-
-    # Search is a fallback for API responses where the child block is omitted.
-    parent_id = CONFIG.parent_page_id.replace("-", "")
-    pages = await notion_client().search_pages(title)
-    return next(
-        (
-            page
-            for page in pages
-            if _brief_page_title(page) == title
-            and str((page.get("parent") or {}).get("page_id", "")).replace("-", "")
-            == parent_id
-        ),
-        None,
-    )
-
-
-def _brief_properties(text: str, day: _date) -> dict[str, Any]:
-    return {
-        "title": notion_api.title_prop(f"Brief {day.isoformat()}"),
-        "text": notion_api.rich_text_prop(text),
-        "date": notion_api.date_prop(day),
-    }
-
-
-def _brief_children(text: str, day: _date) -> list[dict[str, Any]]:
-    children: list[dict[str, Any]] = [
-        {
-            "object": "block",
-            "type": "callout",
-            "callout": {
-                "rich_text": notion_api.rich_text(f"date: {day.isoformat()}"),
-                "icon": {"type": "emoji", "emoji": "📅"},
-            },
-        }
-    ]
-    chunks = [text[index : index + 2000] for index in range(0, len(text), 2000)]
-    for chunk in chunks or [""]:
-        children.append(
-            {
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {"rich_text": notion_api.rich_text(chunk) if chunk else []},
-            }
-        )
-    return children
-
-
 async def write_brief_to_notion(text: str, day: _date) -> None:
-    client = notion_client()
-    existing = await find_brief_page(day)
-    properties = _brief_properties(text, day)
-    try:
-        if existing:
-            await client.update_page(existing["id"], properties)
-        else:
-            await client.create_page(
-                CONFIG.parent_page_id,
-                properties,
-                parent_type="page_id",
-            )
-        return
-    except NotionError as exc:
-        # Standalone child pages have no schema for custom properties. Notion
-        # rejects `text`/`date`, so retain those values as page content without
-        # requiring the new database that this integration intentionally avoids.
-        if exc.status != 400 or exc.code != "validation_error":
-            raise
-
-    title_only = {"title": properties["title"]}
-    children = _brief_children(text, day)
-    if not existing:
-        await client.create_page(
-            CONFIG.parent_page_id,
-            title_only,
-            children=children,
-            parent_type="page_id",
-        )
-        return
-
-    await client.update_page(existing["id"], title_only)
-    for block in await client.block_children(existing["id"]):
-        await client.delete_block(block["id"])
-    await client.append_children(existing["id"], children)
+    await store_client().put_brief(day, text)
 
 
 async def read_brief_from_notion(day: _date) -> dict[str, Any]:
-    page = await find_brief_page(day)
-    if not page:
-        return {"text": None, "date": day.isoformat()}
-    if "text" in (page.get("properties") or {}):
-        text = notion_api.read_rich_text(page, "text")
-    else:
-        blocks = await notion_client().block_children(page["id"])
-        text = "".join(
-            "".join(item.get("plain_text", "") for item in block["paragraph"].get("rich_text", []))
-            for block in blocks
-            if block.get("type") == "paragraph"
-        )
-    return {"text": text, "date": day.isoformat()}
+    return {"text": await store_client().get_brief(day), "date": day.isoformat()}
 
 CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
@@ -1390,7 +1186,7 @@ def api_route(path: str, methods: list[str]):
                 return _with_cors(
                     JSONResponse({"error": str(exc)}, status_code=400), request
                 )
-            except NotionError as exc:
+            except StoreError as exc:
                 return _with_cors(
                     JSONResponse({"error": str(exc)}, status_code=502), request
                 )
@@ -1538,7 +1334,7 @@ async def api_brief(request: Request) -> Any:
             return local
         try:
             return await read_brief_from_notion(day)
-        except NotionError:
+        except StoreError:
             return local
 
     body = await _json_body(request)
@@ -1549,7 +1345,7 @@ async def api_brief(request: Request) -> Any:
     result = write_brief(text, day)
     try:
         await write_brief_to_notion(text, day)
-    except NotionError:
+    except StoreError:
         pass
     return result
 
@@ -1559,7 +1355,7 @@ async def api_delete_meal(request: Request) -> Any:
     page_id = request.path_params["page_id"].strip()
     if not page_id:
         raise MacroError("A meal id is required to delete an entry")
-    await notion_client().archive_page(page_id)
+    await store_client().delete("nutrition_entries", page_id)
     payload = await day_payload(
         domain.effective_date(), include_presets=True, exclude=page_id
     )
@@ -1621,7 +1417,7 @@ async def api_delete_workout(request: Request) -> Any:
     page_id = request.path_params["page_id"].strip()
     if not page_id:
         raise MacroError("A workout id is required to delete an entry")
-    await notion_client().archive_page(page_id)
+    await store_client().delete("fitness_tracker", page_id)
     return {"deleted": page_id}
 
 

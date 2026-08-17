@@ -10,16 +10,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
-      - key: NOTION_TOKEN
+      - key: DATABASE_URL
         sync: false
-      - key: NUTRITION_DS_ID
-        value: a9165caa-f1ba-4a3d-9d9b-c850bd1b4c4c
-      - key: TARGETS_DS_ID
-        sync: false
-      - key: PRESETS_DS_ID
-        sync: false
-      - key: PARENT_PAGE_ID
-        value: 3415aac7-7d31-8176-8d64-eb008a13e919
       - key: APP_SHARED_TOKEN
         generateValue: true
       - key: OPENAI_ACCESS_TOKEN

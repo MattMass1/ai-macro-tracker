@@ -71,6 +71,16 @@ async def fetch_meals_in_range(start: _date, end: _date) -> list[dict[str, Any]]
     return await store_client().fetch_meals(start, end)
 
 
+async def fetch_day_rollups(
+    start: _date | None = None, end: _date | None = None
+) -> list[dict[str, Any]]:
+    return await store_client().fetch_day_rollups(start, end)
+
+
+async def fetch_meal_rollups(day: _date) -> list[dict[str, Any]]:
+    return await store_client().fetch_meal_rollups(day)
+
+
 async def fetch_targets(day: _date) -> dict[str, float]:
     """Targets from the latest `Effective Date` that is on or before `day`."""
     row = await store_client().fetch_targets(day)
@@ -390,7 +400,11 @@ async def day_payload(
     `ensure` and `exclude` reconcile the response with a write that just
     happened. The reconciliation also keeps write responses deterministic.
     """
-    meals = await fetch_meals(day)
+    meals, meal_rollups, day_rollups = await asyncio.gather(
+        fetch_meals(day),
+        fetch_meal_rollups(day),
+        fetch_day_rollups(day, day),
+    )
     if exclude:
         meals = [meal for meal in meals if meal["id"] != exclude]
     ensured = ensure if isinstance(ensure, list) else ([ensure] if ensure else [])
@@ -404,6 +418,11 @@ async def day_payload(
         "totals": totals,
         "targets": targets,
         "remaining": domain.remaining(totals, targets),
+        # `meals` remains the legacy food-entry array consumed by the PWA.
+        # These additive keys expose the normalized hierarchy without changing
+        # any existing response field.
+        "day_rollup": day_rollups[0] if day_rollups else None,
+        "meal_rollups": meal_rollups,
         "meals": meals,
     }
     if include_presets:

@@ -1,11 +1,33 @@
+CREATE TABLE IF NOT EXISTS days (
+  date DATE PRIMARY KEY,
+  calories NUMERIC NOT NULL DEFAULT 0, protein NUMERIC NOT NULL DEFAULT 0,
+  carbs NUMERIC NOT NULL DEFAULT 0, fat NUMERIC NOT NULL DEFAULT 0,
+  fiber NUMERIC NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS meals (
+  id TEXT PRIMARY KEY, day DATE NOT NULL REFERENCES days(date),
+  meal_type TEXT NOT NULL,
+  calories NUMERIC NOT NULL DEFAULT 0, protein NUMERIC NOT NULL DEFAULT 0,
+  carbs NUMERIC NOT NULL DEFAULT 0, fat NUMERIC NOT NULL DEFAULT 0,
+  fiber NUMERIC NOT NULL DEFAULT 0,
+  UNIQUE (day, meal_type)
+);
+CREATE INDEX IF NOT EXISTS meals_day_idx ON meals(day);
+
 CREATE TABLE IF NOT EXISTS nutrition_entries (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, meal TEXT NOT NULL DEFAULT 'Snack',
   calories NUMERIC NOT NULL DEFAULT 0, protein NUMERIC NOT NULL DEFAULT 0,
   carbs NUMERIC NOT NULL DEFAULT 0, fat NUMERIC NOT NULL DEFAULT 0,
   fiber NUMERIC NOT NULL DEFAULT 0, day DATE NOT NULL,
+  meal_id TEXT REFERENCES meals(id),
   macro_source TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Existing deployments already have nutrition_entries; make this file a safe
+-- schema upgrade as well as a complete definition for fresh databases.
+ALTER TABLE nutrition_entries ADD COLUMN IF NOT EXISTS meal_id TEXT REFERENCES meals(id);
 CREATE INDEX IF NOT EXISTS nutrition_entries_day_idx ON nutrition_entries(day);
+CREATE INDEX IF NOT EXISTS nutrition_entries_meal_id_idx ON nutrition_entries(meal_id);
 
 CREATE TABLE IF NOT EXISTS fitness_tracker (
   id TEXT PRIMARY KEY, exercise_name TEXT NOT NULL,

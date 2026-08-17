@@ -148,9 +148,15 @@ renaming it is a one-line change whenever you want the warning gone.
 
 **Render (server).** `server/render.yaml` defines the web service: Python,
 `pip install -r requirements.txt`, start `python src/server.py`, health check
-`/health`. Set `NOTION_TOKEN`, `TARGETS_DS_ID`, `PRESETS_DS_ID` and
-`ALLOWED_ORIGINS` (your Vercel origin) in the Render dashboard; `APP_SHARED_TOKEN`
-is generated on first deploy — copy it into Vercel.
+`/health`. Set `DATABASE_URL` and `ALLOWED_ORIGINS` (your Vercel origin) in the
+Render dashboard; `APP_SHARED_TOKEN` is generated on first deploy — copy it
+into Vercel.
+
+The `days` / `meals` rollup hierarchy is populated by a one-time backfill
+(`python scripts/backfill_meals.py`, idempotent) that also applies
+`server/src/schema.sql`. New food entries maintain the rollups automatically in
+`store.py`, so the backfill is only needed when migrating a legacy Notion
+export or rebuilding a fresh database from scratch.
 
 **Vercel (web).** Root directory `web`. Environment variables: `MACRO_API_URL`
 (the Render URL), `APP_SHARED_TOKEN` (matching Render), `APP_PASSCODE`.

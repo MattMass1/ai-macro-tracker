@@ -61,6 +61,28 @@ class Store:
         pool = await self.connect(); end = end or start
         return [meal(r) for r in await pool.fetch("SELECT * FROM nutrition_entries WHERE day BETWEEN $1 AND $2 ORDER BY day, created_at DESC", start, end)]
 
+    async def fetch_day_rollups(self, start: date | None = None, end: date | None = None):
+        pool = await self.connect()
+        clauses: list[str] = []
+        args: list[date] = []
+        if start is not None:
+            args.append(start); clauses.append(f"date >= ${len(args)}")
+        if end is not None:
+            args.append(end); clauses.append(f"date <= ${len(args)}")
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = await pool.fetch("SELECT * FROM days" + where + " ORDER BY date", *args)
+        return [_dict(row) for row in rows]
+
+    async def fetch_meal_rollups(self, day: date):
+        pool = await self.connect()
+        rows = await pool.fetch(
+            "SELECT * FROM meals WHERE day=$1 ORDER BY "
+            "CASE meal_type WHEN 'Breakfast' THEN 1 WHEN 'Lunch' THEN 2 "
+            "WHEN 'Dinner' THEN 3 WHEN 'Snack' THEN 4 ELSE 5 END, meal_type",
+            day,
+        )
+        return [_dict(row) for row in rows]
+
     async def fetch_targets(self, day: date):
         pool = await self.connect(); r = await pool.fetchrow("SELECT * FROM macro_targets WHERE effective_date <= $1 ORDER BY effective_date DESC, created_at DESC LIMIT 1", day)
         return _dict(r)
@@ -82,7 +104,54 @@ class Store:
         pool=await self.connect(); return [_dict(r) for r in await pool.fetch("SELECT * FROM exercise_max_reps ORDER BY date_achieved DESC NULLS LAST")]
 
     async def insert_meal(self, *, name, meal, calories, protein, carbs, fat, fiber, day, macro_source):
-        pool=await self.connect(); id=str(uuid4()); r=await pool.fetchrow("INSERT INTO nutrition_entries(id,name,meal,calories,protein,carbs,fat,fiber,day,macro_source) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",id,name,meal,calories,protein,carbs,fat,fiber,day,macro_source); return meal_row(r)
+        pool = await self.connect(); entry_id = str(uuid4())
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("INSERT INTO days(date) VALUES($1) ON CONFLICT(date) DO NOTHING", day)
+                await conn.fetchval("SELECT date FROM days WHERE date=$1 FOR UPDATE", day)
+                meal_id = await conn.fetchval(
+                    "INSERT INTO meals(id,day,meal_type) VALUES($1,$2,$3) "
+                    "ON CONFLICT(day,meal_type) DO UPDATE SET meal_type=EXCLUDED.meal_type RETURNING id",
+                    str(uuid4()), day, meal,
+                )
+                row = await conn.fetchrow(
+                    "INSERT INTO nutrition_entries(id,name,meal,calories,protein,carbs,fat,fiber,day,meal_id,macro_source) "
+                    "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *",
+                    entry_id, name, meal, calories, protein, carbs, fat, fiber, day, meal_id, macro_source,
+                )
+                await self._refresh_rollups(conn, day, meal_id)
+        return meal_row(row)
+
+    @staticmethod
+    async def _refresh_rollups(conn: asyncpg.Connection, day: date, meal_id: str | None = None) -> None:
+        # Serialize all aggregate recomputes for a day. Without this lock, two
+        # transactions can calculate different snapshots and the older one can
+        # overwrite the newer rollup after it commits.
+        await conn.fetchval("SELECT date FROM days WHERE date=$1 FOR UPDATE", day)
+        if meal_id is not None:
+            # Adopt legacy entries that predate meal_id. Matching on both the
+            # denormalized meal label and day prevents cross-day attachment.
+            await conn.execute(
+                "UPDATE nutrition_entries e SET meal_id=$1 FROM meals m "
+                "WHERE m.id=$1 AND e.day=m.day AND e.meal=m.meal_type "
+                "AND e.meal_id IS NULL",
+                meal_id,
+            )
+            await conn.execute(
+                "UPDATE meals m SET calories=x.calories,protein=x.protein,carbs=x.carbs,fat=x.fat,fiber=x.fiber "
+                "FROM (SELECT COALESCE(sum(calories),0) calories,COALESCE(sum(protein),0) protein,"
+                "COALESCE(sum(carbs),0) carbs,COALESCE(sum(fat),0) fat,COALESCE(sum(fiber),0) fiber "
+                "FROM nutrition_entries WHERE meal_id=$1) x WHERE m.id=$1",
+                meal_id,
+            )
+        await conn.execute(
+            "INSERT INTO days(date,calories,protein,carbs,fat,fiber) "
+            "SELECT $1,COALESCE(sum(calories),0),COALESCE(sum(protein),0),COALESCE(sum(carbs),0),"
+            "COALESCE(sum(fat),0),COALESCE(sum(fiber),0) FROM nutrition_entries WHERE day=$1 "
+            "ON CONFLICT(date) DO UPDATE SET calories=EXCLUDED.calories,protein=EXCLUDED.protein,"
+            "carbs=EXCLUDED.carbs,fat=EXCLUDED.fat,fiber=EXCLUDED.fiber",
+            day,
+        )
 
     async def insert_workout(self, *, exercise, workout_type, muscle_group, sets, day):
         pool=await self.connect(); id=str(uuid4()); vals=[]
@@ -98,7 +167,37 @@ class Store:
 
     async def delete(self, table: str, id: str):
         if table not in {'nutrition_entries','fitness_tracker'}: raise ValueError('invalid table')
-        pool=await self.connect(); await pool.execute(f"DELETE FROM {table} WHERE id=$1", id)
+        pool = await self.connect()
+        if table == 'fitness_tracker':
+            await pool.execute("DELETE FROM fitness_tracker WHERE id=$1", id)
+            return
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                existing = await conn.fetchrow(
+                    "SELECT day FROM nutrition_entries WHERE id=$1", id
+                )
+                if existing is None:
+                    return
+                await conn.fetchval(
+                    "SELECT date FROM days WHERE date=$1 FOR UPDATE", existing["day"]
+                )
+                removed = await conn.fetchrow(
+                    "DELETE FROM nutrition_entries WHERE id=$1 RETURNING day,meal_id", id
+                )
+                if removed is None:
+                    return
+                await self._refresh_rollups(conn, removed["day"], removed["meal_id"])
+                if removed["meal_id"] is not None:
+                    await conn.execute(
+                        "DELETE FROM meals WHERE id=$1 AND NOT EXISTS "
+                        "(SELECT 1 FROM nutrition_entries WHERE meal_id=$1)",
+                        removed["meal_id"],
+                    )
+                await conn.execute(
+                    "DELETE FROM days WHERE date=$1 AND NOT EXISTS "
+                    "(SELECT 1 FROM nutrition_entries WHERE day=$1)",
+                    removed["day"],
+                )
 
     async def get_brief(self, day: date):
         pool=await self.connect(); return await pool.fetchval("SELECT text FROM briefs WHERE day=$1", day)

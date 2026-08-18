@@ -22,7 +22,13 @@ struct MacroTrackerApp: App {
                 else { PasscodeView().environmentObject(auth) }
             }
             .tint(Theme.accent)
-            .onChange(of: scenePhase) { _, phase in if phase == .background { auth.lock() } }
+            .onChange(of: scenePhase) { _, phase in
+                switch phase {
+                case .background: auth.handleDidEnterBackground()
+                case .active: auth.handleDidBecomeActive()
+                default: break
+                }
+            }
         }
     }
 }

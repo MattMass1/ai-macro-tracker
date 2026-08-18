@@ -1298,16 +1298,21 @@ async def api_chat(request: Request) -> Any:
     if len(message.strip()) > 1000:
         raise MacroError("message must be 1000 characters or fewer")
 
+    requested_day = body.get("date")
+    day = (
+        domain.parse_date(requested_day)
+        if requested_day is not None
+        else domain.effective_date()
+    )
     raw_items, conversational_reply = await parse_chat_message(message.strip())
     if not raw_items:
-        current = await day_payload(domain.effective_date())
+        current = await day_payload(day)
         return {
             "reply": conversational_reply or "Tell me what you ate and I'll log it.",
             "logged": [],
             "totals": current["totals"],
         }
 
-    day = domain.effective_date()
     validated: list[tuple[str, dict[str, float], str, str]] = []
     for raw in raw_items[:10]:
         if not isinstance(raw, dict):

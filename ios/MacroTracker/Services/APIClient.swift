@@ -35,7 +35,7 @@ final class APIClient {
     func presets() async throws -> PresetsPayload { try await get("api/presets") }
     func logMeal(_ body: LogMealBody) async throws -> DayPayload { try await send("api/log", body: body) }
     func logPreset(_ body: LogPresetBody) async throws -> DayPayload { try await send("api/log-preset", body: body) }
-    func chat(_ message: String) async throws -> ChatPayload { try await send("api/chat", body: ChatRequest(message: message)) }
+    func chat(_ message: String, date: String? = nil) async throws -> ChatPayload { try await send("api/chat", body: ChatRequest(message: message, date: date)) }
     func analyze(image: String, meal: String? = nil) async throws -> VisionPayload { try await send("api/vision-log", body: VisionRequest(image: image, meal: meal)) }
     func deleteMeal(_ id: String) async throws -> DayPayload { try await delete("api/meal/\(encoded(id))") }
     func exercises() async throws -> ExercisesPayload { try await get("api/exercises") }
@@ -75,6 +75,7 @@ final class APIClient {
         catch { throw APIError(status: 500, message: "The server response could not be read: \(error.localizedDescription)") }
     }
 
-    private func encoded(_ value: String) -> String { value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? value }
+    private func encoded(_ value: String) -> String {
+        value.addingPercentEncoding(withAllowedCharacters: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))) ?? value
+    }
 }
-

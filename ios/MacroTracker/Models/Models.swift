@@ -136,14 +136,20 @@ struct LogMealBody: Codable {
     var macroSource: String
     var meal: String?
     var day: String?
+    enum CodingKeys: String, CodingKey {
+        case name, calories, protein, carbs, fat, fiber, macroSource, meal
+        case day = "date"
+    }
 }
 
-struct LogPresetBody: Codable { var presetName: String; var servings: Double; var meal: String?; var day: String? }
+struct LogPresetBody: Codable {
+    var presetName: String; var servings: Double; var meal: String?; var day: String?
+    enum CodingKeys: String, CodingKey { case presetName, servings, meal; case day = "date" }
+}
 struct LogWorkoutBody: Codable { var exercise: String; var sets: [WorkoutSet]; var workoutType: String; var date: String? }
-struct ChatRequest: Codable { var message: String }
+struct ChatRequest: Codable { var message: String; var date: String? }
 struct ChatPayload: Codable { var reply: String; var logged: [FoodEntry]; var totals: MacroTotals }
 struct VisionRequest: Codable { var image: String; var meal: String? }
 struct VisionPayload: Codable { var name: String; var note: String; var meal: String?; var calories: Double; var protein: Double; var carbs: Double; var fat: Double; var fiber: Double }
 struct BriefPayload: Codable { var text: String?; var date: String }
 struct BriefRequest: Codable { var text: String; var date: String? }
-

@@ -10,7 +10,7 @@ final class AppStore: ObservableObject {
     @Published var plan: WorkoutPlanPayload?
     @Published var stats: WorkoutStatsPayload?
     @Published var brief: BriefPayload?
-    @Published var isLoadingDay = false
+    @Published var isLoadingDay = true
     @Published var isLoadingWorkouts = false
     @Published var errorMessage: String?
     @Published var toast: String?
@@ -28,26 +28,47 @@ final class AppStore: ObservableObject {
     }
 
     func loadDay() async {
-        isLoadingDay = true; defer { isLoadingDay = false }
+        let requestedDate = selectedDate
+        let requestedDateString = Self.dateFormatter.string(from: requestedDate)
+        let requestedIsToday = Calendar.current.isDateInToday(requestedDate)
+        isLoadingDay = true
+        defer {
+            guard Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
+            isLoadingDay = false
+        }
         do {
-            async let dayResult = isToday ? api.today() : api.day(dateString)
+            async let dayResult = requestedIsToday ? api.today() : api.day(requestedDateString)
             async let presetResult = api.presets()
-            async let briefResult = api.brief(dateString)
+            async let briefResult = api.brief(requestedDateString)
             let (loadedDay, loadedPresets, loadedBrief) = try await (dayResult, presetResult, briefResult)
+            guard !Task.isCancelled, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
             day = loadedDay; presets = loadedDay.presets ?? loadedPresets.presets; brief = loadedBrief
-        } catch { present(error) }
+        } catch {
+            guard !Task.isCancelled, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
+            present(error)
+        }
     }
 
     func loadWorkoutData() async {
-        isLoadingWorkouts = true; defer { isLoadingWorkouts = false }
+        let requestedDate = selectedDate
+        let requestedDateString = Self.dateFormatter.string(from: requestedDate)
+        isLoadingWorkouts = true
+        defer {
+            guard Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
+            isLoadingWorkouts = false
+        }
         do {
-            async let workoutResult = api.workouts(dateString)
+            async let workoutResult = api.workouts(requestedDateString)
             async let exerciseResult = api.exercises()
             async let planResult = api.plan()
             async let statsResult = api.workoutStats()
             let results = try await (workoutResult, exerciseResult, planResult, statsResult)
+            guard !Task.isCancelled, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
             workouts = results.0.workouts; exercises = results.1.exercises; plan = results.2; stats = results.3
-        } catch { present(error) }
+        } catch {
+            guard !Task.isCancelled, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
+            present(error)
+        }
     }
 
     func moveDay(by value: Int) async {
@@ -69,13 +90,21 @@ final class AppStore: ObservableObject {
     }
 
     func deleteMeal(_ id: String) async {
-        do { day = try await api.deleteMeal(id); showToast("Entry deleted") }
+        do { _ = try await api.deleteMeal(id); await loadDay(); showToast("Entry deleted") }
         catch { present(error) }
     }
 
     func saveBrief(_ text: String) async {
-        do { brief = try await api.saveBrief(text, date: dateString); showToast("Note saved") }
-        catch { present(error) }
+        let requestedDate = selectedDate
+        let requestedDateString = Self.dateFormatter.string(from: requestedDate)
+        do {
+            let saved = try await api.saveBrief(text, date: requestedDateString)
+            guard Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
+            brief = saved; showToast("Note saved")
+        } catch {
+            guard Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
+            present(error)
+        }
     }
 
     func logWorkout(exercise: String, sets: [WorkoutSet], type: String) async -> Bool {
@@ -93,7 +122,7 @@ final class AppStore: ObservableObject {
     }
 
     func lastWorkout(_ exercise: String) async -> LastWorkoutPayload? { try? await api.lastWorkout(exercise) }
-    func chat(_ message: String) async throws -> ChatPayload { try await api.chat(message) }
+    func chat(_ message: String) async throws -> ChatPayload { try await api.chat(message, date: isToday ? nil : dateString) }
     func analyze(image: String) async throws -> VisionPayload { try await api.analyze(image: image) }
 
     private func present(_ error: Error) { errorMessage = error.localizedDescription }
@@ -103,4 +132,3 @@ final class AppStore: ObservableObject {
     }
     private static let dateFormatter: DateFormatter = { let f = DateFormatter(); f.calendar = Calendar(identifier: .gregorian); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"; return f }()
 }
-

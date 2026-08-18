@@ -1,17 +1,17 @@
 import SwiftUI
 
 struct DayPicker: View {
-    let date: Date; let canGoForward: Bool; let onMove: (Int) -> Void
+    let date: Date; let canGoForward: Bool; var isEnabled: Bool = true; let onMove: (Int) -> Void
     var body: some View {
         HStack {
-            Button { onMove(-1) } label: { Image(systemName: "chevron.left").frame(width: 40, height: 40).background(Theme.surface, in: Circle()) }.accessibilityLabel("Previous day")
+            Button { onMove(-1) } label: { Image(systemName: "chevron.left").frame(width: 40, height: 40).background(Theme.surface, in: Circle()) }.disabled(!isEnabled).opacity(isEnabled ? 1 : 0.3).accessibilityLabel("Previous day")
             Spacer()
             VStack(spacing: 2) {
                 Text(Calendar.current.isDateInToday(date) ? "TODAY" : date.formatted(.dateTime.weekday(.wide).day().month())).font(.caption.weight(.bold)).tracking(1.7)
                 Text(date.formatted(date: .long, time: .omitted)).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Button { onMove(1) } label: { Image(systemName: "chevron.right").frame(width: 40, height: 40).background(Theme.surface, in: Circle()) }.disabled(!canGoForward).opacity(canGoForward ? 1 : 0.3).accessibilityLabel("Next day")
+            Button { onMove(1) } label: { Image(systemName: "chevron.right").frame(width: 40, height: 40).background(Theme.surface, in: Circle()) }.disabled(!canGoForward || !isEnabled).opacity(canGoForward && isEnabled ? 1 : 0.3).accessibilityLabel("Next day")
         }
     }
 }

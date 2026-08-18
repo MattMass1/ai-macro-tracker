@@ -13,6 +13,7 @@ struct ChatLogView: View {
     @State private var image: UIImage?
     @State private var vision: VisionPayload?
     @State private var isAnalyzing = false
+    @State private var analysisGeneration = 0
     @State private var showCamera = false
     @State private var showManual = false
     @FocusState private var inputFocused: Bool
@@ -36,8 +37,20 @@ struct ChatLogView: View {
         .navigationTitle("Chat & Log").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Manual", systemImage: "slider.horizontal.3") { showManual = true } } }
         .sheet(isPresented: $showManual) { ManualFoodView() }
-        .sheet(isPresented: $showCamera) { CameraPicker(image: $image) }.onChange(of: image) { old, new in if old == nil, new != nil { Task { await analyzeImage() } } }
-        .onChange(of: photoItem) { _, item in Task { await loadPhoto(item) } }
+        .sheet(isPresented: $showCamera) { CameraPicker(image: $image) }
+        .onChange(of: imageIdentity) { old, new in
+            guard old != new else { return }
+            vision = nil
+            analysisGeneration += 1
+            let generation = analysisGeneration
+            guard new != nil else { return }
+            Task { await analyzeImage(generation: generation) }
+        }
+        .onChange(of: photoItem) { _, item in
+            vision = nil
+            analysisGeneration += 1
+            Task { await loadPhoto(item) }
+        }
     }
 
     private var composer: some View {
@@ -61,15 +74,26 @@ struct ChatLogView: View {
         catch { messages.append(ChatMessage(role: .assistant, text: error.localizedDescription)) }
     }
 
+    private var imageIdentity: ObjectIdentifier? { image.map { ObjectIdentifier($0) } }
+
     private func loadPhoto(_ item: PhotosPickerItem?) async {
-        guard let data = try? await item?.loadTransferable(type: Data.self), let picked = UIImage(data: data) else { return }
-        image = picked; await analyzeImage()
+        guard let item else { return }
+        guard let data = try? await item.loadTransferable(type: Data.self), let picked = UIImage(data: data) else { return }
+        guard photoItem == item else { return }
+        image = picked
     }
-    private func analyzeImage() async {
-        guard let data = image?.resizedJPEG(maxDimension: 1800, quality: 0.72) else { return }
-        isAnalyzing = true; vision = nil; defer { isAnalyzing = false }
-        do { vision = try await store.analyze(image: "data:image/jpeg;base64,\(data.base64EncodedString())") }
-        catch { messages.append(ChatMessage(role: .assistant, text: error.localizedDescription)); clearVision() }
+    private func analyzeImage(generation: Int) async {
+        guard generation == analysisGeneration, let data = image?.resizedJPEG(maxDimension: 1800, quality: 0.72) else { return }
+        isAnalyzing = true; vision = nil
+        defer { if generation == analysisGeneration { isAnalyzing = false } }
+        do {
+            let result = try await store.analyze(image: "data:image/jpeg;base64,\(data.base64EncodedString())")
+            guard generation == analysisGeneration else { return }
+            vision = result
+        } catch {
+            guard generation == analysisGeneration else { return }
+            messages.append(ChatMessage(role: .assistant, text: error.localizedDescription)); clearVision()
+        }
     }
     private func logVision() {
         guard let vision else { return }
@@ -78,7 +102,7 @@ struct ChatLogView: View {
             if await store.logMeal(body) { messages.append(ChatMessage(role: .assistant, text: "Logged \(vision.name) — \(Int(vision.calories)) kcal.")); clearVision() }
         }
     }
-    private func clearVision() { image = nil; vision = nil; photoItem = nil }
+    private func clearVision() { analysisGeneration += 1; image = nil; vision = nil; photoItem = nil; isAnalyzing = false }
 }
 
 private struct ChatBubble: View {
@@ -137,4 +161,3 @@ private extension UIImage {
         return UIGraphicsImageRenderer(size: target).image { _ in draw(in: CGRect(origin: .zero, size: target)) }.jpegData(compressionQuality: quality)
     }
 }
-

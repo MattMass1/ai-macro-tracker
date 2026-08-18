@@ -96,7 +96,7 @@ private struct WorkoutLoggerView: View {
                 if type != "Rest" {
                     VStack(alignment: .leading, spacing: 9) {
                         HStack { SectionLabel(text: "Exercise"); Spacer(); if let last, !last.sets.isEmpty { Button("Fill last time") { sets = Array(last.sets.prefix(4)) }.font(.caption.weight(.bold)) } }
-                        TextField("Barbell bench press", text: $exercise).textInputAutocapitalization(.words).padding(14).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14)).onChange(of: exercise) { _, value in Task { last = value.count > 2 ? await store.lastWorkout(value) : nil } }
+                        TextField("Barbell bench press", text: $exercise).textInputAutocapitalization(.words).padding(14).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14)).onChange(of: exercise) { _, value in lookupLastWorkout(value) }.onDisappear { lastWorkoutTask?.cancel() }
                         if !suggestions.isEmpty { ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(suggestions) { item in Button(item.name) { exercise = item.name }.font(.caption).buttonStyle(.bordered) } } } }
                     }
                     VStack(alignment: .leading, spacing: 10) {
@@ -109,6 +109,16 @@ private struct WorkoutLoggerView: View {
             }.padding(16) }.background(Theme.canvas).navigationTitle("Log workout").navigationBarTitleDisplayMode(.inline).toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
         }.presentationDetents([.large])
     }
+    @State private var lastWorkoutTask: Task<Void, Never>?
+    private func lookupLastWorkout(_ value: String) {
+        lastWorkoutTask?.cancel()
+        guard value.count > 2 else { last = nil; return }
+        let query = value
+        lastWorkoutTask = Task { @MainActor in
+            let result = await store.lastWorkout(query)
+            guard !Task.isCancelled, exercise == query else { return }
+            last = result
+        }
+    }
     private func submit() { Task { isSaving = true; let valid = type == "Rest" ? [] : sets.filter { $0.weight > 0 || $0.reps > 0 }; if await store.logWorkout(exercise: type == "Rest" ? "Rest Day" : exercise, sets: valid, type: type) { dismiss() }; isSaving = false } }
 }
-

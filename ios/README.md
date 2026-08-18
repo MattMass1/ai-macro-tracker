@@ -13,3 +13,6 @@ The first launch asks you to create a local numeric passcode. Its SHA-256 digest
 
 `project.yml` is included for teams that use XcodeGen; the checked-in Xcode project works without XcodeGen.
 
+## App icon
+
+The AppIcon asset currently has a placeholder universal 1024×1024 slot. Replace it with the real app icon before submitting to the App Store.

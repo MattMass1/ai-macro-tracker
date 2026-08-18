@@ -128,22 +128,26 @@ class Store:
         # transactions can calculate different snapshots and the older one can
         # overwrite the newer rollup after it commits.
         await conn.fetchval("SELECT date FROM days WHERE date=$1 FOR UPDATE", day)
-        if meal_id is not None:
-            # Adopt legacy entries that predate meal_id. Matching on both the
-            # denormalized meal label and day prevents cross-day attachment.
-            await conn.execute(
-                "UPDATE nutrition_entries e SET meal_id=$1 FROM meals m "
-                "WHERE m.id=$1 AND e.day=m.day AND e.meal=m.meal_type "
-                "AND e.meal_id IS NULL",
-                meal_id,
-            )
-            await conn.execute(
-                "UPDATE meals m SET calories=x.calories,protein=x.protein,carbs=x.carbs,fat=x.fat,fiber=x.fiber "
-                "FROM (SELECT COALESCE(sum(calories),0) calories,COALESCE(sum(protein),0) protein,"
-                "COALESCE(sum(carbs),0) carbs,COALESCE(sum(fat),0) fat,COALESCE(sum(fiber),0) fiber "
-                "FROM nutrition_entries WHERE meal_id=$1) x WHERE m.id=$1",
-                meal_id,
-            )
+        # Adopt legacy entries that predate meal_id. Matching on both the
+        # denormalized meal label and day prevents cross-day attachment.
+        await conn.execute(
+            "UPDATE nutrition_entries e SET meal_id=m.id FROM meals m "
+            "WHERE m.day=$1 AND e.day=$1 AND e.meal=m.meal_type "
+            "AND e.meal_id IS NULL",
+            day,
+        )
+        # Recompute every meal for the day so meal rollups account for all
+        # entries included in the day rollup, including newly adopted ones.
+        await conn.execute(
+            "UPDATE meals m SET calories=x.calories,protein=x.protein,carbs=x.carbs,"
+            "fat=x.fat,fiber=x.fiber FROM ("
+            "SELECT m2.id,COALESCE(sum(e.calories),0) calories,"
+            "COALESCE(sum(e.protein),0) protein,COALESCE(sum(e.carbs),0) carbs,"
+            "COALESCE(sum(e.fat),0) fat,COALESCE(sum(e.fiber),0) fiber "
+            "FROM meals m2 LEFT JOIN nutrition_entries e ON e.meal_id=m2.id "
+            "WHERE m2.day=$1 GROUP BY m2.id) x WHERE m.id=x.id",
+            day,
+        )
         await conn.execute(
             "INSERT INTO days(date,calories,protein,carbs,fat,fiber) "
             "SELECT $1,COALESCE(sum(calories),0),COALESCE(sum(protein),0),COALESCE(sum(carbs),0),"
@@ -187,12 +191,11 @@ class Store:
                 if removed is None:
                     return
                 await self._refresh_rollups(conn, removed["day"], removed["meal_id"])
-                if removed["meal_id"] is not None:
-                    await conn.execute(
-                        "DELETE FROM meals WHERE id=$1 AND NOT EXISTS "
-                        "(SELECT 1 FROM nutrition_entries WHERE meal_id=$1)",
-                        removed["meal_id"],
-                    )
+                await conn.execute(
+                    "DELETE FROM meals WHERE day=$1 AND NOT EXISTS "
+                    "(SELECT 1 FROM nutrition_entries WHERE meal_id=meals.id)",
+                    removed["day"],
+                )
                 await conn.execute(
                     "DELETE FROM days WHERE date=$1 AND NOT EXISTS "
                     "(SELECT 1 FROM nutrition_entries WHERE day=$1)",

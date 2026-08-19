@@ -1322,7 +1322,14 @@ async def api_claim_invite(request: Request) -> Any:
     label = body.get("label")
     if label is not None and not isinstance(label, str):
         raise MacroError("label must be a string")
-    return await store_client().claim_invite(code.strip(), label.strip() if label else None)
+    display_name = body.get("display_name")
+    if display_name is not None and not isinstance(display_name, str):
+        raise MacroError("display_name must be a string")
+    return await store_client().claim_invite(
+        code.strip(),
+        label.strip() if label else None,
+        display_name.strip() if display_name else None,
+    )
 
 
 @api_route("/api/today", methods=["GET"])

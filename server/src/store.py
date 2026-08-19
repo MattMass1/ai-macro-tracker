@@ -89,7 +89,7 @@ class Store:
             hash_device_token(raw_token),
         )
 
-    async def claim_invite(self, code: str, label: str | None = None) -> dict[str, str]:
+    async def claim_invite(self, code: str, label: str | None = None, display_name: str | None = None) -> dict[str, str]:
         pool = await self.connect()
         async with pool.acquire() as conn, conn.transaction():
             invite = await conn.fetchrow(
@@ -106,7 +106,14 @@ class Store:
                 hash_device_token(raw_token), invite["user_id"], label,
             )
             await conn.execute("UPDATE invite_codes SET claimed_at=now() WHERE code=$1", code)
-            return {"token": raw_token, "display_name": invite["display_name"]}
+            name = display_name
+            if name:
+                name = name.strip()[:40]
+                if name:
+                    await conn.execute(
+                        "UPDATE users SET display_name=$1 WHERE id=$2", name, invite["user_id"]
+                    )
+            return {"token": raw_token, "display_name": name or invite["display_name"]}
 
     async def fetch_meals(self, start: date, end: date | None = None):
         pool = await self.connect(); end = end or start; user_id = current_user_id()

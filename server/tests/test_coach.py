@@ -237,6 +237,18 @@ class FakeStore:
     async def fetch_chat_messages(self, limit=20):
         return []
 
+    async def fetch_meals(self, _start, _end=None):
+        return []
+
+    async def fetch_meal_rollups(self, _day):
+        return []
+
+    async def fetch_day_rollups(self, _start=None, _end=None):
+        return []
+
+    async def fetch_targets(self, _day):
+        return None
+
     async def fetch_workout_plan(self):
         return self.plan
 
@@ -291,14 +303,25 @@ async def test_gym_chat_uses_coach_and_reports_onboarding(monkeypatch):
         await record_usage({"model": "claude-sonnet-5", "input_tokens": 10, "output_tokens": 5})
         return "Welcome! What's your goal?", [{"tool": "get_today", "input": {}, "ok": True}]
 
+    async def fake_day_payload(day):
+        assert day == domain.effective_date()
+        return {"totals": {"calories": 725, "protein": 55, "carbs": 80,
+                           "fat": 20, "fiber": 9}}
+
     monkeypatch.setattr(srv, "run_agent", fake_run_agent)
     monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
 
     http_response = await srv.api_chat(chat_request({"message": "what should I do today?"}))
     assert http_response.status_code == 200
     payload = json.loads(http_response.body)
-    assert payload == {"reply": "Welcome! What's your goal?", "has_plan": False,
-                       "has_targets": False}
+    assert payload == {
+        "reply": "Welcome! What's your goal?",
+        "logged": [],
+        "totals": {"calories": 725, "protein": 55, "carbs": 80, "fat": 20, "fiber": 9},
+        "has_plan": False,
+        "has_targets": False,
+    }
     assert seen["onboarding"] is True  # no plan + no targets → interview mode
     assert len(seen["tools"]) == 15
     assert [row[0] for row in fake.inserted] == ["user", "assistant"]
@@ -342,6 +365,53 @@ async def test_chat_failure_persists_user_and_synthetic_assistant(monkeypatch):
     assert [(row[0], row[1]) for row in fake.inserted] == [
         ("user", "hi"),
         ("assistant", "Sorry, I couldn't reach the coach. Try again."),
+    ]
+
+
+async def test_parser_failure_falls_through_to_coach_with_raw_message(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    seen = {}
+
+    async def failing_parse(_message):
+        raise MacroError("parser unavailable")
+
+    async def fake_run_agent(**kwargs):
+        seen.update(kwargs)
+        return "Let's work on that.", []
+
+    monkeypatch.setattr(srv, "parse_chat_message", failing_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+
+    http_response = await srv.api_chat(chat_request({"message": "  build me a gym plan  "}))
+    assert http_response.status_code == 200
+    assert seen["message"] == "build me a gym plan"
+    assert [(row[0], row[1]) for row in fake.inserted] == [
+        ("user", "build me a gym plan"),
+        ("assistant", "Let's work on that."),
+    ]
+
+
+async def test_food_path_failure_persists_synthetic_assistant(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+
+    async def fake_parse(_message):
+        return [{"name": "eggs", "calories": 140, "protein": 12,
+                 "carbs": 1, "fat": 10, "fiber": 0,
+                 "meal": "Breakfast", "note": "USDA"}], None
+
+    async def failing_write_meal(*_args, **_kwargs):
+        raise MacroError("database unavailable")
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "write_meal", failing_write_meal)
+
+    http_response = await srv.api_chat(chat_request({"message": "log eggs"}))
+    assert http_response.status_code == 400
+    assert [(row[0], row[1]) for row in fake.inserted] == [
+        ("user", "log eggs"),
+        ("assistant", "Sorry, I couldn't log that. Try again."),
     ]
 
 

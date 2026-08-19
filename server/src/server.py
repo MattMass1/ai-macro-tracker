@@ -9,6 +9,7 @@ from __future__ import annotations
 import functools
 import hmac
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -38,6 +39,8 @@ from store import Store, StoreError  # noqa: E402
 from store import ChatQuotaExceeded, InviteAlreadyClaimed, InviteNotFound  # noqa: E402
 from auth import bind_user, current_user_id, reset_user  # noqa: E402
 from coach import CoachProviderError, run_agent  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 _client: Store | None = None
 
@@ -1486,40 +1489,53 @@ async def api_chat(request: Request) -> Any:
     except ChatQuotaExceeded:
         return {"error": "You've reached today's coach limit. Ask Matt to raise it."}, 429
 
-    raw_items, _ = await parse_chat_message(text)
+    try:
+        raw_items, _ = await parse_chat_message(text)
+    except Exception:
+        logger.exception("Food parser failed; falling back to coach")
+        raw_items = []
     if raw_items:
-        requested_day = body.get("date")
-        day = domain.parse_date(requested_day) if requested_day is not None else domain.effective_date()
-        validated: list[tuple[str, dict[str, float], str, str]] = []
-        for raw in raw_items[:10]:
-            if not isinstance(raw, dict):
-                raise MacroError("I couldn't understand one of those food items. Please rephrase it.")
-            clean_name = domain.validate_name(str(raw.get("name", "")))
-            macros = domain.validate_macros(
-                raw.get("calories"), raw.get("protein"), raw.get("carbs"),
-                raw.get("fat"), raw.get("fiber", 0)
-            )
-            meal_name = domain.normalize_meal(raw.get("meal"))
-            validated.append(
-                (clean_name, macros, str(raw.get("note") or "Chat & Log"), meal_name)
-            )
+        try:
+            requested_day = body.get("date")
+            day = domain.parse_date(requested_day) if requested_day is not None else domain.effective_date()
+            validated: list[tuple[str, dict[str, float], str, str]] = []
+            for raw in raw_items[:10]:
+                if not isinstance(raw, dict):
+                    raise MacroError("I couldn't understand one of those food items. Please rephrase it.")
+                clean_name = domain.validate_name(str(raw.get("name", "")))
+                macros = domain.validate_macros(
+                    raw.get("calories"), raw.get("protein"), raw.get("carbs"),
+                    raw.get("fat"), raw.get("fiber", 0)
+                )
+                meal_name = domain.normalize_meal(raw.get("meal"))
+                validated.append(
+                    (clean_name, macros, str(raw.get("note") or "Chat & Log"), meal_name)
+                )
 
-        logged: list[dict[str, Any]] = []
-        for clean_name, macros, note, meal_name in validated:
-            result = await write_meal(
-                clean_name, macros["calories"], macros["protein"], macros["carbs"],
-                macros["fat"], note, meal_name, day.isoformat(), allow_estimate=True,
-                fiber=macros["fiber"],
-            )
-            logged.append(result["logged"])
+            logged: list[dict[str, Any]] = []
+            for clean_name, macros, note, meal_name in validated:
+                result = await write_meal(
+                    clean_name, macros["calories"], macros["protein"], macros["carbs"],
+                    macros["fat"], note, meal_name, day.isoformat(), allow_estimate=True,
+                    fiber=macros["fiber"],
+                )
+                logged.append(result["logged"])
 
-        current = await day_payload(day, ensure=logged)
-        names = ", ".join(f'{item["name"]} {item["calories"]:g} kcal ✓' for item in logged)
-        totals = current["totals"]
-        targets = current["targets"]
-        reply = f'Logged {len(logged)} item{"s" if len(logged) != 1 else ""} — {names}. Total now {totals["calories"]:g}/{targets["calories"]:g} kcal.'
-        await client.insert_chat_message("assistant", reply)
-        return {"reply": reply, "logged": logged, "totals": totals}
+            current = await day_payload(day, ensure=logged)
+            names = ", ".join(f'{item["name"]} {item["calories"]:g} kcal ✓' for item in logged)
+            totals = current["totals"]
+            targets = current["targets"]
+            reply = f'Logged {len(logged)} item{"s" if len(logged) != 1 else ""} — {names}. Total now {totals["calories"]:g}/{targets["calories"]:g} kcal.'
+            await client.insert_chat_message("assistant", reply)
+            return {"reply": reply, "logged": logged, "totals": totals}
+        except Exception:
+            try:
+                await client.insert_chat_message(
+                    "assistant", "Sorry, I couldn't log that. Try again."
+                )
+            except Exception:
+                pass  # The food-path error is the one worth surfacing.
+            raise
 
     plan, has_targets = await asyncio.gather(
         client.fetch_workout_plan(), client.has_macro_targets()
@@ -1545,7 +1561,9 @@ async def api_chat(request: Request) -> Any:
             pass  # The loop's error is the one worth surfacing.
         raise
     await client.insert_chat_message("assistant", reply, tool_results or None)
-    return {"reply": reply, "has_plan": plan is not None or await client.fetch_workout_plan() is not None,
+    current = await day_payload(domain.effective_date())
+    return {"reply": reply, "logged": [], "totals": current["totals"],
+            "has_plan": plan is not None or await client.fetch_workout_plan() is not None,
             "has_targets": has_targets or await client.has_macro_targets()}
 
 

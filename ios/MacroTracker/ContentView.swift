@@ -1,49 +1,30 @@
 import SwiftUI
-import UIKit
 
 struct ContentView: View {
     @EnvironmentObject private var store: AppStore
-    @State private var selectedTab = 0
+    @State private var selectedTab = 1  // Coach home
     @State private var showManualMeal = false
     @State private var showWorkoutLogger = false
     @State private var scanFoodTrigger = 0
 
-    init(initialTab: Int = 0) {
+    init(initialTab: Int = 1) {
         _selectedTab = State(initialValue: initialTab)
-        let appearance = UITabBarAppearance()
-        appearance.configureWithOpaqueBackground()
-        appearance.backgroundColor = UIColor(Theme.surface)
-        appearance.shadowColor = UIColor(Theme.divider)
-        let inactive = UIColor(Theme.inactive)
-        let active = UIColor(Theme.accent)
-        for layout in [appearance.stackedLayoutAppearance, appearance.inlineLayoutAppearance, appearance.compactInlineLayoutAppearance] {
-            layout.normal.iconColor = inactive
-            layout.normal.titleTextAttributes = [.foregroundColor: inactive]
-            layout.selected.iconColor = active
-            layout.selected.titleTextAttributes = [.foregroundColor: active]
-        }
-        UITabBar.appearance().standardAppearance = appearance
-        UITabBar.appearance().scrollEdgeAppearance = appearance
     }
 
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .top) {
                 TabView(selection: $selectedTab) {
-                    NavigationStack { TodayView(selectedTab: $selectedTab) }
-                        .tabItem { Label("Today", systemImage: "circle.grid.2x2.fill") }
+                    NavigationStack { WorkoutsView() }
                         .tag(0)
                     NavigationStack { ChatLogView(scanFoodTrigger: scanFoodTrigger) }
-                        .tabItem { Label("Coach", systemImage: "bubble.left.and.bubble.right.fill") }
                         .tag(1)
-                    NavigationStack { WorkoutsView() }
-                        .tabItem { Label("Workouts", systemImage: "figure.strengthtraining.traditional") }
+                    NavigationStack { TodayView(selectedTab: $selectedTab) }
                         .tag(2)
                     NavigationStack { ProgressDashboardView() }
-                        .tabItem { Label("Progress", systemImage: "chart.bar.fill") }
                         .tag(3)
                 }
-                .tint(Theme.accent)
+                .tabViewStyle(.page(indexDisplayMode: .never))
 
                 if selectedTab != 1 {
                     AddBarView(
@@ -57,7 +38,7 @@ struct ContentView: View {
                         onAskCoach: { selectedTab = 1 }
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                    .padding(.bottom, geometry.safeAreaInsets.bottom + 52)
+                    .padding(.bottom, geometry.safeAreaInsets.bottom + 16)
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
                     .zIndex(1)
                 }

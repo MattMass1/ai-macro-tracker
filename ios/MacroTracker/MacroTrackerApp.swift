@@ -5,20 +5,11 @@ struct MacroTrackerApp: App {
     @StateObject private var auth = AuthService()
     @StateObject private var store = AppStore()
 
-    init() {
-        let appearance = UITabBarAppearance()
-        appearance.configureWithOpaqueBackground()
-        appearance.backgroundColor = UIColor(Theme.surface)
-        appearance.shadowColor = UIColor.separator.withAlphaComponent(0.25)
-        UITabBar.appearance().standardAppearance = appearance
-        UITabBar.appearance().scrollEdgeAppearance = appearance
-    }
-
     var body: some Scene {
         WindowGroup {
             Group {
                 if auth.isAuthenticated {
-                    ContentView(initialTab: auth.freshClaim ? 1 : 0)
+                    ContentView()
                         .environmentObject(store)
                         .environmentObject(auth)
                 } else {

@@ -52,7 +52,7 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 | Role | Agent | Owns | Never touches |
 |---|---|---|---|
 | **Orchestrator** | Hermes | Planning, triage, dispatch, review aggregation, deploy | Writing feature code directly |
-| **UI Builder** | Claude Code (Mac) | `ios/` SwiftUI: screens, theme, components, Keychain | Backend logic, schema |
+| **UI Builder** | Claude Code (Mac) + Sol/Grok (VM) | `ios/` SwiftUI: screens, theme, components, Keychain | Backend logic, schema |
 | **Backend Builder** | Sol (Codex) | `server/`: store, auth, coach tools, schema | SwiftUI files |
 | **Writer** | Luna (Codex) | Tests, migrations, backfill scripts, mechanical code | Architecture decisions |
 | **Design Reviewer** | Fable (Claude) | Design/architecture review, Swift idioms, taste | Writing feature code |
@@ -63,9 +63,15 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 - The UI Builder does not write backend logic. The Backend Builder does not
   restyle screens. If you see a problem in another role's territory, report it
   to the orchestrator — do not fix it yourself.
+- Writing Swift files does NOT require Xcode — only the final build does. When
+  the Mac UI Builder (Claude Code) is not actively running, the orchestrator
+  may route SwiftUI writing to Sol/Grok on the VM. The Mac is only required
+  for the final xcodebuild/Play step.
 - Reviewers review, they don't rewrite. If a fix is needed, the orchestrator
   routes it back to the owning builder.
-- Any agent may refuse a task that violates the creed.
+- Any agent may refuse a task that violates the creed — but the orchestrator
+  (Hermes) resolves role assignments per Matt's direction, and its routing
+  decisions update this creed.
 
 ## Build flow (the loop)
 

@@ -69,7 +69,7 @@ def system_prompt(onboarding: bool) -> str:
 
 
 async def post_anthropic(token: str, payload: dict[str, Any]) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=45.0) as client:
+    async with httpx.AsyncClient(timeout=90.0) as client:
         return await client.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": token, "anthropic-version": "2023-06-01", "content-type": "application/json"},

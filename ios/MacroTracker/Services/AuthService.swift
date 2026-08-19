@@ -28,7 +28,7 @@ final class AuthService: ObservableObject {
         if let tokenRejectedObserver { NotificationCenter.default.removeObserver(tokenRejectedObserver) }
     }
 
-    func claimInvite(code: String, deviceLabel: String? = nil) async {
+    func claimInvite(code: String, displayName: String? = nil, deviceLabel: String? = nil) async {
         let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { errorMessage = "Enter your invite code."; return }
         guard !isClaiming else { return }
@@ -36,7 +36,7 @@ final class AuthService: ObservableObject {
         errorMessage = nil
         defer { isClaiming = false }
         do {
-            let claim = try await api.claimInvite(code: trimmed, label: deviceLabel)
+            let claim = try await api.claimInvite(code: trimmed, label: deviceLabel, displayName: displayName)
             guard KeychainStore.saveDeviceToken(claim.token) else {
                 errorMessage = "Could not store your access key securely. Try again."
                 return

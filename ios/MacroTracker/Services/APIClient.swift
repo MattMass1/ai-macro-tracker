@@ -38,8 +38,8 @@ final class APIClient {
         encoder.keyEncodingStrategy = .convertToSnakeCase
     }
 
-    func claimInvite(code: String, label: String? = nil) async throws -> ClaimInvitePayload {
-        try await request("api/claim-invite", method: "POST", body: encoder.encode(ClaimInviteBody(code: code, label: label)), authenticated: false)
+    func claimInvite(code: String, label: String? = nil, displayName: String? = nil) async throws -> ClaimInvitePayload {
+        try await request("api/claim-invite", method: "POST", body: encoder.encode(ClaimInviteBody(code: code, label: label, displayName: displayName)), authenticated: false)
     }
 
     func today() async throws -> DayPayload { try await get("api/today") }

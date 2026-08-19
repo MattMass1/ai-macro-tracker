@@ -12,8 +12,10 @@ struct ChatLogView: View {
     }
 
     @EnvironmentObject private var store: AppStore
-    @State private var messages = [ChatMessage(role: .assistant, text: "Tell me what you ate and I’ll log it.")]
+    @EnvironmentObject private var auth: AuthService
+    @State private var messages: [ChatMessage] = []
     @State private var input = ""
+    @State private var showSignOutConfirm = false
     @State private var isSending = false
     @State private var photoItem: PhotosPickerItem?
     @State private var image: UIImage?
@@ -61,12 +63,21 @@ struct ChatLogView: View {
         .onChange(of: scanFoodTrigger) { _, _ in
             handleScanFoodTrigger()
         }
-        .onAppear { handleScanFoodTrigger() }
+        .onAppear { seedGreeting(); handleScanFoodTrigger() }
+        .confirmationDialog("Sign out?", isPresented: $showSignOutConfirm, titleVisibility: .visible) {
+            Button("Sign out", role: .destructive) { auth.signOut() }
+        } message: {
+            Text("You'll need a new invite code to sign back in.")
+        }
     }
 
     private var coachHeader: some View {
         HStack(spacing: 11) {
-            Text("🤖").font(.title3).frame(width: 40, height: 40).background(Theme.accentTint, in: Circle())
+            Menu {
+                Button("Sign out", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { showSignOutConfirm = true }
+            } label: {
+                Text("🤖").font(.title3).frame(width: 40, height: 40).background(Theme.accentTint, in: Circle())
+            }
             VStack(alignment: .leading, spacing: 2) {
                 Text("Coach").font(.headline).foregroundStyle(Theme.ink)
                 HStack(spacing: 5) { Circle().fill(Theme.accent).frame(width: 7, height: 7); Text("Online").font(.caption).foregroundStyle(Theme.muted) }
@@ -94,8 +105,33 @@ struct ChatLogView: View {
     private func send() async {
         let message = input.trimmingCharacters(in: .whitespacesAndNewlines); guard !message.isEmpty else { return }
         input = ""; messages.append(ChatMessage(role: .user, text: message)); isSending = true; defer { isSending = false }
-        do { let response = try await store.chat(message); messages.append(ChatMessage(role: .assistant, text: response.reply)); if !response.logged.isEmpty { await store.loadDay() } }
-        catch { messages.append(ChatMessage(role: .assistant, text: error.localizedDescription)) }
+        do {
+            let response = try await store.chat(message)
+            messages.append(ChatMessage(role: .assistant, text: response.reply))
+            // The coach can log food or write targets/plan on any turn.
+            await store.loadDay()
+            if response.hasPlan == true || response.hasTargets == true { await store.loadWorkoutData() }
+        } catch let error as APIError where error.status == 429 {
+            messages.append(ChatMessage(role: .assistant, text: "You're at today's limit, ask Matt to raise it."))
+        } catch {
+            messages.append(ChatMessage(role: .assistant, text: error.localizedDescription))
+        }
+    }
+
+    private func seedGreeting() {
+        guard messages.isEmpty else { return }
+        if needsOnboarding {
+            let name = auth.displayName.map { " \($0)" } ?? ""
+            messages.append(ChatMessage(role: .assistant, text: "Welcome\(name)! Let's get you set up. Tell me about your goals, height, weight, and how active you are, and I'll build your targets and plan."))
+        } else {
+            messages.append(ChatMessage(role: .assistant, text: "Tell me what you ate and I'll log it."))
+        }
+    }
+
+    private var needsOnboarding: Bool {
+        if auth.freshClaim { return true }
+        if let targets = store.day?.targets { return targets.calories <= 0 }
+        return false
     }
 
     private var imageIdentity: ObjectIdentifier? { image.map { ObjectIdentifier($0) } }
@@ -129,7 +165,7 @@ struct ChatLogView: View {
         guard let vision else { return }
         Task {
             let body = LogMealBody(name: vision.name, calories: vision.calories, protein: vision.protein, carbs: vision.carbs, fat: vision.fat, fiber: vision.fiber, macroSource: "Vision model (estimated from food photo)", meal: vision.meal, day: store.isToday ? nil : store.dateString)
-            if await store.logMeal(body) { messages.append(ChatMessage(role: .assistant, text: "Logged \(vision.name) — \(Int(vision.calories)) kcal.")); clearVision() }
+            if await store.logMeal(body) { messages.append(ChatMessage(role: .assistant, text: "Logged \(vision.name), \(Int(vision.calories)) kcal.")); clearVision() }
         }
     }
     private func clearVision() { analysisGeneration += 1; image = nil; vision = nil; photoItem = nil; isAnalyzing = false }

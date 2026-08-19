@@ -163,6 +163,10 @@ struct LogPresetBody: Codable {
 struct LogWorkoutBody: Codable { var exercise: String; var sets: [WorkoutSet]; var workoutType: String; var date: String? }
 struct ChatRequest: Codable { var message: String; var date: String? }
 struct ChatPayload: Codable { var reply: String; var logged: [FoodEntry]; var totals: MacroTotals }
+// Optionals keep decoding compatible while the coach backend rolls out the flags.
+struct ChatReply: Codable { var reply: String; var hasPlan: Bool?; var hasTargets: Bool? }
+struct ClaimInviteBody: Codable { var code: String; var label: String? }
+struct ClaimInvitePayload: Codable { var token: String; var displayName: String }
 struct VisionRequest: Codable { var image: String; var meal: String? }
 struct VisionPayload: Codable { var name: String; var note: String; var meal: String?; var calories: Double; var protein: Double; var carbs: Double; var fat: Double; var fiber: Double }
 struct BriefPayload: Codable { var text: String?; var date: String }

@@ -12,9 +12,7 @@
     <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSRequiresIPhoneOS</key><true/>
     <key>MACRO_API_URL</key><string>$(MACRO_API_URL)</string>
-    <key>APP_SHARED_TOKEN</key><string>$(APP_SHARED_TOKEN)</string>
     <key>NSCameraUsageDescription</key><string>Take a photo of your food to estimate and log its macros.</string>
-    <key>NSFaceIDUsageDescription</key><string>Unlock your private nutrition and workout log.</string>
     <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
     <key>UILaunchScreen</key><dict/>
     <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>

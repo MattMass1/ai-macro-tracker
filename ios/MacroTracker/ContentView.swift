@@ -8,7 +8,8 @@ struct ContentView: View {
     @State private var showWorkoutLogger = false
     @State private var scanFoodTrigger = 0
 
-    init() {
+    init(initialTab: Int = 0) {
+        _selectedTab = State(initialValue: initialTab)
         let appearance = UITabBarAppearance()
         appearance.configureWithOpaqueBackground()
         appearance.backgroundColor = UIColor(Theme.surface)

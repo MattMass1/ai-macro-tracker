@@ -53,6 +53,50 @@ private struct WorkoutLoggerSelection: Identifiable {
     var id: String { "\(type)|\(exercise)" }
 }
 
+/// Local checkmarks for today's planned session. Device-scoped (not per-user),
+/// so sign-out must wipe them via `removeAll()` or the next claim inherits them.
+enum WorkoutSessionCompletions {
+    static let keyPrefix = "workout-session-completed."
+
+    static func key(date: String, type: String) -> String {
+        "\(keyPrefix)\(date).\(type)"
+    }
+
+    static func saved(date: String, type: String) -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: key(date: date, type: type)) ?? [])
+    }
+
+    static func save(_ completed: Set<String>, date: String, type: String) {
+        UserDefaults.standard.set(Array(completed), forKey: key(date: date, type: type))
+    }
+
+    static func removeAll() {
+        let defaults = UserDefaults.standard
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(keyPrefix) {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    static func pruneOld() {
+        let defaults = UserDefaults.standard
+        let calendar = Calendar(identifier: .gregorian)
+        guard let cutoff = calendar.date(byAdding: .day, value: -30, to: calendar.startOfDay(for: Date())) else { return }
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(keyPrefix) {
+            let suffix = key.dropFirst(keyPrefix.count)
+            guard suffix.count > 10, suffix[suffix.index(suffix.startIndex, offsetBy: 10)] == "." else { continue }
+            let dateText = String(suffix.prefix(10))
+            if let storedDate = formatter.date(from: dateText), storedDate < cutoff {
+                defaults.removeObject(forKey: key)
+            }
+        }
+    }
+}
+
 private enum CanonicalWorkoutType {
     static let ordered = ["Push", "Pull", "Legs", "Abs", "Cardio", "Full Body"]
     static let all = ordered + ["Rest"]
@@ -93,7 +137,7 @@ private struct TodaysSessionCard: View {
         self.onAddMore = onAddMore
         let names = session.exercises.map(\.name)
         _exercises = State(initialValue: names)
-        _completed = State(initialValue: Self.savedCompletions(date: date, type: session.type))
+        _completed = State(initialValue: WorkoutSessionCompletions.saved(date: date, type: session.type))
     }
 
     var body: some View {
@@ -154,7 +198,7 @@ private struct TodaysSessionCard: View {
         }
         .appCard()
         .task {
-            Self.pruneOldCompletions()
+            WorkoutSessionCompletions.pruneOld()
             if let payload = try? await APIClient.shared.library() {
                 library = payload.exercises
             }
@@ -179,35 +223,7 @@ private struct TodaysSessionCard: View {
     }
 
     private func saveCompletions() {
-        UserDefaults.standard.set(Array(completed), forKey: Self.completionKey(date: date, type: session.type))
-    }
-
-    private static func savedCompletions(date: String, type: String) -> Set<String> {
-        Set(UserDefaults.standard.stringArray(forKey: completionKey(date: date, type: type)) ?? [])
-    }
-
-    private static func completionKey(date: String, type: String) -> String {
-        "workout-session-completed.\(date).\(type)"
-    }
-
-    private static func pruneOldCompletions() {
-        let defaults = UserDefaults.standard
-        let prefix = "workout-session-completed."
-        let calendar = Calendar(identifier: .gregorian)
-        guard let cutoff = calendar.date(byAdding: .day, value: -30, to: calendar.startOfDay(for: Date())) else { return }
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-
-        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(prefix) {
-            let suffix = key.dropFirst(prefix.count)
-            guard suffix.count > 10, suffix[suffix.index(suffix.startIndex, offsetBy: 10)] == "." else { continue }
-            let dateText = String(suffix.prefix(10))
-            if let storedDate = formatter.date(from: dateText), storedDate < cutoff {
-                defaults.removeObject(forKey: key)
-            }
-        }
+        WorkoutSessionCompletions.save(completed, date: date, type: session.type)
     }
 }
 

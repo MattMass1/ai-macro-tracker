@@ -36,6 +36,8 @@ def _value(value: Any) -> Any:
         return float(value)
     if isinstance(value, (date, datetime)):
         return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
     return value
 
 

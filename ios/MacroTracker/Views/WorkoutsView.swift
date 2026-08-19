@@ -2,9 +2,8 @@ import SwiftUI
 
 struct WorkoutsView: View {
     @EnvironmentObject private var store: AppStore
-    @State private var showLogger = false
     var body: some View {
-        ZStack(alignment: .bottomTrailing) { Theme.canvas.ignoresSafeArea()
+        ZStack { Theme.canvas.ignoresSafeArea()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     DayPicker(date: store.selectedDate, canGoForward: !store.isToday) { delta in Task { await store.moveDay(by: delta) } }
@@ -14,8 +13,7 @@ struct WorkoutsView: View {
                     WorkoutHistory(workouts: store.workouts) { id in Task { await store.deleteWorkout(id) } }
                 }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 96)
             }.refreshable { await store.loadWorkoutData() }
-            Button { showLogger = true } label: { Label("Log workout", systemImage: "plus").font(.subheadline.weight(.bold)).padding(.horizontal, 18).frame(height: 52).background(Theme.accent, in: Capsule()).foregroundStyle(.white).shadow(color: .black.opacity(0.18), radius: 16, y: 7) }.padding(18)
-        }.navigationBarHidden(true).sheet(isPresented: $showLogger) { WorkoutLoggerView() }
+        }.navigationBarHidden(true)
     }
     private var workoutSkeleton: some View { VStack(spacing: 10) { HStack { RoundedRectangle(cornerRadius: 20).frame(height: 130); RoundedRectangle(cornerRadius: 20).frame(height: 130) }; RoundedRectangle(cornerRadius: 20).frame(height: 160) }.foregroundStyle(Theme.surface).redacted(reason: .placeholder).shimmering() }
 }
@@ -83,7 +81,7 @@ private struct WorkoutHistory: View {
     }
 }
 
-private struct WorkoutLoggerView: View {
+struct WorkoutLoggerView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var exercise = ""; @State private var type = "Push"; @State private var sets = [WorkoutSet(weight: 0, reps: 0)]; @State private var last: LastWorkoutPayload?; @State private var isSaving = false

@@ -21,7 +21,7 @@ struct TodayView: View {
                         BriefCard(text: $note) { Task { await persistCurrentNote() } }
                         PresetGridView(presets: store.presets) { preset in Task { await store.logPreset(preset) } }
                     } else { EmptyState(icon: "wifi.exclamationmark", title: "No daily data", message: "Pull to refresh after checking your API settings.") }
-                }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 30)
+                }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 96)
             }.refreshable { await store.loadDay() }
         }
         .navigationBarHidden(true)

@@ -5,6 +5,12 @@ import UIKit
 struct ChatMessage: Identifiable { let id = UUID(); let role: Role; let text: String; enum Role { case user, assistant } }
 
 struct ChatLogView: View {
+    let scanFoodTrigger: Int
+
+    init(scanFoodTrigger: Int = 0) {
+        self.scanFoodTrigger = scanFoodTrigger
+    }
+
     @EnvironmentObject private var store: AppStore
     @State private var messages = [ChatMessage(role: .assistant, text: "Tell me what you ate and I’ll log it.")]
     @State private var input = ""
@@ -16,6 +22,7 @@ struct ChatLogView: View {
     @State private var analysisGeneration = 0
     @State private var showCamera = false
     @State private var showManual = false
+    @State private var handledScanFoodTrigger = 0
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -51,6 +58,10 @@ struct ChatLogView: View {
             analysisGeneration += 1
             Task { await loadPhoto(item) }
         }
+        .onChange(of: scanFoodTrigger) { _, _ in
+            handleScanFoodTrigger()
+        }
+        .onAppear { handleScanFoodTrigger() }
     }
 
     private var coachHeader: some View {
@@ -88,6 +99,12 @@ struct ChatLogView: View {
     }
 
     private var imageIdentity: ObjectIdentifier? { image.map { ObjectIdentifier($0) } }
+
+    private func handleScanFoodTrigger() {
+        guard scanFoodTrigger > handledScanFoodTrigger else { return }
+        handledScanFoodTrigger = scanFoodTrigger
+        showCamera = true
+    }
 
     private func loadPhoto(_ item: PhotosPickerItem?) async {
         guard let item else { return }
@@ -142,7 +159,7 @@ private struct VisionCard: View {
     }
 }
 
-private struct ManualFoodView: View {
+struct ManualFoodView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""; @State private var meal = "Snack"; @State private var calories = ""; @State private var protein = ""; @State private var carbs = ""; @State private var fat = ""; @State private var fiber = ""

@@ -4,6 +4,9 @@ import UIKit
 struct ContentView: View {
     @EnvironmentObject private var store: AppStore
     @State private var selectedTab = 0
+    @State private var showManualMeal = false
+    @State private var showWorkoutLogger = false
+    @State private var scanFoodTrigger = 0
 
     init() {
         let appearance = UITabBarAppearance()
@@ -23,36 +26,58 @@ struct ContentView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .top) {
-            TabView(selection: $selectedTab) {
-                NavigationStack { TodayView(selectedTab: $selectedTab) }
-                    .tabItem { Label("Today", systemImage: "circle.grid.2x2.fill") }
-                    .tag(0)
-                NavigationStack { ChatLogView() }
-                    .tabItem { Label("Coach", systemImage: "bubble.left.and.bubble.right.fill") }
-                    .tag(1)
-                NavigationStack { WorkoutsView() }
-                    .tabItem { Label("Workouts", systemImage: "figure.strengthtraining.traditional") }
-                    .tag(2)
-                NavigationStack { ProgressDashboardView() }
-                    .tabItem { Label("Progress", systemImage: "chart.bar.fill") }
-                    .tag(3)
-            }
-            .tint(Theme.accent)
+        GeometryReader { geometry in
+            ZStack(alignment: .top) {
+                TabView(selection: $selectedTab) {
+                    NavigationStack { TodayView(selectedTab: $selectedTab) }
+                        .tabItem { Label("Today", systemImage: "circle.grid.2x2.fill") }
+                        .tag(0)
+                    NavigationStack { ChatLogView(scanFoodTrigger: scanFoodTrigger) }
+                        .tabItem { Label("Coach", systemImage: "bubble.left.and.bubble.right.fill") }
+                        .tag(1)
+                    NavigationStack { WorkoutsView() }
+                        .tabItem { Label("Workouts", systemImage: "figure.strengthtraining.traditional") }
+                        .tag(2)
+                    NavigationStack { ProgressDashboardView() }
+                        .tabItem { Label("Progress", systemImage: "chart.bar.fill") }
+                        .tag(3)
+                }
+                .tint(Theme.accent)
 
-            if let toast = store.toast {
-                Label(toast, systemImage: "checkmark.circle.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.ink)
-                    .padding(.horizontal, 16).padding(.vertical, 10)
-                    .background(Theme.surface, in: Capsule())
-                    .shadow(color: .black.opacity(0.12), radius: 16, y: 6)
-                    .padding(.top, 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                if selectedTab != 1 {
+                    AddBarView(
+                        selectedTab: selectedTab,
+                        onLogMeal: { showManualMeal = true },
+                        onLogWorkout: { showWorkoutLogger = true },
+                        onScanFood: {
+                            selectedTab = 1
+                            scanFoodTrigger += 1
+                        },
+                        onAskCoach: { selectedTab = 1 }
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .padding(.bottom, geometry.safeAreaInsets.bottom + 52)
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
+                    .zIndex(1)
+                }
+
+                if let toast = store.toast {
+                    Label(toast, systemImage: "checkmark.circle.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.ink)
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .background(Theme.surface, in: Capsule())
+                        .shadow(color: .black.opacity(0.12), radius: 16, y: 6)
+                        .padding(.top, 8)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
             }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.78), value: store.toast)
+        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: selectedTab)
         .task { await store.loadAll() }
+        .sheet(isPresented: $showManualMeal) { ManualFoodView() }
+        .sheet(isPresented: $showWorkoutLogger) { WorkoutLoggerView() }
         .alert("Couldn’t complete that", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -88,7 +113,7 @@ private struct ProgressDashboardView: View {
                                 .font(.subheadline).foregroundStyle(Theme.muted)
                         }
                     }.appCard(padding: 18)
-                }.padding(16)
+                }.padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 96)
             }
         }
         .navigationBarHidden(true)

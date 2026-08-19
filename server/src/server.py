@@ -610,7 +610,7 @@ Use a matching preset or known-food value when possible. Infer the meal from con
 If the message is a greeting, question, or otherwise not asking to log food, output [] followed by one short plain-text reply. Do not invent food items."""
     try:
         payload = {
-            "model": "gpt-5.6-luna",
+            "model": "gpt-4o-mini",
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": message},
@@ -638,7 +638,7 @@ async def analyze_food_image(image: str, meal_hint: str | None = None) -> dict[s
     if meal:
         prompt += f" The user says this is for {meal}."
     payload = {
-        "model": "gpt-5.6-luna",
+        "model": "gpt-4o-mini",
         "messages": [
             {"role": "system", "content": system},
             {

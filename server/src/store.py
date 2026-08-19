@@ -313,7 +313,7 @@ class Store:
             return _dict(row) or {}
 
     async def insert_coach_usage(self, model: str, input_tokens: int, output_tokens: int) -> None:
-        """Record one Anthropic API call's token spend for the authenticated user."""
+        """Record one coach provider call's token spend for the authenticated user."""
         pool = await self.connect()
         await pool.execute(
             "INSERT INTO coach_usage(user_id,model,input_tokens,output_tokens) "

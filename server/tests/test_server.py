@@ -231,7 +231,7 @@ async def test_vision_log_uses_openai_token_and_vision_model(monkeypatch):
     result = await srv.analyze_food_image("data:image/jpeg;base64,AAAA", "lunch")
 
     assert captured["token"] == "openai-test-token"
-    assert captured["payload"]["model"] == "gpt-5.6-luna"
+    assert captured["payload"]["model"] == "gpt-4o-mini"
     assert captured["payload"]["messages"][1]["content"][1] == {
         "type": "image_url",
         "image_url": {"url": "data:image/jpeg;base64,AAAA"},

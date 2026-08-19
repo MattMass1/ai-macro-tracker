@@ -88,6 +88,29 @@ PLACEHOLDER_SOURCES = {
 
 DEFAULT_TARGETS = {"calories": 2400.0, "protein": 215.0, "carbs": 200.0, "fat": 70.0, "fiber": 0.0}
 
+DEFAULT_EXERCISES = {
+    "Push": [
+        "High-to-Low Cable Fly (cable/rope)",
+        "Cable Decline Press (cable/rope)",
+        "Dips (forward lean, bodyweight)",
+        "Decline DB Bench Press",
+    ],
+    "Legs": [
+        "Barbell Squat", "Hack Squats", "Leg Press", "Leg Curls",
+        "Back Extension", "Smith Machine Squats",
+    ],
+    "Abs": [
+        "Crunches", "Hanging Leg Raises", "Planks", "Cable Crunches",
+        "Russian Twists", "Ab Wheel",
+    ],
+    "Cardio": ["Treadmill", "Bike", "Stairmaster", "Rowing Machine"],
+}
+
+
+def get_default_exercises_for_type(workout_type: str) -> list[str]:
+    """Return a copy of Matt's legacy exercise list for one workout type."""
+    return list(DEFAULT_EXERCISES.get(workout_type, ()))
+
 
 class MacroError(ValueError):
     """A user-fixable problem. The message is relayed verbatim to the user by Poke."""

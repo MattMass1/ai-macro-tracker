@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "icons": "python scripts/generate_icons.py"
+    "icons": "python scripts/generate_icons.py",
+    "mobile": "next build && cap sync",
+    "mobile:ios": "cap open ios",
+    "mobile:android": "cap open android"
   },
   "dependencies": {
     "next": "^16.2.12",
@@ -15,6 +18,12 @@
     "swr": "2.3.4"
   },
   "devDependencies": {
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/cli": "^8.5.0",
+    "@capacitor/core": "^8.5.0",
+    "@capacitor/ios": "^8.5.0",
+    "@capacitor/preferences": "^8.0.1",
+    "@capacitor/splash-screen": "^8.0.2",
     "@tailwindcss/postcss": "4.1.13",
     "@types/node": "22.10.2",
     "@types/react": "19.1.8",

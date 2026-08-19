@@ -7,11 +7,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import get_config
 from store import Store
+from auth import bind_user, reset_user
 
 ROTATION = ["Push", "Pull", "Legs"]
 
 async def run() -> int:
     store = Store(get_config().database_url)
+    user_context = bind_user(get_config().matt_user_id)
     try:
         today = datetime.now().astimezone().date()
         meals = await store.fetch_meals(today)
@@ -27,6 +29,8 @@ async def run() -> int:
         lines += [f"\n_Meals ({len(meals)}):_", *[f"  🍽 {m['name']} ({m['meal']}) — {m['calories']:g} kcal" for m in meals]] if meals else ["\n_No meals logged yet today._"]
         lines.append(f"\n💪 *Next workout: {nxt} day*" if nxt else "\n💪 No workout data yet — log one to start PR tracking.")
         print("\n".join(lines)); return 0
-    finally: await store.aclose()
+    finally:
+        reset_user(user_context)
+        await store.aclose()
 
 if __name__ == '__main__': sys.exit(asyncio.run(run()))

@@ -9,6 +9,9 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import UUID
+
+from auth import DEFAULT_MATT_USER_ID
 
 _ENV_LOADED = False
 
@@ -49,6 +52,7 @@ class Config:
     day_rollover_hour: int
     briefs_dir: Path
     port: int
+    matt_user_id: UUID
     allowed_origins: list[str] = field(default_factory=list)
 
 
@@ -71,6 +75,9 @@ def load_config() -> Config:
         day_rollover_hour=int(os.environ.get("DAY_ROLLOVER_HOUR", "4")),
         briefs_dir=Path(os.environ.get("BRIEFS_DIR", "/opt/data/briefs")),
         port=int(os.environ.get("PORT", "8000")),
+        matt_user_id=UUID(
+            os.environ.get("MATT_USER_ID", "").strip() or str(DEFAULT_MATT_USER_ID)
+        ),
         allowed_origins=[
             origin.strip()
             for origin in os.environ.get("ALLOWED_ORIGINS", "*").split(",")

@@ -14,6 +14,8 @@ import sys
 import tempfile
 import asyncio
 import re
+import time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import date as _date, timedelta
 from pathlib import Path
@@ -33,6 +35,8 @@ import domain  # noqa: E402
 from config import get_config  # noqa: E402
 from domain import MacroError  # noqa: E402
 from store import Store, StoreError  # noqa: E402
+from store import InviteAlreadyClaimed, InviteNotFound  # noqa: E402
+from auth import bind_user, current_user_id, reset_user  # noqa: E402
 
 _client: Store | None = None
 
@@ -139,37 +143,7 @@ async def fetch_known_exercises() -> list[dict[str, Any]]:
 
 def get_default_exercises_for_type(workout_type: str) -> list[str]:
     """Exercises that should always be available for a workout type."""
-    defaults = {
-        "Push": [
-            "High-to-Low Cable Fly (cable/rope)",
-            "Cable Decline Press (cable/rope)",
-            "Dips (forward lean, bodyweight)",
-            "Decline DB Bench Press",
-        ],
-        "Legs": [
-            "Barbell Squat",
-            "Hack Squats",
-            "Leg Press",
-            "Leg Curls",
-            "Back Extension",
-            "Smith Machine Squats",
-        ],
-        "Abs": [
-            "Crunches",
-            "Hanging Leg Raises",
-            "Planks",
-            "Cable Crunches",
-            "Russian Twists",
-            "Ab Wheel",
-        ],
-        "Cardio": [
-            "Treadmill",
-            "Bike",
-            "Stairmaster",
-            "Rowing Machine",
-        ],
-    }
-    return defaults.get(workout_type, [])
+    return domain.get_default_exercises_for_type(workout_type)
 
 
 async def last_workout_type(before: str | None = None) -> str | None:
@@ -222,11 +196,22 @@ async def workout_plan_payload() -> dict[str, Any]:
     """
     today_date = domain.effective_date()
     today = today_date.isoformat()
-    todays_workouts, rotation_anchor, known = await asyncio.gather(
+    todays_workouts, rotation_anchor, known, stored_plan = await asyncio.gather(
         fetch_workouts(today_date),
         last_workout_type(before=today),
         fetch_known_exercises(),
+        store_client().fetch_workout_plan(),
     )
+
+    planned_exercises = {
+        str(item.get("type")): [
+            str(exercise.get("name"))
+            for exercise in item.get("exercises", [])
+            if isinstance(exercise, dict) and exercise.get("name")
+        ]
+        for item in (stored_plan or {}).get("days", [])
+        if isinstance(item, dict) and item.get("type")
+    }
 
     # ── Extract today's logged workout type ──────────────────────────────
     todays_logged_type: str | None = None
@@ -250,7 +235,9 @@ async def workout_plan_payload() -> dict[str, Any]:
         todays_last = await last_workout_type()
 
     def exercises_for(workout_type: str) -> list[dict[str, Any]]:
-        names = get_default_exercises_for_type(workout_type)
+        # A missing plan intentionally starts empty. Matt's legacy defaults are
+        # data seeded by the migration, never a default leaked to new users.
+        names = list(planned_exercises.get(workout_type, ()))
         seen = set(names)
         for ex in known:
             if workout_type in ex["workout_type"] and ex["name"] not in seen:
@@ -708,12 +695,15 @@ def tool_errors(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[An
 
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        context_token = bind_user(CONFIG.matt_user_id)
         try:
             return await fn(*args, **kwargs)
         except MacroError as exc:
             raise ToolError(str(exc)) from exc
         except StoreError as exc:
             raise ToolError(f"Database rejected the request. {exc}") from exc
+        finally:
+            reset_user(context_token)
 
     return wrapper
 
@@ -1101,7 +1091,7 @@ class BriefStorageError(RuntimeError):
 
 
 def read_brief(day: _date) -> dict[str, Any]:
-    path = CONFIG.briefs_dir / f"{day.isoformat()}.json"
+    path = CONFIG.briefs_dir / str(current_user_id()) / f"{day.isoformat()}.json"
     try:
         if not path.exists():
             return {"text": None, "date": day.isoformat()}
@@ -1117,7 +1107,7 @@ def read_brief(day: _date) -> dict[str, Any]:
 
 
 def write_brief(text: str, day: _date) -> dict[str, Any]:
-    directory = CONFIG.briefs_dir
+    directory = CONFIG.briefs_dir / str(current_user_id())
     temp_path: str | None = None
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -1155,7 +1145,7 @@ async def read_brief_from_notion(day: _date) -> dict[str, Any]:
 
 CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-App-Token",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-App-Token",
     "Access-Control-Max-Age": "86400",
     "Vary": "Origin",
 }
@@ -1177,12 +1167,21 @@ def _with_cors(response: Response, request: Request) -> Response:
     return response
 
 
-def _authorized(request: Request) -> bool:
-    supplied = request.headers.get("x-app-token", "")
-    return bool(supplied) and hmac.compare_digest(supplied, CONFIG.app_shared_token)
+async def _authenticated_user(request: Request):
+    authorization = request.headers.get("authorization", "")
+    scheme, separator, raw_token = authorization.partition(" ")
+    if separator and scheme.lower() == "bearer" and raw_token.strip():
+        return await store_client().resolve_device(raw_token.strip())
+
+    # Temporary deploy bridge for the existing PWA/iOS clients. Remove after
+    # both clients ship per-device Bearer auth. The shared token is Matt-only.
+    legacy_token = request.headers.get("x-app-token", "")
+    if legacy_token and hmac.compare_digest(legacy_token, CONFIG.app_shared_token):
+        return CONFIG.matt_user_id
+    return None
 
 
-def api_route(path: str, methods: list[str]):
+def api_route(path: str, methods: list[str], *, public: bool = False):
     """Register an authenticated, CORS-enabled JSON route on the same app as /mcp."""
 
     def decorator(fn: Callable[[Request], Awaitable[Any]]):
@@ -1191,16 +1190,20 @@ def api_route(path: str, methods: list[str]):
         async def handler(request: Request) -> Response:
             if request.method == "OPTIONS":
                 return _with_cors(Response(status_code=204), request)
-            if not _authorized(request):
-                return _with_cors(
-                    JSONResponse(
-                        {"error": "Missing or invalid X-App-Token header"},
-                        status_code=401,
-                    ),
-                    request,
-                )
+            context_token = None
+            if not public:
+                user_id = await _authenticated_user(request)
+                if user_id is None:
+                    return _with_cors(JSONResponse(
+                        {"error": "Missing or invalid bearer token"}, status_code=401), request)
+                request.state.user_id = user_id
+                context_token = bind_user(user_id)
             try:
                 payload = await fn(request)
+            except InviteNotFound:
+                return _with_cors(JSONResponse({"error": "Unknown invite code"}, status_code=404), request)
+            except InviteAlreadyClaimed:
+                return _with_cors(JSONResponse({"error": "Invite code already claimed"}, status_code=409), request)
             except MacroError as exc:
                 return _with_cors(
                     JSONResponse({"error": str(exc)}, status_code=400), request
@@ -1213,10 +1216,14 @@ def api_route(path: str, methods: list[str]):
                 return _with_cors(
                     JSONResponse({"error": str(exc)}, status_code=500), request
                 )
+            finally:
+                if context_token is not None:
+                    reset_user(context_token)
             status = 200
             if isinstance(payload, tuple):
                 payload, status = payload
-            return _with_cors(JSONResponse(payload, status_code=status), request)
+            response = _with_cors(JSONResponse(payload, status_code=status), request)
+            return response
 
         return handler
 
@@ -1231,6 +1238,41 @@ async def _json_body(request: Request) -> Mapping[str, Any]:
     if not isinstance(body, dict):
         raise MacroError("Request body must be a JSON object")
     return body
+
+
+_INVITE_RATE_WINDOW_SECONDS = 15 * 60
+_INVITE_RATE_MAX_ATTEMPTS = 10
+_invite_attempts: dict[str, deque[float]] = defaultdict(deque)
+_invite_rate_lock = asyncio.Lock()
+
+
+async def _claim_invite_rate_limited(request: Request) -> bool:
+    """Return whether this client IP has exhausted the invite attempt budget."""
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    cutoff = now - _INVITE_RATE_WINDOW_SECONDS
+    async with _invite_rate_lock:
+        attempts = _invite_attempts[client_ip]
+        while attempts and attempts[0] <= cutoff:
+            attempts.popleft()
+        if len(attempts) >= _INVITE_RATE_MAX_ATTEMPTS:
+            return True
+        attempts.append(now)
+        return False
+
+
+@api_route("/api/claim-invite", methods=["POST"], public=True)
+async def api_claim_invite(request: Request) -> Any:
+    if await _claim_invite_rate_limited(request):
+        return {"error": "Too many invite attempts. Try again later."}, 429
+    body = await _json_body(request)
+    code = body.get("code")
+    if not isinstance(code, str) or not code.strip():
+        raise MacroError("code is required")
+    label = body.get("label")
+    if label is not None and not isinstance(label, str):
+        raise MacroError("label must be a string")
+    return await store_client().claim_invite(code.strip(), label.strip() if label else None)
 
 
 @api_route("/api/today", methods=["GET"])

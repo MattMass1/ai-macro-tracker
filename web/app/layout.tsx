@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 
 import "./globals.css";
+import MobileRuntime from "@/components/MobileRuntime";
 
 export const metadata: Metadata = {
   title: "Macros",
@@ -43,7 +44,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="min-h-dvh bg-bg text-text">
-        {children}
+        <MobileRuntime>{children}</MobileRuntime>
         <script
           dangerouslySetInnerHTML={{
             __html: `

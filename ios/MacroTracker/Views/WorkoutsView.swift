@@ -2,20 +2,287 @@ import SwiftUI
 
 struct WorkoutsView: View {
     @EnvironmentObject private var store: AppStore
+    @State private var loggerSelection: WorkoutLoggerSelection?
+    @State private var librarySelection: WorkoutLoggerSelection?
+    @State private var showLibrary = false
     var body: some View {
         ZStack { Theme.canvas.ignoresSafeArea()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     DayPicker(date: store.selectedDate, canGoForward: !store.isToday) { delta in Task { await store.moveDay(by: delta) } }
+                    if store.isToday, let plan = store.plan, plan.hasPlan == true, let session = plan.upcoming.first {
+                        TodaysSessionCard(
+                            session: session,
+                            date: store.dateString,
+                            onLog: { loggerSelection = $0 },
+                            onAddMore: { showLibrary = true }
+                        )
+                        .id(session.type)
+                    }
                     if store.isLoadingWorkouts && store.stats == nil { workoutSkeleton }
                     if let stats = store.stats { WorkoutDashboard(stats: stats) }
-                    if let plan = store.plan { WorkoutPlanCard(plan: plan) }
+                    if let plan = store.plan, (plan.hasPlan != true || !store.isToday) {
+                        WorkoutPlanCard(plan: plan)
+                    }
                     WorkoutHistory(workouts: store.workouts) { id in Task { await store.deleteWorkout(id) } }
                 }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 96)
             }.refreshable { await store.loadWorkoutData() }
-        }.navigationBarHidden(true)
+        }
+        .navigationBarHidden(true)
+        .sheet(item: $loggerSelection) { selection in
+            WorkoutLoggerView(initialType: selection.type, initialExercise: selection.exercise)
+        }
+        .sheet(isPresented: $showLibrary, onDismiss: {
+            if let selection = librarySelection {
+                librarySelection = nil
+                loggerSelection = selection
+            }
+        }) {
+            ExerciseLibraryView { selection in
+                librarySelection = selection
+                showLibrary = false
+            }
+        }
     }
     private var workoutSkeleton: some View { VStack(spacing: 10) { HStack { RoundedRectangle(cornerRadius: 20).frame(height: 130); RoundedRectangle(cornerRadius: 20).frame(height: 130) }; RoundedRectangle(cornerRadius: 20).frame(height: 160) }.foregroundStyle(Theme.surface).redacted(reason: .placeholder).shimmering() }
+}
+
+private struct WorkoutLoggerSelection: Identifiable {
+    let type: String
+    let exercise: String
+    var id: String { "\(type)|\(exercise)" }
+}
+
+private enum CanonicalWorkoutType {
+    static let ordered = ["Push", "Pull", "Legs", "Abs", "Cardio", "Full Body"]
+    static let all = ordered + ["Rest"]
+
+    static func value(for rawValue: String, muscleGroups: [String] = []) -> String {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let match = all.first(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            return match
+        }
+        for type in ordered where type != "Legs" {
+            if muscleGroups.contains(where: { $0.caseInsensitiveCompare(type) == .orderedSame }) { return type }
+        }
+        if muscleGroups.contains(where: { muscleGroup in
+            ["Quads", "Hams", "Legs"].contains { $0.caseInsensitiveCompare(muscleGroup) == .orderedSame }
+        }) { return "Legs" }
+        return "Push"
+    }
+}
+
+private struct TodaysSessionCard: View {
+    let session: WorkoutPlanPayload.PlannedDay
+    let date: String
+    let onLog: (WorkoutLoggerSelection) -> Void
+    let onAddMore: () -> Void
+    @State private var exercises: [String]
+    @State private var completed: Set<String>
+    @State private var library: [LibraryExercise] = []
+
+    init(
+        session: WorkoutPlanPayload.PlannedDay,
+        date: String,
+        onLog: @escaping (WorkoutLoggerSelection) -> Void,
+        onAddMore: @escaping () -> Void
+    ) {
+        self.session = session
+        self.date = date
+        self.onLog = onLog
+        self.onAddMore = onAddMore
+        let names = session.exercises.map(\.name)
+        _exercises = State(initialValue: names)
+        _completed = State(initialValue: Self.savedCompletions(date: date, type: session.type))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    SectionLabel(text: "Today's session")
+                    Text(session.type).font(.title3.weight(.bold)).foregroundStyle(Theme.ink)
+                }
+                Spacer()
+                Image(systemName: "figure.strengthtraining.traditional")
+                    .foregroundStyle(Theme.accent)
+                    .padding(10)
+                    .background(Theme.accentTint, in: Circle())
+            }
+            if exercises.isEmpty {
+                Text("No exercises assigned for this session.")
+                    .font(.subheadline).foregroundStyle(Theme.muted)
+            } else {
+                ForEach(Array(exercises.enumerated()), id: \.offset) { index, name in
+                    HStack(spacing: 10) {
+                        Button { toggle(name) } label: {
+                            Image(systemName: completed.contains(name) ? "checkmark.circle.fill" : "circle")
+                                .font(.title3)
+                                .foregroundStyle(completed.contains(name) ? Theme.accent : Theme.muted)
+                        }
+                        .buttonStyle(.plain)
+                        Button { onLog(.init(type: session.type, exercise: name)) } label: {
+                            Text(name)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(completed.contains(name) ? Theme.muted : Theme.ink)
+                                .strikethrough(completed.contains(name))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        Menu {
+                            let swaps = swaps(for: name)
+                            if swaps.isEmpty {
+                                Text("No swaps available")
+                            } else {
+                                ForEach(swaps, id: \.self) { swap in
+                                    Button(swap) { swapExercise(at: index, from: name, to: swap) }
+                                }
+                            }
+                        } label: {
+                            Text("SWAP").font(.caption2.weight(.bold)).tracking(0.8).foregroundStyle(Theme.accent)
+                        }
+                    }
+                    if index < exercises.count - 1 { Divider() }
+                }
+            }
+            Button(action: onAddMore) {
+                Label("Add more", systemImage: "plus")
+                    .font(.subheadline.weight(.bold)).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered).tint(Theme.accent)
+        }
+        .appCard()
+        .task {
+            Self.pruneOldCompletions()
+            if let payload = try? await APIClient.shared.library() {
+                library = payload.exercises
+            }
+        }
+    }
+
+    private func swaps(for name: String) -> [String] {
+        library.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.swaps ?? []
+    }
+
+    private func toggle(_ name: String) {
+        if completed.contains(name) { completed.remove(name) } else { completed.insert(name) }
+        saveCompletions()
+    }
+
+    private func swapExercise(at index: Int, from oldName: String, to newName: String) {
+        exercises[index] = newName
+        if completed.remove(oldName) != nil {
+            completed.insert(newName)
+        }
+        saveCompletions()
+    }
+
+    private func saveCompletions() {
+        UserDefaults.standard.set(Array(completed), forKey: Self.completionKey(date: date, type: session.type))
+    }
+
+    private static func savedCompletions(date: String, type: String) -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: completionKey(date: date, type: type)) ?? [])
+    }
+
+    private static func completionKey(date: String, type: String) -> String {
+        "workout-session-completed.\(date).\(type)"
+    }
+
+    private static func pruneOldCompletions() {
+        let defaults = UserDefaults.standard
+        let prefix = "workout-session-completed."
+        let calendar = Calendar(identifier: .gregorian)
+        guard let cutoff = calendar.date(byAdding: .day, value: -30, to: calendar.startOfDay(for: Date())) else { return }
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(prefix) {
+            let suffix = key.dropFirst(prefix.count)
+            guard suffix.count > 10, suffix[suffix.index(suffix.startIndex, offsetBy: 10)] == "." else { continue }
+            let dateText = String(suffix.prefix(10))
+            if let storedDate = formatter.date(from: dateText), storedDate < cutoff {
+                defaults.removeObject(forKey: key)
+            }
+        }
+    }
+}
+
+private struct ExerciseLibraryView: View {
+    private struct SectionGroup: Identifiable {
+        let type: String
+        let exercises: [LibraryExercise]
+        var id: String { type }
+    }
+
+    @Environment(\.dismiss) private var dismiss
+    let onSelect: (WorkoutLoggerSelection) -> Void
+    @State private var exercises: [LibraryExercise] = []
+    @State private var search = ""
+    @State private var isLoading = true
+
+    private var filtered: [LibraryExercise] {
+        guard !search.isEmpty else { return exercises }
+        return exercises.filter {
+            $0.name.localizedCaseInsensitiveContains(search)
+                || $0.muscleGroup.contains { $0.localizedCaseInsensitiveContains(search) }
+                || $0.workoutType.localizedCaseInsensitiveContains(search)
+        }
+    }
+
+    private var groupedExercises: [SectionGroup] {
+        let grouped = Dictionary(grouping: filtered) {
+            CanonicalWorkoutType.value(for: $0.workoutType, muscleGroups: $0.muscleGroup)
+        }
+        return CanonicalWorkoutType.ordered.compactMap { type in
+            guard let exercises = grouped[type], !exercises.isEmpty else { return nil }
+            return SectionGroup(type: type, exercises: exercises)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if isLoading {
+                    ProgressView()
+                } else if exercises.isEmpty {
+                    ContentUnavailableView("Exercise library unavailable", systemImage: "dumbbell")
+                } else {
+                    List {
+                        ForEach(groupedExercises) { group in
+                            Section(group.type) {
+                                ForEach(group.exercises) { exercise in
+                                    Button { onSelect(.init(type: group.type, exercise: exercise.name)) } label: {
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(exercise.name).foregroundStyle(Theme.ink)
+                                            Text([exercise.muscleGroup.joined(separator: ", "), exercise.equipment]
+                                                .filter { !$0.isEmpty }.joined(separator: " · "))
+                                                .font(.caption).foregroundStyle(Theme.muted)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .listStyle(.insetGrouped)
+                    .searchable(text: $search, prompt: "Search exercises")
+                }
+            }
+            .background(Theme.canvas)
+            .navigationTitle("Add exercise")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+        }
+        .task {
+            if let payload = try? await APIClient.shared.library() {
+                exercises = payload.exercises
+            }
+            isLoading = false
+        }
+    }
 }
 
 private struct WorkoutDashboard: View {
@@ -84,9 +351,13 @@ private struct WorkoutHistory: View {
 struct WorkoutLoggerView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
-    @State private var exercise = ""; @State private var type = "Push"; @State private var sets = [WorkoutSet(weight: 0, reps: 0)]; @State private var last: LastWorkoutPayload?; @State private var isSaving = false
+    @State private var exercise: String; @State private var type: String; @State private var sets = [WorkoutSet(weight: 0, reps: 0)]; @State private var last: LastWorkoutPayload?; @State private var isSaving = false
     private let types = ["Push", "Pull", "Legs", "Abs", "Cardio", "Full Body", "Rest"]
     private var suggestions: [KnownExercise] { store.exercises.filter { $0.workoutType.contains(type) } }
+    init(initialType: String = "Push", initialExercise: String = "") {
+        _type = State(initialValue: CanonicalWorkoutType.value(for: initialType))
+        _exercise = State(initialValue: initialExercise)
+    }
     var body: some View {
         NavigationStack {
             ScrollView { VStack(alignment: .leading, spacing: 20) {
@@ -105,7 +376,11 @@ struct WorkoutLoggerView: View {
                 }
                 Button { submit() } label: { if isSaving { ProgressView().tint(.white) } else { Text(type == "Rest" ? "Log rest day" : "Log exercise").fontWeight(.bold) } }.frame(maxWidth: .infinity).frame(height: 52).background(Theme.accent, in: RoundedRectangle(cornerRadius: 16)).foregroundStyle(.white).disabled(isSaving || (type != "Rest" && (exercise.trimmingCharacters(in: .whitespaces).isEmpty || !sets.contains { $0.weight > 0 || $0.reps > 0 }))).opacity(isSaving ? 0.6 : 1)
             }.padding(16) }.background(Theme.canvas).navigationTitle("Log workout").navigationBarTitleDisplayMode(.inline).toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
-        }.presentationDetents([.large])
+        }
+        .presentationDetents([.large])
+        .task {
+            if !exercise.isEmpty { lookupLastWorkout(exercise) }
+        }
     }
     @State private var lastWorkoutTask: Task<Void, Never>?
     private func lookupLastWorkout(_ value: String) {

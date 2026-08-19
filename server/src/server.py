@@ -325,6 +325,7 @@ async def workout_plan_payload() -> dict[str, Any]:
         "last_workout": todays_last,
         "upcoming": upcoming,
         "core": exercises_for("Abs"),
+        "has_plan": bool(stored_plan),
     }
 
 

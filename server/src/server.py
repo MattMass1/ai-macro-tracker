@@ -35,8 +35,9 @@ import domain  # noqa: E402
 from config import get_config  # noqa: E402
 from domain import MacroError  # noqa: E402
 from store import Store, StoreError  # noqa: E402
-from store import InviteAlreadyClaimed, InviteNotFound  # noqa: E402
+from store import ChatQuotaExceeded, InviteAlreadyClaimed, InviteNotFound  # noqa: E402
 from auth import bind_user, current_user_id, reset_user  # noqa: E402
+from coach import CoachProviderError, run_agent  # noqa: E402
 
 _client: Store | None = None
 
@@ -842,6 +843,7 @@ async def save_preset(
     protein: float,
     carbs: float,
     fat: float,
+    macro_source: str,
     meal: str = "Dinner",
     emoji: str = "🍽️",
     fiber: float | None = None,
@@ -858,12 +860,16 @@ async def save_preset(
         protein: Grams of protein per serving.
         carbs: Grams of carbohydrate per serving.
         fat: Grams of fat per serving.
+        macro_source: Where the per-serving numbers came from, e.g. "Fairlife
+            Core Power label" or "FDA FoodData Central: oats, dry". Placeholders
+            like "estimate" or "guess" are rejected.
         meal: Default meal slot — Breakfast, Lunch, Dinner, or Snack.
         emoji: Single emoji shown on the app's quick-add tile.
         fiber: Grams of fiber per serving. When updating an existing preset,
             omitted fiber preserves its current value; new presets must provide it.
     """
     clean_name = domain.validate_name(name, "name")
+    source = domain.validate_macro_source(macro_source)
     meal_name = domain.normalize_meal(meal, default="Dinner")
     glyph = (emoji or "🍽️").strip()[:4] or "🍽️"
 
@@ -890,7 +896,8 @@ async def save_preset(
         fiber = float(existing_fiber)
     macros = domain.validate_macros(calories, protein, carbs, fat, fiber)
 
-    properties = {"name": clean_name, "emoji": glyph, "meal": meal_name, **macros}
+    properties = {"name": clean_name, "emoji": glyph, "meal": meal_name,
+                  "macro_source": source, **macros}
 
     if existing is None:
         order = 0.0
@@ -910,6 +917,7 @@ async def save_preset(
             "name": clean_name,
             "emoji": glyph,
             "meal": meal_name,
+            "macro_source": source,
             **macros,
         },
     }
@@ -938,9 +946,7 @@ async def get_day(date: str) -> dict[str, Any]:
     return await day_payload(domain.parse_date(date))
 
 
-@mcp.tool
-@tool_errors
-async def get_range_summary(start: str, end: str) -> dict[str, Any]:
+async def _get_range_summary(start: str, end: str) -> dict[str, Any]:
     """Per-day totals and averages across a date range, inclusive of both ends.
 
     Use for questions like "how did last week go?" or "what's my average protein
@@ -992,6 +998,13 @@ async def get_range_summary(start: str, end: str) -> dict[str, Any]:
             [day["totals"] for day in logged_days]
         ),
     }
+
+
+@mcp.tool
+@tool_errors
+async def get_range_summary(start: str, end: str) -> dict[str, Any]:
+    """Per-day totals and averages across an inclusive YYYY-MM-DD range."""
+    return await _get_range_summary(start, end)
 
 
 @mcp.tool
@@ -1242,6 +1255,10 @@ def api_route(path: str, methods: list[str], *, public: bool = False):
                 return _with_cors(
                     JSONResponse({"error": str(exc)}, status_code=502), request
                 )
+            except CoachProviderError as exc:
+                return _with_cors(
+                    JSONResponse({"error": str(exc)}, status_code=502), request
+                )
             except BriefStorageError as exc:
                 return _with_cors(
                     JSONResponse({"error": str(exc)}, status_code=500), request
@@ -1361,6 +1378,91 @@ async def api_vision_log(request: Request) -> Any:
     return await analyze_food_image(image, meal_hint)
 
 
+def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[Any]]]:
+    """Build tenant-bound coach tools; none accepts a user identifier."""
+    async def get_today_tool(_args): return await day_payload(domain.effective_date(), include_presets=True)
+    async def get_day_tool(args): return await day_payload(domain.parse_date(str(args["date"])))
+    async def get_range_tool(args): return await _get_range_summary(str(args["start"]), str(args["end"]))
+    async def log_meal_tool(args):
+        return await write_meal(
+            str(args["name"]), args["calories"], args["protein"], args["carbs"],
+            args["fat"], str(args["macro_source"]), str(args["meal_type"]), None,
+            fiber=args["fiber"],
+        )
+    async def log_preset_tool(args):
+        return await log_preset_servings(str(args["preset_name"]), args["servings"], str(args["meal"]))
+    async def save_preset_tool(args):
+        values = dict(args["values"])
+        # A preset is a deferred log_meal, so it carries the same provenance
+        # requirement — otherwise fabricated macros could be laundered through
+        # save_preset and logged later via log_preset.
+        macro_source = domain.validate_macro_source(str(args.get("macro_source") or ""))
+        clean_name = domain.validate_name(str(values.get("name", "")))
+        values.update(name=clean_name, emoji=str(values.get("emoji", "🍽️"))[:4],
+                      meal=domain.normalize_meal(values.get("meal"), "Dinner"),
+                      macro_source=macro_source)
+        values.update(domain.validate_macros(*(values.get(key) for key in domain.MACRO_KEYS)))
+        existing = next((row for row in await store_client().fetch_presets(False)
+                         if row["name"].casefold() == clean_name.casefold()), None)
+        return await store_client().save_preset(values, existing["id"] if existing else None)
+    async def undo_tool(_args):
+        day = domain.effective_date(); rows = await fetch_meals(day)
+        if not rows: raise MacroError("There is nothing to undo today.")
+        await store_client().delete("nutrition_entries", rows[0]["id"])
+        return {"removed": rows[0], "day": await day_payload(day, exclude=rows[0]["id"])}
+    async def get_targets_tool(_args):
+        day = domain.effective_date(); return {"date": day.isoformat(), "targets": await fetch_targets(day)}
+    async def set_targets_tool(args):
+        values = dict(args["values"]); macros = domain.validate_macros(*(values.get(k) for k in domain.MACRO_KEYS))
+        return await store_client().insert_targets(domain.effective_date(), macros)
+    async def log_workout_tool(args):
+        # muscle_group is accepted by the contract; domain derives the canonical group from type.
+        return await write_workout(str(args["exercise"]), args["sets"], str(args["workout_type"]), None)
+    async def recent_workouts_tool(args):
+        return {"workouts": (await store_client().fetch_workouts())[:int(args["n"])]}
+    async def get_plan_tool(_args): return {"plan": await store_client().fetch_workout_plan()}
+    async def set_plan_tool(args):
+        try: plan = domain.validate_workout_plan(args["plan"])
+        except ValueError as exc: raise MacroError(str(exc)) from None
+        library = await store_client().fetch_workout_library()
+        known = {row["name"].casefold() for row in library}
+        unknown = [exercise["name"] for day in plan["days"].values()
+                   for exercise in day["exercises"] if exercise["name"].casefold() not in known]
+        if unknown: raise MacroError("Plan exercises must come from workout_library: " + ", ".join(unknown))
+        return {"plan": await store_client().put_workout_plan(plan)}
+    async def library_tool(args):
+        query = str(args["query"]).strip().casefold(); rows = await store_client().fetch_workout_library()
+        return {"exercises": [row for row in rows if not query or query in json.dumps(row).casefold()][:50]}
+    async def readiness_tool(_args):
+        workouts, plan, integration = await asyncio.gather(
+            store_client().fetch_workouts(), store_client().fetch_workout_plan(),
+            store_client().fetch_integration("whoop"),
+        )
+        context: dict[str, Any] = {"workouts": workouts[:10], "plan": plan, "source": "rotation"}
+        if not integration or not integration.get("access_token"):
+            return context
+        try:
+            headers = {"Authorization": f"Bearer {integration['access_token']}"}
+            async with httpx.AsyncClient(timeout=12.0) as http:
+                recovery, sleep = await asyncio.gather(
+                    http.get("https://api.prod.whoop.com/developer/v2/recovery", headers=headers, params={"limit": 1}),
+                    http.get("https://api.prod.whoop.com/developer/v2/activity/sleep", headers=headers, params={"limit": 1}),
+                )
+            recovery.raise_for_status(); sleep.raise_for_status()
+            context.update(source="whoop", recovery=recovery.json(), sleep=sleep.json())
+        except (httpx.HTTPError, ValueError):
+            context["whoop_status"] = "temporarily_unavailable"
+        return context
+    return {"get_today": get_today_tool, "get_day": get_day_tool,
+            "get_range_summary": get_range_tool, "log_meal": log_meal_tool,
+            "log_preset": log_preset_tool, "save_preset": save_preset_tool,
+            "undo_last_meal": undo_tool, "get_targets": get_targets_tool,
+            "set_targets": set_targets_tool, "log_workout": log_workout_tool,
+            "get_recent_workouts": recent_workouts_tool, "get_workout_plan": get_plan_tool,
+            "set_workout_plan": set_plan_tool, "get_library": library_tool,
+            "get_readiness": readiness_tool}
+
+
 @api_route("/api/chat", methods=["POST"])
 async def api_chat(request: Request) -> Any:
     body = await _json_body(request)
@@ -1370,54 +1472,56 @@ async def api_chat(request: Request) -> Any:
     if len(message.strip()) > 1000:
         raise MacroError("message must be 1000 characters or fewer")
 
-    requested_day = body.get("date")
-    day = (
-        domain.parse_date(requested_day)
-        if requested_day is not None
-        else domain.effective_date()
+    client = store_client()
+    history = await client.fetch_chat_messages(20)
+    plan, has_targets = await asyncio.gather(
+        client.fetch_workout_plan(), client.has_macro_targets()
     )
-    raw_items, conversational_reply = await parse_chat_message(message.strip())
-    if not raw_items:
-        current = await day_payload(day)
-        return {
-            "reply": conversational_reply or "Tell me what you ate and I'll log it.",
-            "logged": [],
-            "totals": current["totals"],
-        }
-
-    validated: list[tuple[str, dict[str, float], str, str]] = []
-    for raw in raw_items[:10]:
-        if not isinstance(raw, dict):
-            raise MacroError("I couldn't understand one of those food items. Please rephrase it.")
-        clean_name = domain.validate_name(str(raw.get("name", "")))
-        macros = domain.validate_macros(
-            raw.get("calories"), raw.get("protein"), raw.get("carbs"), raw.get("fat"), raw.get("fiber", 0)
-        )
-        meal_name = domain.normalize_meal(raw.get("meal"))
-        validated.append(
-            (clean_name, macros, str(raw.get("note") or "Chat & Log"), meal_name)
+    async def record_usage(usage: Mapping[str, Any]) -> None:
+        await client.insert_coach_usage(
+            str(usage["model"]), int(usage["input_tokens"]), int(usage["output_tokens"])
         )
 
-    logged: list[dict[str, Any]] = []
-    for clean_name, macros, note, meal_name in validated:
-        result = await write_meal(
-            clean_name,
-            macros["calories"], macros["protein"], macros["carbs"], macros["fat"],
-            note, meal_name, day.isoformat(),
-            allow_estimate=True,
-            fiber=macros["fiber"],
+    handlers = _coach_tool_handlers()
+    # Persist the user turn before the agent loop so in-flight requests already
+    # count toward the daily cap and a failed loop still consumes quota. The
+    # store enforces the cap atomically (per-user advisory lock around
+    # count+insert), so concurrent turns at 49 cannot both land. On failure we
+    # append a synthetic assistant reply so history keeps alternating roles;
+    # run_agent additionally merges same-role rows as defense in depth.
+    text = message.strip()
+    try:
+        await client.insert_user_chat_message(text, daily_cap=50)
+    except ChatQuotaExceeded:
+        return {"error": "You've reached today's coach limit. Ask Matt to raise it."}, 429
+    try:
+        reply, tool_results = await run_agent(
+            history=[{"role": row["role"], "content": row["content"]} for row in history],
+            message=text, onboarding=plan is None or not has_targets,
+            handlers=handlers, record_usage=record_usage,
         )
-        logged.append(result["logged"])
+    except Exception:
+        try:
+            await client.insert_chat_message(
+                "assistant", "Sorry, I couldn't reach the coach. Try again."
+            )
+        except Exception:
+            pass  # The loop's error is the one worth surfacing.
+        raise
+    await client.insert_chat_message("assistant", reply, tool_results or None)
+    return {"reply": reply, "has_plan": plan is not None or await client.fetch_workout_plan() is not None,
+            "has_targets": has_targets or await client.has_macro_targets()}
 
-    current = await day_payload(day, ensure=logged)
-    names = ", ".join(f'{item["name"]} {item["calories"]:g} kcal ✓' for item in logged)
-    totals = current["totals"]
-    targets = current["targets"]
-    return {
-        "reply": f'Logged {len(logged)} item{"s" if len(logged) != 1 else ""} — {names}. Total now {totals["calories"]:g}/{targets["calories"]:g} kcal.',
-        "logged": logged,
-        "totals": totals,
-    }
+
+@api_route("/api/chat/history", methods=["GET"])
+async def api_chat_history(request: Request) -> Any:
+    try:
+        limit = int(request.query_params.get("limit", "20"))
+    except ValueError:
+        raise MacroError("limit must be an integer") from None
+    if not 1 <= limit <= 100:
+        raise MacroError("limit must be between 1 and 100")
+    return {"messages": await store_client().fetch_chat_messages(limit)}
 
 
 @api_route("/api/brief", methods=["GET", "POST"])

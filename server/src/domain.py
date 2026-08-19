@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
@@ -134,6 +134,18 @@ def effective_date(now: datetime | None = None) -> date:
     """The logging day for a given instant. The day rolls at 4am local."""
     now = now or datetime.now(LOCAL_TZ)
     return (now.astimezone(LOCAL_TZ) - timedelta(hours=DAY_ROLLOVER_HOUR)).date()
+
+
+def effective_day_window(now: datetime | None = None) -> tuple[datetime, datetime]:
+    """The [start, end) timestamp window of the current logging day.
+
+    Anything that counts "today" against a quota must use this window, not the
+    calendar date, or the 4am rollover hands out a fresh quota at midnight.
+    """
+    start = datetime.combine(
+        effective_date(now), time(hour=DAY_ROLLOVER_HOUR), tzinfo=LOCAL_TZ
+    )
+    return start, start + timedelta(days=1)
 
 
 def day_label(day: date) -> str:

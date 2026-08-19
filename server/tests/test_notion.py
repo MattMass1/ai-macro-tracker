@@ -252,6 +252,7 @@ def test_meal_from_page_coerces_null_numbers_to_zero():
         "protein": 30.0,
         "carbs": 0.0,
         "fat": 2.5,
+        "fiber": 0.0,
         "date": "2026-07-25",
         "created_time": "2026-07-25T14:22:00.000Z",
     }
@@ -273,7 +274,7 @@ def test_meal_properties_never_writes_the_formula_column():
         "Protein (g)",
         "Carbs (g)",
         "Fat (g)",
-        "Fiber (g)",
+        "Fiber",
         "Date",
     }
     assert props["Date"] == {"date": {"start": "2026-07-25"}}

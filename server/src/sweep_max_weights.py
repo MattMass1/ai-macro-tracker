@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Synchronize absolute workout PRs into exercise_max_reps."""
+"""Synchronize Matt's absolute workout PRs into exercise_max_reps.
+
+TODO(Phase 2 coach): accept a user id or sweep all users so friends' PRs are
+included. This legacy maintenance command intentionally remains Matt-scoped.
+"""
 from __future__ import annotations
 import argparse, asyncio, sys
 from datetime import date
@@ -9,9 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import get_config
 from domain import MUSCLE_TO_WORKOUT_TYPE
 from store import Store
+from auth import bind_user, reset_user
 
 async def run(dry_run: bool) -> int:
     store=Store(get_config().database_url); changes=[]
+    user_context=bind_user(get_config().matt_user_id)
     try:
         workouts=await store.fetch_workouts(); existing={r['exercise'].strip().casefold():r for r in await store.fetch_prs()}
         best={}
@@ -26,13 +32,15 @@ async def run(dry_run: bool) -> int:
                 changes.append(f"{'NEW' if old is None else 'PR'}: {row['exercise']} -> {row['weight']:g}")
                 if not dry_run:
                     if old is None:
-                        await pool.execute("INSERT INTO exercise_max_reps(id,exercise,max_weight,date_achieved,workout_type,source_entry) VALUES($1,$2,$3,$4,$5,$6)",str(uuid4()),row['exercise'],row['weight'],date.fromisoformat(row['date']) if row['date'] else None,types,row['id'])
+                        await pool.execute("INSERT INTO exercise_max_reps(id,user_id,exercise,max_weight,date_achieved,workout_type,source_entry) VALUES($1,$2,$3,$4,$5,$6,$7)",str(uuid4()),get_config().matt_user_id,row['exercise'],row['weight'],date.fromisoformat(row['date']) if row['date'] else None,types,row['id'])
                     else:
-                        await pool.execute("UPDATE exercise_max_reps SET max_weight=$2,date_achieved=$3,workout_type=$4,source_entry=$5 WHERE id=$1",old['id'],row['weight'],date.fromisoformat(row['date']),types,row['id'])
+                        await pool.execute("UPDATE exercise_max_reps SET max_weight=$3,date_achieved=$4,workout_type=$5,source_entry=$6 WHERE user_id=$1 AND id=$2",get_config().matt_user_id,old['id'],row['weight'],date.fromisoformat(row['date']),types,row['id'])
             elif not old['workout_type'] and types:
                 changes.append(f"TAG: {row['exercise']} += {', '.join(types)}")
-                if not dry_run: await pool.execute("UPDATE exercise_max_reps SET workout_type=$2 WHERE id=$1",old['id'],types)
-    finally: await store.aclose()
+                if not dry_run: await pool.execute("UPDATE exercise_max_reps SET workout_type=$3 WHERE user_id=$1 AND id=$2",get_config().matt_user_id,old['id'],types)
+    finally:
+        reset_user(user_context)
+        await store.aclose()
     if changes:
         print(f"{'[dry-run] ' if dry_run else ''}Max weight sweep — {len(changes)} change(s):")
         print(*[f"  {x}" for x in changes],sep='\n')

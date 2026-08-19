@@ -47,7 +47,9 @@ final class APIClient {
     func presets() async throws -> PresetsPayload { try await get("api/presets") }
     func logMeal(_ body: LogMealBody) async throws -> DayPayload { try await send("api/log", body: body) }
     func logPreset(_ body: LogPresetBody) async throws -> DayPayload { try await send("api/log-preset", body: body) }
-    func chat(_ message: String) async throws -> ChatReply { try await send("api/chat", body: ChatRequest(message: message, date: nil)) }
+    func chat(_ message: String, metrics: ChatMetrics? = nil) async throws -> ChatReply {
+        try await send("api/chat", body: ChatRequest(message: message, date: nil, metrics: metrics))
+    }
     func analyze(image: String, meal: String? = nil) async throws -> VisionPayload { try await send("api/vision-log", body: VisionRequest(image: image, meal: meal)) }
     func deleteMeal(_ id: String) async throws -> DayPayload { try await delete("api/meal/\(encoded(id))") }
     func exercises() async throws -> ExercisesPayload { try await get("api/exercises") }

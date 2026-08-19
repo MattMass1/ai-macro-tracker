@@ -16,5 +16,87 @@ final class ModelDecodingTests: XCTestCase {
         let payload = try decoder.decode(WorkoutsPayload.self, from: json)
         XCTAssertEqual(payload.workouts.first?.sets.first, WorkoutSet(weight: 185, reps: 6))
     }
+
+    func testChatReplyDecodesMetricsWidget() throws {
+        let json = #"{"reply":"Let's get your numbers.","has_plan":false,"has_targets":false,"widget":{"type":"metrics_form","fields":[{"key":"height_cm","label":"Height","unit":"cm","placeholder":"180"},{"key":"weight_kg","label":"Weight","unit":"kg"},{"key":"goal_weight_kg","label":"Goal weight","unit":"kg","placeholder":"75"}]}}"#.data(using: .utf8)!
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let reply = try decoder.decode(ChatReply.self, from: json)
+        XCTAssertEqual(reply.reply, "Let's get your numbers.")
+        XCTAssertEqual(reply.widget?.type, "metrics_form")
+        XCTAssertEqual(reply.widget?.fields.count, 3)
+        XCTAssertEqual(reply.widget?.fields.first?.key, "height_cm")
+        XCTAssertEqual(reply.widget?.fields.first?.unit, "cm")
+        XCTAssertEqual(reply.widget?.fields.last?.placeholder, "75")
+    }
+
+    func testChatReplyWithoutWidgetStillDecodes() throws {
+        let json = #"{"reply":"Tell me what you ate.","has_plan":true}"#.data(using: .utf8)!
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let reply = try decoder.decode(ChatReply.self, from: json)
+        XCTAssertEqual(reply.reply, "Tell me what you ate.")
+        XCTAssertNil(reply.widget)
+        XCTAssertEqual(reply.hasPlan, true)
+    }
+
+    func testChatRequestEncodesMetricsSnakeCase() throws {
+        let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
+        let body = ChatRequest(
+            message: "My metrics: Height 180 cm",
+            date: nil,
+            metrics: ChatMetrics(heightCm: 180, weightKg: 80, goalWeightKg: 75)
+        )
+        let json = try JSONSerialization.jsonObject(with: encoder.encode(body)) as! [String: Any]
+        XCTAssertEqual(json["message"] as? String, "My metrics: Height 180 cm")
+        XCTAssertNil(json["date"])
+        let metrics = json["metrics"] as! [String: Any]
+        XCTAssertEqual((metrics["height_cm"] as? NSNumber)?.doubleValue, 180)
+        XCTAssertEqual((metrics["weight_kg"] as? NSNumber)?.doubleValue, 80)
+        XCTAssertEqual((metrics["goal_weight_kg"] as? NSNumber)?.doubleValue, 75)
+        XCTAssertNil(metrics["age"])
+        XCTAssertNil(metrics["activity_level"])
+    }
+
+    func testChatRequestEncodesOptionalAgeAndActivityLevel() throws {
+        let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
+        let body = ChatRequest(
+            message: "My metrics: Height 180 cm, Age 32, Activity level moderate",
+            date: nil,
+            metrics: ChatMetrics(heightCm: 180, weightKg: 80, goalWeightKg: 75, age: 32, activityLevel: "moderate")
+        )
+        let metrics = try JSONSerialization.jsonObject(with: encoder.encode(body)) as! [String: Any]
+        let payload = metrics["metrics"] as! [String: Any]
+        XCTAssertEqual((payload["age"] as? NSNumber)?.intValue, 32)
+        XCTAssertEqual(payload["activity_level"] as? String, "moderate")
+    }
+
+    func testChatReplyDecodesBareStringWidgetFields() throws {
+        let json = #"{"reply":"Add your measurements here.","widget":{"type":"metrics_form","fields":["height_cm","weight_kg","goal_weight_kg","age","activity_level"]}}"#.data(using: .utf8)!
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let reply = try decoder.decode(ChatReply.self, from: json)
+        XCTAssertEqual(reply.widget?.type, "metrics_form")
+        XCTAssertEqual(reply.widget?.fields.map(\.key), ["height_cm", "weight_kg", "goal_weight_kg", "age", "activity_level"])
+        XCTAssertEqual(reply.widget?.fields.map(\.kind), [.number, .number, .number, .number, .string])
+        XCTAssertEqual(reply.widget?.fields.first?.label, "Height")
+        XCTAssertEqual(reply.widget?.fields.first?.unit, "cm")
+        XCTAssertEqual(reply.widget?.fields.last?.label, "Activity level")
+        XCTAssertEqual(reply.widget?.fields.last?.isNumeric, Optional(false))
+    }
+
+    func testMetricsFieldInfersTypeWhenObjectOmitsType() throws {
+        let json = #"{"key":"activity_level","label":"Activity level","placeholder":"moderate"}"#.data(using: .utf8)!
+        let field = try JSONDecoder().decode(MetricsField.self, from: json)
+        XCTAssertEqual(field.kind, .string)
+        XCTAssertFalse(field.isNumeric)
+        let age = try JSONDecoder().decode(MetricsField.self, from: #"{"key":"age","label":"Age"}"#.data(using: .utf8)!)
+        XCTAssertEqual(age.kind, .number)
+        XCTAssertTrue(age.isNumeric)
+    }
+
+    func testMetricsFieldExplicitTypeWinsOverKeyInference() throws {
+        let json = #"{"key":"height_cm","label":"Height","type":"string"}"#.data(using: .utf8)!
+        let field = try JSONDecoder().decode(MetricsField.self, from: json)
+        XCTAssertEqual(field.kind, .string)
+        XCTAssertFalse(field.isNumeric)
+    }
 }
 

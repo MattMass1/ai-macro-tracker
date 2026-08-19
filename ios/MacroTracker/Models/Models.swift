@@ -161,10 +161,130 @@ struct LogPresetBody: Codable {
     enum CodingKeys: String, CodingKey { case presetName, servings, meal; case day = "date" }
 }
 struct LogWorkoutBody: Codable { var exercise: String; var sets: [WorkoutSet]; var workoutType: String; var date: String? }
-struct ChatRequest: Codable { var message: String; var date: String? }
+struct ChatMetrics: Codable, Equatable {
+    var heightCm: Double?
+    var weightKg: Double?
+    var goalWeightKg: Double?
+    var age: Int?
+    var activityLevel: String?
+
+    init(heightCm: Double? = nil, weightKg: Double? = nil, goalWeightKg: Double? = nil,
+         age: Int? = nil, activityLevel: String? = nil) {
+        self.heightCm = heightCm
+        self.weightKg = weightKg
+        self.goalWeightKg = goalWeightKg
+        self.age = age
+        self.activityLevel = activityLevel
+    }
+}
+
+struct ChatRequest: Codable {
+    var message: String
+    var date: String?
+    var metrics: ChatMetrics?
+}
+
 struct ChatPayload: Codable { var reply: String; var logged: [FoodEntry]; var totals: MacroTotals }
+
+enum MetricsFieldKind: String, Codable, Equatable {
+    case number
+    case string
+}
+
+struct MetricsField: Codable, Equatable {
+    var key: String
+    var label: String
+    var unit: String?
+    var placeholder: String?
+    var type: MetricsFieldKind?
+
+    var kind: MetricsFieldKind { type ?? Self.inferredKind(for: key) }
+    var isNumeric: Bool { kind == .number }
+
+    static func inferred(from key: String) -> MetricsField {
+        MetricsField(
+            key: key,
+            label: defaultLabel(for: key),
+            unit: defaultUnit(for: key),
+            placeholder: defaultPlaceholder(for: key),
+            type: inferredKind(for: key)
+        )
+    }
+
+    static func inferredKind(for key: String) -> MetricsFieldKind {
+        switch key {
+        case "height_cm", "weight_kg", "goal_weight_kg", "age": return .number
+        default: return .string
+        }
+    }
+
+    static func defaultLabel(for key: String) -> String {
+        switch key {
+        case "height_cm": return "Height"
+        case "weight_kg": return "Weight"
+        case "goal_weight_kg": return "Goal weight"
+        case "age": return "Age"
+        case "activity_level": return "Activity level"
+        default: return key.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    static func defaultUnit(for key: String) -> String? {
+        switch key {
+        case "height_cm": return "cm"
+        case "weight_kg", "goal_weight_kg": return "kg"
+        default: return nil
+        }
+    }
+
+    static func defaultPlaceholder(for key: String) -> String? {
+        switch key {
+        case "height_cm": return "180"
+        case "weight_kg": return "80"
+        case "goal_weight_kg": return "75"
+        case "age": return "32"
+        case "activity_level": return "moderate"
+        default: return nil
+        }
+    }
+}
+
+struct MetricsFormWidget: Codable, Equatable {
+    var type: String
+    var fields: [MetricsField]
+
+    enum CodingKeys: String, CodingKey { case type, fields }
+
+    init(type: String, fields: [MetricsField]) {
+        self.type = type
+        self.fields = fields
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        type = try container.decode(String.self, forKey: .type)
+        // Backend currently sends bare keys; object descriptors (with optional type) also decode.
+        if let keys = try? container.decode([String].self, forKey: .fields) {
+            fields = keys.map(MetricsField.inferred(from:))
+        } else {
+            fields = try container.decode([MetricsField].self, forKey: .fields)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type, forKey: .type)
+        try container.encode(fields, forKey: .fields)
+    }
+}
+
 // Optionals keep decoding compatible while the coach backend rolls out the flags.
-struct ChatReply: Codable { var reply: String; var hasPlan: Bool?; var hasTargets: Bool? }
+struct ChatReply: Codable {
+    var reply: String
+    var hasPlan: Bool?
+    var hasTargets: Bool?
+    var widget: MetricsFormWidget?
+}
 struct ClaimInviteBody: Codable { var code: String; var label: String?; var displayName: String? }
 struct ClaimInvitePayload: Codable { var token: String; var displayName: String }
 struct VisionRequest: Codable { var image: String; var meal: String? }

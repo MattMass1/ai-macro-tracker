@@ -2,7 +2,14 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
-struct ChatMessage: Identifiable { let id = UUID(); let role: Role; let text: String; enum Role { case user, assistant } }
+struct ChatMessage: Identifiable {
+    let id = UUID()
+    let role: Role
+    let text: String
+    var widget: MetricsFormWidget? = nil
+
+    enum Role { case user, assistant }
+}
 
 struct ChatLogView: View {
     let scanFoodTrigger: Int
@@ -34,7 +41,27 @@ struct ChatLogView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 10) {
-                            ForEach(messages) { message in ChatBubble(message: message).id(message.id) }
+                            ForEach(messages) { message in
+                                VStack(alignment: .leading, spacing: 10) {
+                                    if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                        ChatBubble(message: message)
+                                    }
+                                    if message.role == .assistant, let widget = message.widget, widget.type == "metrics_form" {
+                                        MetricsFormCard(
+                                            fields: widget.fields,
+                                            isSaving: isSending,
+                                            onSave: { values in
+                                                Task {
+                                                    let saved = await submitMetrics(fields: widget.fields, values: values)
+                                                    if saved { dismissWidget(message.id) }
+                                                }
+                                            },
+                                            onDismiss: { dismissWidget(message.id) }
+                                        )
+                                    }
+                                }
+                                .id(message.id)
+                            }
                             if isSending { TypingBubble() }
                             if let image { VisionCard(image: image, result: vision, analyzing: isAnalyzing, onLog: logVision, onCancel: clearVision) }
                             Color.clear.frame(height: 1).id("end")
@@ -104,19 +131,27 @@ struct ChatLogView: View {
 
     private func send() async {
         let message = input.trimmingCharacters(in: .whitespacesAndNewlines); guard !message.isEmpty else { return }
-        input = ""; messages.append(ChatMessage(role: .user, text: message)); isSending = true; defer { isSending = false }
+        input = ""
+        await sendChat(message)
+    }
+
+    @discardableResult
+    private func sendChat(_ message: String, metrics: ChatMetrics? = nil) async -> Bool {
+        messages.append(ChatMessage(role: .user, text: message))
+        isSending = true
+        defer { isSending = false }
         // Render free tier cold-starts can take 30-60s; retry the server-waking case.
         for attempt in 0...2 {
             do {
-                let response = try await store.chat(message)
-                messages.append(ChatMessage(role: .assistant, text: response.reply))
+                let response = try await store.chat(message, metrics: metrics)
+                messages.append(ChatMessage(role: .assistant, text: response.reply, widget: response.widget))
                 // The coach can log food or write targets/plan on any turn.
                 await store.loadDay()
                 if response.hasPlan == true || response.hasTargets == true { await store.loadWorkoutData() }
-                return
+                return true
             } catch let error as APIError where error.status == 429 {
                 messages.append(ChatMessage(role: .assistant, text: "You're at today's limit, ask Matt to raise it."))
-                return
+                return false
             } catch {
                 let text = error.localizedDescription
                 let waking = text.lowercased().contains("waking") || text.lowercased().contains("try again") || text.lowercased().contains("timeout")
@@ -125,15 +160,63 @@ struct ChatLogView: View {
                     continue
                 }
                 messages.append(ChatMessage(role: .assistant, text: text))
-                return
+                return false
             }
         }
+        return false
+    }
+
+    private func submitMetrics(fields: [MetricsField], values: MetricsFieldValues) async -> Bool {
+        let summary = metricsSummary(fields: fields, values: values)
+        return await sendChat(summary, metrics: ChatMetrics(
+            heightCm: values.numbers["height_cm"],
+            weightKg: values.numbers["weight_kg"],
+            goalWeightKg: values.numbers["goal_weight_kg"],
+            age: values.numbers["age"].map { Int($0.rounded()) },
+            activityLevel: values.texts["activity_level"]
+        ))
+    }
+
+    private func dismissWidget(_ id: UUID) {
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[index].widget = nil
+    }
+
+    private func metricsSummary(fields: [MetricsField], values: MetricsFieldValues) -> String {
+        let parts: [String]
+        if fields.isEmpty {
+            let numbers = values.numbers.keys.sorted().compactMap { key -> String? in
+                guard let value = values.numbers[key] else { return nil }
+                return "\(key) \(Self.formatMetric(value))"
+            }
+            let texts = values.texts.keys.sorted().compactMap { key -> String? in
+                guard let text = values.texts[key] else { return nil }
+                return "\(key) \(text)"
+            }
+            parts = numbers + texts
+        } else {
+            parts = fields.compactMap { field in
+                if field.isNumeric {
+                    guard let value = values.numbers[field.key] else { return nil }
+                    let unit = field.unit.map { " \($0)" } ?? ""
+                    return "\(field.label) \(Self.formatMetric(value))\(unit)"
+                }
+                guard let text = values.texts[field.key] else { return nil }
+                return "\(field.label) \(text)"
+            }
+        }
+        return "My metrics: " + parts.joined(separator: ", ")
+    }
+
+    private static func formatMetric(_ value: Double) -> String {
+        value.rounded() == value ? String(Int(value)) : String(value)
     }
 
     private func seedGreeting() {
         guard messages.isEmpty else { return }
         if needsOnboarding {
-            let name = auth.displayName.map { " \($0)" } ?? ""
+            let trimmed = auth.displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let name = trimmed.isEmpty ? "" : " \(trimmed)"
             messages.append(ChatMessage(role: .assistant, text: "Welcome\(name)! Let's get you set up. Tell me about your goals, height, weight, and how active you are, and I'll build your targets and plan."))
         } else {
             messages.append(ChatMessage(role: .assistant, text: "Tell me what you ate and I'll log it."))

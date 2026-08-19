@@ -6,7 +6,6 @@ import UIKit
 struct InviteView: View {
     @EnvironmentObject private var auth: AuthService
     @State private var code = ""
-    @State private var name = ""
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -25,21 +24,15 @@ struct InviteView: View {
                     Text("Welcome! Enter your invite code to get started.")
                         .foregroundStyle(Theme.muted)
                 }
-                VStack(spacing: 12) {
-                    TextField("Your name", text: $name)
-                        .textInputAutocapitalization(.words)
-                        .focused($focused)
-                        .padding(16)
-                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
-                    TextField("Invite code", text: $code)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.asciiCapable)
-                        .submitLabel(.go)
-                        .onSubmit(join)
-                        .padding(16)
-                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
-                }
+                TextField("Invite code", text: $code)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.asciiCapable)
+                    .submitLabel(.go)
+                    .focused($focused)
+                    .onSubmit(join)
+                    .padding(16)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
                 if let error = auth.errorMessage {
                     Label(error, systemImage: "exclamationmark.circle.fill")
                         .font(.footnote)
@@ -70,7 +63,6 @@ struct InviteView: View {
 
     private func join() {
         guard !joinDisabled else { return }
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        Task { await auth.claimInvite(code: code, displayName: trimmedName.isEmpty ? nil : trimmedName, deviceLabel: UIDevice.current.name) }
+        Task { await auth.claimInvite(code: code, deviceLabel: UIDevice.current.name) }
     }
 }

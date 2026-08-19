@@ -151,7 +151,9 @@ final class AppStore: ObservableObject {
     }
 
     func lastWorkout(_ exercise: String) async -> LastWorkoutPayload? { try? await api.lastWorkout(exercise) }
-    func chat(_ message: String) async throws -> ChatReply { try await api.chat(message) }
+    func chat(_ message: String, metrics: ChatMetrics? = nil) async throws -> ChatReply {
+        try await api.chat(message, metrics: metrics)
+    }
     func analyze(image: String) async throws -> VisionPayload { try await api.analyze(image: image) }
 
     /// Called on sign-out so the next user never sees the previous user's data.

@@ -105,16 +105,28 @@ struct ChatLogView: View {
     private func send() async {
         let message = input.trimmingCharacters(in: .whitespacesAndNewlines); guard !message.isEmpty else { return }
         input = ""; messages.append(ChatMessage(role: .user, text: message)); isSending = true; defer { isSending = false }
-        do {
-            let response = try await store.chat(message)
-            messages.append(ChatMessage(role: .assistant, text: response.reply))
-            // The coach can log food or write targets/plan on any turn.
-            await store.loadDay()
-            if response.hasPlan == true || response.hasTargets == true { await store.loadWorkoutData() }
-        } catch let error as APIError where error.status == 429 {
-            messages.append(ChatMessage(role: .assistant, text: "You're at today's limit, ask Matt to raise it."))
-        } catch {
-            messages.append(ChatMessage(role: .assistant, text: error.localizedDescription))
+        // Render free tier cold-starts can take 30-60s; retry the server-waking case.
+        for attempt in 0...2 {
+            do {
+                let response = try await store.chat(message)
+                messages.append(ChatMessage(role: .assistant, text: response.reply))
+                // The coach can log food or write targets/plan on any turn.
+                await store.loadDay()
+                if response.hasPlan == true || response.hasTargets == true { await store.loadWorkoutData() }
+                return
+            } catch let error as APIError where error.status == 429 {
+                messages.append(ChatMessage(role: .assistant, text: "You're at today's limit, ask Matt to raise it."))
+                return
+            } catch {
+                let text = error.localizedDescription
+                let waking = text.lowercased().contains("waking") || text.lowercased().contains("try again") || text.lowercased().contains("timeout")
+                if waking && attempt < 2 {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)  // 3s, let the server finish waking
+                    continue
+                }
+                messages.append(ChatMessage(role: .assistant, text: text))
+                return
+            }
         }
     }
 

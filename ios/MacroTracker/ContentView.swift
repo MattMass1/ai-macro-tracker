@@ -1,22 +1,125 @@
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @EnvironmentObject private var store: AppStore
     @State private var selectedTab = 0
+
+    init() {
+        let appearance = UITabBarAppearance()
+        appearance.configureWithOpaqueBackground()
+        appearance.backgroundColor = UIColor(Theme.surface)
+        appearance.shadowColor = UIColor(Theme.divider)
+        let inactive = UIColor(Theme.inactive)
+        let active = UIColor(Theme.accent)
+        for layout in [appearance.stackedLayoutAppearance, appearance.inlineLayoutAppearance, appearance.compactInlineLayoutAppearance] {
+            layout.normal.iconColor = inactive
+            layout.normal.titleTextAttributes = [.foregroundColor: inactive]
+            layout.selected.iconColor = active
+            layout.selected.titleTextAttributes = [.foregroundColor: active]
+        }
+        UITabBar.appearance().standardAppearance = appearance
+        UITabBar.appearance().scrollEdgeAppearance = appearance
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             TabView(selection: $selectedTab) {
-                NavigationStack { TodayView() }.tabItem { Label("Today", systemImage: "circle.grid.2x2.fill") }.tag(0)
-                NavigationStack { ChatLogView() }.tabItem { Label("Log", systemImage: "plus.circle.fill") }.tag(1)
-                NavigationStack { WorkoutsView() }.tabItem { Label("Workouts", systemImage: "figure.strengthtraining.traditional") }.tag(2)
+                NavigationStack { TodayView(selectedTab: $selectedTab) }
+                    .tabItem { Label("Today", systemImage: "circle.grid.2x2.fill") }
+                    .tag(0)
+                NavigationStack { ChatLogView() }
+                    .tabItem { Label("Coach", systemImage: "bubble.left.and.bubble.right.fill") }
+                    .tag(1)
+                NavigationStack { WorkoutsView() }
+                    .tabItem { Label("Workouts", systemImage: "figure.strengthtraining.traditional") }
+                    .tag(2)
+                NavigationStack { ProgressDashboardView() }
+                    .tabItem { Label("Progress", systemImage: "chart.bar.fill") }
+                    .tag(3)
             }
+            .tint(Theme.accent)
+
             if let toast = store.toast {
-                Label(toast, systemImage: "checkmark.circle.fill").font(.subheadline.weight(.semibold)).padding(.horizontal, 16).padding(.vertical, 10).background(.ultraThinMaterial, in: Capsule()).shadow(color: .black.opacity(0.12), radius: 16, y: 6).padding(.top, 8).transition(.move(edge: .top).combined(with: .opacity))
+                Label(toast, systemImage: "checkmark.circle.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.ink)
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(Theme.surface, in: Capsule())
+                    .shadow(color: .black.opacity(0.12), radius: 16, y: 6)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.78), value: store.toast)
         .task { await store.loadAll() }
-        .alert("Couldn’t complete that", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) { Button("OK", role: .cancel) {} } message: { Text(store.errorMessage ?? "Unknown error") }
+        .alert("Couldn’t complete that", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(store.errorMessage ?? "Unknown error")
+        }
     }
 }
 
+private struct ProgressDashboardView: View {
+    @EnvironmentObject private var store: AppStore
+
+    var body: some View {
+        ZStack {
+            Theme.canvas.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("Progress")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(Theme.ink)
+                    VStack(alignment: .leading, spacing: 18) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("COMING SOON").font(.caption2.weight(.bold)).tracking(1.4).foregroundStyle(Theme.accent)
+                                Text("Your trends, at a glance").font(.headline).foregroundStyle(Theme.ink)
+                            }
+                            Spacer()
+                            Image(systemName: "chart.line.uptrend.xyaxis").font(.title2).foregroundStyle(Theme.accent)
+                        }
+                        if let day = store.day {
+                            CalorieSnapshot(date: store.selectedDate, consumed: day.totals.calories, target: day.targets.calories)
+                        } else {
+                            Label("Log meals to start building your progress view.", systemImage: "fork.knife")
+                                .font(.subheadline).foregroundStyle(Theme.muted)
+                        }
+                    }.appCard(padding: 18)
+                }.padding(16)
+            }
+        }
+        .navigationBarHidden(true)
+    }
+}
+
+private struct CalorieSnapshot: View {
+    let date: Date
+    let consumed: Double
+    let target: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("\(date.formatted(.dateTime.month(.abbreviated).day()).uppercased()) CALORIES")
+                .font(.caption2.weight(.bold)).tracking(1.2).foregroundStyle(Theme.muted)
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Theme.divider)
+                    Capsule().fill(Theme.accent).frame(width: geometry.size.width * fraction)
+                }
+            }.frame(height: 10)
+            HStack {
+                Text("\(Int(consumed).formatted()) consumed").font(.subheadline.weight(.bold)).foregroundStyle(Theme.ink)
+                Spacer()
+                Text("\(Int(target).formatted()) goal").font(.caption).foregroundStyle(Theme.muted)
+            }
+        }
+    }
+
+    private var fraction: CGFloat {
+        guard target > 0 else { return 0 }
+        return CGFloat(min(max(consumed / target, 0), 1))
+    }
+}

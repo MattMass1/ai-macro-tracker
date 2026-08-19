@@ -22,6 +22,7 @@ struct MacroTrackerApp: App {
                 else { PasscodeView().environmentObject(auth) }
             }
             .tint(Theme.accent)
+            .preferredColorScheme(.light)
             .onChange(of: scenePhase) { _, phase in
                 switch phase {
                 case .background: auth.handleDidEnterBackground()
@@ -62,4 +63,3 @@ struct PasscodeView: View {
         }.onAppear { focused = true; if auth.hasPasscode { Task { await auth.unlockWithBiometrics() } } }
     }
 }
-

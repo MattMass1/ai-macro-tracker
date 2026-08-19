@@ -217,7 +217,7 @@ struct ChatLogView: View {
         if needsOnboarding {
             let trimmed = auth.displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let name = trimmed.isEmpty ? "" : " \(trimmed)"
-            messages.append(ChatMessage(role: .assistant, text: "Welcome\(name)! Let's get you set up. Tell me about your goals, height, weight, and how active you are, and I'll build your targets and plan."))
+            messages.append(ChatMessage(role: .assistant, text: "Welcome! What should I call you?"))
         } else {
             messages.append(ChatMessage(role: .assistant, text: "Tell me what you ate and I'll log it."))
         }

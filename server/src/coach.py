@@ -29,6 +29,16 @@ N = {"type": "number", "minimum": 0}
 S = {"type": "string"}
 MACROS = {key: N for key in ("calories", "protein", "carbs", "fat", "fiber")}
 TOOLS = [
+    _schema("set_display_name", "Save what the user wants the coach to call them.", {"name": S}, ("name",)),
+    _schema("set_metrics", "Save the user's structured body measurements.", {
+        "height_cm": {"type": "number", "minimum": 100, "maximum": 250},
+        "weight_kg": {"type": "number", "minimum": 30, "maximum": 300},
+        "goal_weight_kg": {"type": "number", "minimum": 30, "maximum": 300},
+        "age": {"type": "integer", "minimum": 13, "maximum": 120},
+        "activity_level": {"type": "string", "minLength": 1, "maxLength": 40},
+    }, ("height_cm", "weight_kg", "goal_weight_kg")),
+    _schema("get_metrics", "Read the user's saved body measurements.", {}),
+    _schema("request_metrics_form", "Ask the client to show the structured height and weight form.", {}),
     _schema("get_today", "Read today's macros and meals.", {}),
     _schema("get_day", "Read a specific day.", {"date": S}, ("date",)),
     _schema("get_range_summary", "Read macro totals over an inclusive range.", {"start": S, "end": S}, ("start", "end")),
@@ -58,7 +68,7 @@ def _load_persona() -> str:
 
 SYSTEM_PROMPT = """You are Macro Coach, a concise, practical nutrition and strength coach with hands: use tools whenever reading or changing user data. Never claim a write succeeded unless its tool result says so. Never estimate food macros; ask for a label/portion or use a saved preset. Keep responses short and human.
 
-Onboarding is active when the system context says the user has no plan or no targets. Interview them conversationally for goal, experience, days per week, equipment, and injuries/limitations. Ask only the next useful question. Once enough information is known, search the workout library, then call set_targets and set_workout_plan. Plans must use library exercises. Do not expose internal tool errors or secrets; explain the actionable part.
+Onboarding is active when the system context says the user has no plan or no targets. First ask "What should I call you?" and save the answer with set_display_name. Then interview them conversationally for goal, experience, days per week, equipment, and injuries/limitations. At the measurements step, call request_metrics_form so the client renders the height, weight, and goal-weight card. When measurements arrive in chat text, parse them and call set_metrics. Use get_metrics to recover saved measurements before calculating targets on a later turn. Ask only the next useful question. Once enough information is known, search the workout library, then call set_targets and set_workout_plan. Plans must use library exercises. Do not expose internal tool errors or secrets; explain the actionable part.
 
 For training recommendations use get_readiness. Users without WHOOP still receive rotation-based recommendations. Dates use YYYY-MM-DD."""
 
@@ -123,12 +133,13 @@ async def run_agent(
     else:
         messages.append({"role": "user", "content": message})
     system = system_prompt(onboarding)
+    available_tools = [tool for tool in TOOLS if tool["name"] in handlers]
     audit: list[dict[str, Any]] = []
     executed_tool_calls = 0
 
     for round_number in range(max_rounds + 1):
         payload = {"model": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5"), "max_tokens": 1200,
-                   "system": system, "tools": TOOLS, "messages": messages}
+                   "system": system, "tools": available_tools, "messages": messages}
         try:
             response = await _call_provider(post, token, payload)
             data = response.json()

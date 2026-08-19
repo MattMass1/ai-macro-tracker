@@ -251,6 +251,56 @@ def validate_name(name: str, field: str = "name") -> str:
     return text
 
 
+def validate_display_name(value: Any) -> str:
+    """Validate the short name used by the coach for the current user."""
+    if not isinstance(value, str):
+        raise MacroError("name must be a string")
+    name = value.strip()
+    if not name:
+        raise MacroError("name is required")
+    if len(name) > 40:
+        raise MacroError("name must be 40 characters or fewer")
+    return name
+
+
+def validate_metrics(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate onboarding measurements and return normalized values."""
+    def bounded_number(field: str, minimum: float, maximum: float) -> float:
+        try:
+            number = float(values.get(field))
+        except (TypeError, ValueError):
+            raise MacroError(f"{field} must be a number") from None
+        if not math.isfinite(number) or not minimum <= number <= maximum:
+            raise MacroError(f"{field} must be between {minimum:g} and {maximum:g}")
+        return round(number, 2)
+
+    result: dict[str, Any] = {
+        "height_cm": bounded_number("height_cm", 100, 250),
+        "weight_kg": bounded_number("weight_kg", 30, 300),
+        "goal_weight_kg": bounded_number("goal_weight_kg", 30, 300),
+    }
+    age = values.get("age")
+    if age is not None:
+        if isinstance(age, bool):
+            raise MacroError("age must be a whole number between 13 and 120")
+        try:
+            clean_age = int(age)
+        except (TypeError, ValueError):
+            raise MacroError("age must be a whole number between 13 and 120") from None
+        if clean_age != float(age) or not 13 <= clean_age <= 120:
+            raise MacroError("age must be a whole number between 13 and 120")
+        result["age"] = clean_age
+    activity_level = values.get("activity_level")
+    if activity_level is not None:
+        if not isinstance(activity_level, str):
+            raise MacroError("activity_level must be a string")
+        clean_level = activity_level.strip()
+        if not clean_level or len(clean_level) > 40:
+            raise MacroError("activity_level must be 1 to 40 characters")
+        result["activity_level"] = clean_level
+    return result
+
+
 def validate_workout_plan(plan: Any) -> dict[str, Any]:
     """Validate and return a version-1 per-user workout plan.
 

@@ -39,6 +39,16 @@ CREATE TABLE IF NOT EXISTS workout_plans (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS user_metrics (
+  user_id UUID PRIMARY KEY REFERENCES users(id),
+  height_cm NUMERIC NOT NULL,
+  weight_kg NUMERIC NOT NULL,
+  goal_weight_kg NUMERIC NOT NULL,
+  age INTEGER,
+  activity_level TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS workout_library (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL UNIQUE,

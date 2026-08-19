@@ -18,7 +18,7 @@ from starlette.requests import Request  # noqa: E402
 
 import domain  # noqa: E402
 from auth import bind_user, current_user_id, reset_user  # noqa: E402
-from coach import CoachProviderError, run_agent  # noqa: E402
+from coach import CoachProviderError, TOOLS, run_agent  # noqa: E402
 from domain import MacroError  # noqa: E402
 from store import ChatQuotaExceeded, Store  # noqa: E402
 import server as srv  # noqa: E402
@@ -219,6 +219,8 @@ class FakeStore:
         self.inserted = []
         self.usage = []
         self.saved_presets = []
+        self.display_names = []
+        self.metrics = []
 
     async def insert_user_chat_message(self, content, daily_cap):
         if self.today_count >= daily_cap:
@@ -233,6 +235,17 @@ class FakeStore:
     async def save_preset(self, values, existing_id=None):
         self.saved_presets.append((dict(values), existing_id))
         return {"id": existing_id or "new", **values}
+
+    async def put_display_name(self, name):
+        self.display_names.append(name)
+        return {"display_name": name}
+
+    async def put_metrics(self, values):
+        self.metrics.append(dict(values))
+        return dict(values)
+
+    async def get_metrics(self):
+        return dict(self.metrics[-1]) if self.metrics else None
 
     async def fetch_chat_messages(self, limit=20):
         return []
@@ -321,9 +334,10 @@ async def test_gym_chat_uses_coach_and_reports_onboarding(monkeypatch):
         "totals": {"calories": 725, "protein": 55, "carbs": 80, "fat": 20, "fiber": 9},
         "has_plan": False,
         "has_targets": False,
+        "widget": None,
     }
     assert seen["onboarding"] is True  # no plan + no targets → interview mode
-    assert len(seen["tools"]) == 15
+    assert len(seen["tools"]) == 19
     assert [row[0] for row in fake.inserted] == ["user", "assistant"]
     assert fake.usage == [("claude-sonnet-5", 10, 5)]
 
@@ -450,7 +464,8 @@ async def test_food_chat_uses_light_parser_without_anthropic(monkeypatch):
     http_response = await srv.api_chat(chat_request({"message": "log 2 eggs"}))
     payload = json.loads(http_response.body)
     assert http_response.status_code == 200
-    assert set(payload) == {"reply", "logged", "totals"}
+    assert set(payload) == {"reply", "logged", "totals", "widget"}
+    assert payload["widget"] is None
     assert payload["logged"][0]["name"] == "2 eggs"
     assert payload["totals"]["calories"] == 144
     assert [row[0] for row in fake.inserted] == ["user", "assistant"]
@@ -483,6 +498,185 @@ async def test_coach_save_preset_requires_a_real_macro_source(monkeypatch):
     saved_values, existing_id = fake.saved_presets[0]
     assert saved_values["macro_source"] == "Fairlife Core Power label"
     assert existing_id is None
+
+
+async def test_set_display_name_validates_and_updates_current_store(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    handler = srv._coach_tool_handlers()["set_display_name"]
+
+    assert await handler({"name": "  Ana  "}) == {"display_name": "Ana"}
+    with pytest.raises(MacroError, match="required"):
+        await handler({"name": "   "})
+    with pytest.raises(MacroError, match="40"):
+        await handler({"name": "x" * 41})
+    assert fake.display_names == ["Ana"]
+
+
+async def test_set_metrics_validates_and_stores_sane_values(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    handler = srv._coach_tool_handlers()["set_metrics"]
+    values = {"height_cm": 178, "weight_kg": 80, "goal_weight_kg": 75,
+              "age": 32, "activity_level": "moderate"}
+
+    result = await handler(values)
+    assert result["metrics"]["height_cm"] == 178.0
+    assert fake.metrics == [result["metrics"]]
+    for field, bad_value in (("height_cm", 99), ("weight_kg", 301),
+                             ("goal_weight_kg", 900)):
+        bad = {**values, field: bad_value}
+        with pytest.raises(MacroError, match=field):
+            await handler(bad)
+    assert len(fake.metrics) == 1
+
+
+async def test_widget_is_emitted_when_metrics_form_tool_was_called(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+
+    async def fake_parse(_message): return [], None
+    async def fake_run_agent(**_kwargs):
+        return "Add your measurements here.", [
+            {"tool": "request_metrics_form", "input": {}, "ok": True}
+        ]
+    async def fake_day_payload(_day): return {"totals": {"calories": 0}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+    response = await srv.api_chat(chat_request({"message": "Okay"}))
+    payload = json.loads(response.body)
+    assert payload["widget"] == {
+        "type": "metrics_form",
+        "fields": ["height_cm", "weight_kg", "goal_weight_kg", "age", "activity_level"],
+    }
+
+
+async def test_structured_metrics_are_stored_once_and_routed_to_coach(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    seen = {}
+
+    async def unexpected_parse(_message): pytest.fail("structured metrics must bypass food parsing")
+    async def fake_run_agent(**kwargs):
+        seen.update(kwargs)
+        return "Got it. How many days can you train?", []
+    async def fake_day_payload(_day): return {"totals": {"calories": 0}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", unexpected_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+    response = await srv.api_chat(chat_request({
+        "message": "Here are my measurements.",
+        "metrics": {"height_cm": 178, "weight_kg": 80, "goal_weight_kg": 75,
+                    "age": 32, "activity_level": "moderate"},
+    }))
+    assert response.status_code == 200
+    assert fake.metrics == [{"height_cm": 178.0, "weight_kg": 80.0,
+                             "goal_weight_kg": 75.0, "age": 32,
+                             "activity_level": "moderate"}]
+    assert seen["message"] == (
+        "Here are my measurements.\n\nMetrics stored this turn: height_cm=178.0, "
+        "weight_kg=80.0, goal_weight_kg=75.0, age=32, "
+        "activity_level=moderate. Do not call set_metrics."
+    )
+    assert fake.inserted[0] == ("user", seen["message"], None)
+    assert "set_metrics" not in seen["handlers"]
+
+
+async def test_get_metrics_returns_stored_values_on_later_turn(monkeypatch):
+    fake = FakeStore()
+    fake.metrics.append({"height_cm": 178.0, "weight_kg": 80.0,
+                         "goal_weight_kg": 75.0, "age": 32,
+                         "activity_level": "moderate"})
+    monkeypatch.setattr(srv, "_client", fake)
+
+    result = await srv._coach_tool_handlers()["get_metrics"]({})
+
+    assert result == {"metrics": fake.metrics[0]}
+
+    fake.metrics.clear()
+    assert await srv._coach_tool_handlers()["get_metrics"]({}) == {"metrics": {}}
+
+
+async def test_chat_text_metrics_fallback_still_saves(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    seen = {}
+
+    async def fake_parse(_message): return [], None
+    async def fake_run_agent(**kwargs):
+        seen.update(kwargs)
+        await kwargs["handlers"]["set_metrics"]({
+            "height_cm": 178, "weight_kg": 80, "goal_weight_kg": 75,
+            "age": 32, "activity_level": "moderate",
+        })
+        return "Saved.", []
+    async def fake_day_payload(_day): return {"totals": {"calories": 0}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+    response = await srv.api_chat(chat_request({
+        "message": "I'm 178 cm, 80 kg, aiming for 75 kg, age 32, moderately active."
+    }))
+
+    assert response.status_code == 200
+    assert "set_metrics" in seen["handlers"]
+    assert fake.metrics[-1]["age"] == 32
+    assert fake.metrics[-1]["activity_level"] == "moderate"
+
+
+def test_onboarding_tools_are_declared_with_required_fields():
+    tools = {tool["name"]: tool for tool in TOOLS}
+    assert tools["set_display_name"]["input_schema"]["required"] == ["name"]
+    assert tools["set_metrics"]["input_schema"]["required"] == [
+        "height_cm", "weight_kg", "goal_weight_kg"
+    ]
+    assert tools["get_metrics"]["input_schema"]["required"] == []
+    assert tools["request_metrics_form"]["input_schema"]["required"] == []
+
+
+class ProfilePool:
+    def __init__(self):
+        self.calls = []
+
+    async def fetchval(self, sql, *args):
+        self.calls.append((sql, args))
+        return args[0]
+
+    async def fetchrow(self, sql, *args):
+        self.calls.append((sql, args))
+        if sql.startswith("SELECT"):
+            return {"height_cm": 178, "weight_kg": 80, "goal_weight_kg": 75,
+                    "age": None, "activity_level": None,
+                    "updated_at": datetime(2026, 8, 19, 12, 0)}
+        return {"height_cm": args[1], "weight_kg": args[2],
+                "goal_weight_kg": args[3], "age": args[4],
+                "activity_level": args[5],
+                "updated_at": datetime(2026, 8, 19, 12, 0)}
+
+
+async def test_profile_store_writes_and_reads_only_bound_user():
+    pool = ProfilePool()
+    store = Store("postgresql://unused/unused")
+    store.pool = pool
+    user_id = uuid4()
+    token = bind_user(user_id)
+    try:
+        assert await store.put_display_name("Ana") == {"display_name": "Ana"}
+        await store.put_metrics({"height_cm": 178, "weight_kg": 80,
+                                 "goal_weight_kg": 75})
+        metrics = await store.get_metrics()
+    finally:
+        reset_user(token)
+
+    assert pool.calls[0][1] == ("Ana", user_id)
+    assert pool.calls[1][1][0] == user_id
+    assert pool.calls[2][1] == (user_id,)
+    assert metrics["height_cm"] == 178
+    assert all("user_id" in sql or "WHERE id=$2" in sql for sql, _args in pool.calls)
 
 
 async def test_store_rejects_unsourced_presets():

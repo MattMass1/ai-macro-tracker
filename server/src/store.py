@@ -181,6 +181,40 @@ class Store:
         )
         return json.loads(stored) if isinstance(stored, str) else dict(stored)
 
+    async def put_display_name(self, name: str) -> dict[str, str]:
+        """Update the authenticated user's display name."""
+        pool = await self.connect()
+        stored = await pool.fetchval(
+            "UPDATE users SET display_name=$1 WHERE id=$2 RETURNING display_name",
+            name, current_user_id(),
+        )
+        if stored is None:
+            raise StoreError("Authenticated user was not found")
+        return {"display_name": str(stored)}
+
+    async def get_metrics(self) -> dict[str, Any] | None:
+        """Return measurements for the authenticated user."""
+        pool = await self.connect()
+        return _dict(await pool.fetchrow(
+            "SELECT height_cm,weight_kg,goal_weight_kg,age,activity_level,updated_at "
+            "FROM user_metrics WHERE user_id=$1", current_user_id(),
+        ))
+
+    async def put_metrics(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        """Upsert measurements for the authenticated user."""
+        pool = await self.connect()
+        row = await pool.fetchrow(
+            "INSERT INTO user_metrics(user_id,height_cm,weight_kg,goal_weight_kg,age,activity_level) "
+            "VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(user_id) DO UPDATE SET "
+            "height_cm=EXCLUDED.height_cm,weight_kg=EXCLUDED.weight_kg,"
+            "goal_weight_kg=EXCLUDED.goal_weight_kg,age=EXCLUDED.age,"
+            "activity_level=EXCLUDED.activity_level,updated_at=now() "
+            "RETURNING height_cm,weight_kg,goal_weight_kg,age,activity_level,updated_at",
+            current_user_id(), values["height_cm"], values["weight_kg"],
+            values["goal_weight_kg"], values.get("age"), values.get("activity_level"),
+        )
+        return _dict(row) or {}
+
     async def fetch_workout_library(self) -> list[dict[str, Any]]:
         """Return the shared exercise library in stable type/name order."""
         pool = await self.connect()

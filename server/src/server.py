@@ -1390,6 +1390,18 @@ async def api_vision_log(request: Request) -> Any:
 
 def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[Any]]]:
     """Build tenant-bound coach tools; none accepts a user identifier."""
+    async def set_display_name_tool(args):
+        return await store_client().put_display_name(
+            domain.validate_display_name(args.get("name"))
+        )
+    async def set_metrics_tool(args):
+        return {"metrics": await store_client().put_metrics(domain.validate_metrics(args))}
+    async def get_metrics_tool(_args):
+        return {"metrics": await store_client().get_metrics() or {}}
+    async def request_metrics_form_tool(_args):
+        return {"type": "metrics_form", "fields": [
+            "height_cm", "weight_kg", "goal_weight_kg", "age", "activity_level"
+        ]}
     async def get_today_tool(_args): return await day_payload(domain.effective_date(), include_presets=True)
     async def get_day_tool(args): return await day_payload(domain.parse_date(str(args["date"])))
     async def get_range_tool(args): return await _get_range_summary(str(args["start"]), str(args["end"]))
@@ -1463,7 +1475,10 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
         except (httpx.HTTPError, ValueError):
             context["whoop_status"] = "temporarily_unavailable"
         return context
-    return {"get_today": get_today_tool, "get_day": get_day_tool,
+    return {"set_display_name": set_display_name_tool, "set_metrics": set_metrics_tool,
+            "get_metrics": get_metrics_tool,
+            "request_metrics_form": request_metrics_form_tool,
+            "get_today": get_today_tool, "get_day": get_day_tool,
             "get_range_summary": get_range_tool, "log_meal": log_meal_tool,
             "log_preset": log_preset_tool, "save_preset": save_preset_tool,
             "undo_last_meal": undo_tool, "get_targets": get_targets_tool,
@@ -1491,16 +1506,33 @@ async def api_chat(request: Request) -> Any:
     # append a synthetic assistant reply so history keeps alternating roles;
     # run_agent additionally merges same-role rows as defense in depth.
     text = message.strip()
+    structured_metrics = body.get("metrics")
+    validated_metrics = None
+    agent_message = text
+    if structured_metrics is not None:
+        if not isinstance(structured_metrics, dict):
+            raise MacroError("metrics must be an object")
+        validated_metrics = domain.validate_metrics(structured_metrics)
+        saved_summary = ", ".join(
+            f"{key}={value}" for key, value in validated_metrics.items()
+        )
+        agent_message = f"{text}\n\nMetrics stored this turn: {saved_summary}. Do not call set_metrics."
     try:
-        await client.insert_user_chat_message(text, daily_cap=50)
+        await client.insert_user_chat_message(agent_message, daily_cap=50)
     except ChatQuotaExceeded:
         return {"error": "You've reached today's coach limit. Ask Matt to raise it."}, 429
 
-    try:
-        raw_items, _ = await parse_chat_message(text)
-    except Exception:
-        logger.exception("Food parser failed; falling back to coach")
+    if validated_metrics is not None:
+        await client.put_metrics(validated_metrics)
+
+    if structured_metrics is not None:
         raw_items = []
+    else:
+        try:
+            raw_items, _ = await parse_chat_message(text)
+        except Exception:
+            logger.exception("Food parser failed; falling back to coach")
+            raw_items = []
     if raw_items:
         try:
             requested_day = body.get("date")
@@ -1534,7 +1566,7 @@ async def api_chat(request: Request) -> Any:
             targets = current["targets"]
             reply = f'Logged {len(logged)} item{"s" if len(logged) != 1 else ""} — {names}. Total now {totals["calories"]:g}/{targets["calories"]:g} kcal.'
             await client.insert_chat_message("assistant", reply)
-            return {"reply": reply, "logged": logged, "totals": totals}
+            return {"reply": reply, "logged": logged, "totals": totals, "widget": None}
         except Exception:
             try:
                 await client.insert_chat_message(
@@ -1553,10 +1585,12 @@ async def api_chat(request: Request) -> Any:
         )
 
     handlers = _coach_tool_handlers()
+    if structured_metrics is not None:
+        handlers.pop("set_metrics")
     try:
         reply, tool_results = await run_agent(
             history=[{"role": row["role"], "content": row["content"]} for row in history],
-            message=text, onboarding=plan is None or not has_targets,
+            message=agent_message, onboarding=plan is None or not has_targets,
             handlers=handlers, record_usage=record_usage,
         )
     except Exception:
@@ -1569,9 +1603,14 @@ async def api_chat(request: Request) -> Any:
         raise
     await client.insert_chat_message("assistant", reply, tool_results or None)
     current = await day_payload(domain.effective_date())
+    widget = ({"type": "metrics_form", "fields": [
+        "height_cm", "weight_kg", "goal_weight_kg", "age", "activity_level"
+    ]} if any(result.get("tool") == "request_metrics_form" and result.get("ok")
+              for result in tool_results) else None)
     return {"reply": reply, "logged": [], "totals": current["totals"],
             "has_plan": plan is not None or await client.fetch_workout_plan() is not None,
-            "has_targets": has_targets or await client.has_macro_targets()}
+            "has_targets": has_targets or await client.has_macro_targets(),
+            "widget": widget}
 
 
 @api_route("/api/chat/history", methods=["GET"])

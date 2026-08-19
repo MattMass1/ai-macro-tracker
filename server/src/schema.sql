@@ -39,6 +39,19 @@ CREATE TABLE IF NOT EXISTS workout_plans (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS workout_library (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL UNIQUE,
+  muscle_group TEXT[] NOT NULL DEFAULT '{}',
+  workout_type TEXT NOT NULL,
+  equipment TEXT NOT NULL,
+  difficulty TEXT NOT NULL,
+  swaps TEXT[] NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS workout_library_type_name_idx
+  ON workout_library(workout_type, name);
+
 CREATE TABLE IF NOT EXISTS chat_messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id),

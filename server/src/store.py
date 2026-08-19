@@ -158,6 +158,26 @@ class Store:
             return None
         return json.loads(plan) if isinstance(plan, str) else dict(plan)
 
+    async def put_workout_plan(self, plan: Mapping[str, Any]) -> dict[str, Any]:
+        """Upsert the authenticated user's validated workout plan."""
+        pool = await self.connect()
+        stored = await pool.fetchval(
+            "INSERT INTO workout_plans(user_id,plan) VALUES($1,$2::jsonb) "
+            "ON CONFLICT(user_id) DO UPDATE SET plan=EXCLUDED.plan,updated_at=now() "
+            "RETURNING plan",
+            current_user_id(), json.dumps(plan),
+        )
+        return json.loads(stored) if isinstance(stored, str) else dict(stored)
+
+    async def fetch_workout_library(self) -> list[dict[str, Any]]:
+        """Return the shared exercise library in stable type/name order."""
+        pool = await self.connect()
+        rows = await pool.fetch(
+            "SELECT name,muscle_group,workout_type,equipment,difficulty,swaps "
+            "FROM workout_library ORDER BY workout_type, lower(name)"
+        )
+        return [_dict(row) or {} for row in rows]
+
     async def insert_meal(self, *, name, meal, calories, protein, carbs, fat, fiber, day, macro_source):
         pool = await self.connect(); entry_id = str(uuid4()); user_id = current_user_id()
         async with pool.acquire() as conn, conn.transaction():

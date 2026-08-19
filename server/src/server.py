@@ -130,15 +130,34 @@ async def fetch_known_exercises() -> list[dict[str, Any]]:
     The PWA uses this to offer an exercise picker with the correct
     Push/Pull/Legs tag instead of a free-text field.
     """
-    pages = await store_client().fetch_prs()
-    return [
-        {
-            "name": page["exercise"].strip(),
-            "workout_type": page["workout_type"],
+    pages, library = await asyncio.gather(
+        store_client().fetch_prs(), store_client().fetch_workout_library()
+    )
+    merged = {
+        item["name"].casefold(): {
+            **item,
+            # Preserve the existing /api/exercises array-valued type contract.
+            "workout_type": [item["workout_type"]],
         }
-        for page in pages
-        if page["exercise"].strip()
-    ]
+        for item in library
+    }
+    for page in pages:
+        name = page["exercise"].strip()
+        if not name:
+            continue
+        existing = merged.get(name.casefold())
+        if existing is None:
+            merged[name.casefold()] = {
+                "name": name,
+                "workout_type": page["workout_type"],
+                "muscle_group": [],
+                "equipment": None,
+                "difficulty": None,
+                "swaps": [],
+            }
+        elif page["workout_type"] and not existing.get("workout_type"):
+            existing["workout_type"] = page["workout_type"]
+    return sorted(merged.values(), key=lambda item: item["name"].casefold())
 
 
 def get_default_exercises_for_type(workout_type: str) -> list[str]:
@@ -212,6 +231,16 @@ async def workout_plan_payload() -> dict[str, Any]:
         for item in (stored_plan or {}).get("days", [])
         if isinstance(item, dict) and item.get("type")
     }
+    if isinstance((stored_plan or {}).get("days"), dict):
+        planned_exercises = {
+            workout_type: [
+                str(exercise.get("name"))
+                for exercise in day.get("exercises", [])
+                if isinstance(exercise, dict) and exercise.get("name")
+            ]
+            for workout_type, day in stored_plan["days"].items()
+            if isinstance(day, dict)
+        }
 
     # ── Extract today's logged workout type ──────────────────────────────
     todays_logged_type: str | None = None
@@ -1437,6 +1466,39 @@ async def api_exercises(request: Request) -> Any:
 @api_route("/api/plan", methods=["GET"])
 async def api_plan(request: Request) -> Any:
     return await workout_plan_payload()
+
+
+@api_route("/api/plan", methods=["POST"])
+async def api_put_plan(request: Request) -> Any:
+    body = await _json_body(request)
+    try:
+        plan = domain.validate_workout_plan(body)
+    except ValueError as exc:
+        raise MacroError(str(exc)) from None
+    library = await store_client().fetch_workout_library()
+    known = {item["name"].casefold() for item in library}
+    referenced_names = {
+        name
+        for day in plan["days"].values()
+        for exercise in day["exercises"]
+        for name in [exercise["name"], *(exercise.get("swaps") or [])]
+    }
+    unknown = sorted(
+        (name for name in referenced_names if name.casefold() not in known),
+        key=str.casefold,
+    )
+    stored = await store_client().put_workout_plan(plan)
+    payload: dict[str, Any] = {"plan": stored}
+    if unknown:
+        payload["warnings"] = [
+            "Exercise is not in workout_library: " + name for name in unknown
+        ]
+    return payload
+
+
+@api_route("/api/library", methods=["GET"])
+async def api_library(request: Request) -> Any:
+    return {"exercises": await store_client().fetch_workout_library()}
 
 
 @api_route("/api/workout-stats", methods=["GET"])

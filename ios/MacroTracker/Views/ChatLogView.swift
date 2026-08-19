@@ -5,6 +5,12 @@ import UIKit
 struct ChatMessage: Identifiable { let id = UUID(); let role: Role; let text: String; enum Role { case user, assistant } }
 
 struct ChatLogView: View {
+    let scanFoodTrigger: Int
+
+    init(scanFoodTrigger: Int = 0) {
+        self.scanFoodTrigger = scanFoodTrigger
+    }
+
     @EnvironmentObject private var store: AppStore
     @State private var messages = [ChatMessage(role: .assistant, text: "Tell me what you ate and I’ll log it.")]
     @State private var input = ""
@@ -16,11 +22,13 @@ struct ChatLogView: View {
     @State private var analysisGeneration = 0
     @State private var showCamera = false
     @State private var showManual = false
+    @State private var handledScanFoodTrigger = 0
     @FocusState private var inputFocused: Bool
 
     var body: some View {
         ZStack { Theme.canvas.ignoresSafeArea()
             VStack(spacing: 0) {
+                coachHeader
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 10) {
@@ -34,8 +42,7 @@ struct ChatLogView: View {
                 composer
             }
         }
-        .navigationTitle("Chat & Log").navigationBarTitleDisplayMode(.inline)
-        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Manual", systemImage: "slider.horizontal.3") { showManual = true } } }
+        .navigationBarHidden(true)
         .sheet(isPresented: $showManual) { ManualFoodView() }
         .sheet(isPresented: $showCamera) { CameraPicker(image: $image) }
         .onChange(of: imageIdentity) { old, new in
@@ -51,6 +58,22 @@ struct ChatLogView: View {
             analysisGeneration += 1
             Task { await loadPhoto(item) }
         }
+        .onChange(of: scanFoodTrigger) { _, _ in
+            handleScanFoodTrigger()
+        }
+        .onAppear { handleScanFoodTrigger() }
+    }
+
+    private var coachHeader: some View {
+        HStack(spacing: 11) {
+            Text("🤖").font(.title3).frame(width: 40, height: 40).background(Theme.accentTint, in: Circle())
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Coach").font(.headline).foregroundStyle(Theme.ink)
+                HStack(spacing: 5) { Circle().fill(Theme.accent).frame(width: 7, height: 7); Text("Online").font(.caption).foregroundStyle(Theme.muted) }
+            }
+            Spacer()
+            Button("Manual", systemImage: "slider.horizontal.3") { showManual = true }.font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
+        }.padding(.horizontal, 16).padding(.vertical, 10).background(Theme.surface).overlay(alignment: .bottom) { Divider().overlay(Theme.divider) }
     }
 
     private var composer: some View {
@@ -60,10 +83,11 @@ struct ChatLogView: View {
                 Menu {
                     Button("Take Photo", systemImage: "camera") { showCamera = true }
                     PhotosPicker(selection: $photoItem, matching: .images) { Label("Choose Photo", systemImage: "photo") }
-                } label: { Image(systemName: "camera.fill").font(.body).frame(width: 44, height: 44).background(Color.secondary.opacity(0.1), in: Circle()) }
-                TextField("Had chicken and rice…", text: $input, axis: .vertical).lineLimit(1...4).focused($inputFocused).padding(.horizontal, 14).padding(.vertical, 11).background(Color.secondary.opacity(0.09), in: RoundedRectangle(cornerRadius: 18))
+                } label: { Image(systemName: "camera.fill").font(.body).foregroundStyle(Theme.accent).frame(width: 42, height: 42).background(Theme.accentTint, in: Circle()) }
+                TextField("Message Coach", text: $input, axis: .vertical).lineLimit(1...4).focused($inputFocused).padding(.horizontal, 14).padding(.vertical, 11).background(Theme.input, in: RoundedRectangle(cornerRadius: 18))
+                Button { inputFocused = true } label: { Image(systemName: "mic.fill").foregroundStyle(Theme.muted).frame(width: 30, height: 42) }.accessibilityLabel("Use dictation")
                 Button { Task { await send() } } label: { Image(systemName: "arrow.up").fontWeight(.bold).frame(width: 44, height: 44).background(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary.opacity(0.14) : Theme.accent, in: Circle()).foregroundStyle(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary : .white) }.disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
-            }.padding(12).background(.bar)
+            }.padding(12).background(Theme.surface)
         }
     }
 
@@ -75,6 +99,12 @@ struct ChatLogView: View {
     }
 
     private var imageIdentity: ObjectIdentifier? { image.map { ObjectIdentifier($0) } }
+
+    private func handleScanFoodTrigger() {
+        guard scanFoodTrigger > handledScanFoodTrigger else { return }
+        handledScanFoodTrigger = scanFoodTrigger
+        showCamera = true
+    }
 
     private func loadPhoto(_ item: PhotosPickerItem?) async {
         guard let item else { return }
@@ -107,7 +137,7 @@ struct ChatLogView: View {
 
 private struct ChatBubble: View {
     let message: ChatMessage
-    var body: some View { HStack { if message.role == .user { Spacer(minLength: 52) }; Text(message.text).font(.subheadline).padding(.horizontal, 14).padding(.vertical, 11).background(message.role == .user ? Theme.accent : Theme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous)).foregroundStyle(message.role == .user ? .white : .primary); if message.role == .assistant { Spacer(minLength: 52) } } }
+    var body: some View { HStack { if message.role == .user { Spacer(minLength: 52) }; Text(message.text).font(.subheadline).padding(.horizontal, 14).padding(.vertical, 11).background(message.role == .user ? Theme.accentTint : Theme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous)).foregroundStyle(Theme.ink).shadow(color: message.role == .assistant ? .black.opacity(0.04) : .clear, radius: 4, y: 1); if message.role == .assistant { Spacer(minLength: 52) } } }
 }
 private struct TypingBubble: View {
     @State private var pulse = false
@@ -129,7 +159,7 @@ private struct VisionCard: View {
     }
 }
 
-private struct ManualFoodView: View {
+struct ManualFoodView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""; @State private var meal = "Snack"; @State private var calories = ""; @State private var protein = ""; @State private var carbs = ""; @State private var fat = ""; @State private var fiber = ""

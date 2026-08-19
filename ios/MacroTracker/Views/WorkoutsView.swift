@@ -2,20 +2,18 @@ import SwiftUI
 
 struct WorkoutsView: View {
     @EnvironmentObject private var store: AppStore
-    @State private var showLogger = false
     var body: some View {
-        ZStack(alignment: .bottomTrailing) { Theme.canvas.ignoresSafeArea()
+        ZStack { Theme.canvas.ignoresSafeArea()
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 22) {
+                LazyVStack(alignment: .leading, spacing: 16) {
                     DayPicker(date: store.selectedDate, canGoForward: !store.isToday) { delta in Task { await store.moveDay(by: delta) } }
                     if store.isLoadingWorkouts && store.stats == nil { workoutSkeleton }
                     if let stats = store.stats { WorkoutDashboard(stats: stats) }
                     if let plan = store.plan { WorkoutPlanCard(plan: plan) }
                     WorkoutHistory(workouts: store.workouts) { id in Task { await store.deleteWorkout(id) } }
-                }.padding(.horizontal, 16).padding(.bottom, 96)
+                }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 96)
             }.refreshable { await store.loadWorkoutData() }
-            Button { showLogger = true } label: { Label("Log workout", systemImage: "plus").font(.subheadline.weight(.bold)).padding(.horizontal, 18).frame(height: 52).background(Theme.accent, in: Capsule()).foregroundStyle(.white).shadow(color: .black.opacity(0.18), radius: 16, y: 7) }.padding(18)
-        }.navigationTitle("Workouts").sheet(isPresented: $showLogger) { WorkoutLoggerView() }
+        }.navigationBarHidden(true)
     }
     private var workoutSkeleton: some View { VStack(spacing: 10) { HStack { RoundedRectangle(cornerRadius: 20).frame(height: 130); RoundedRectangle(cornerRadius: 20).frame(height: 130) }; RoundedRectangle(cornerRadius: 20).frame(height: 160) }.foregroundStyle(Theme.surface).redacted(reason: .placeholder).shimmering() }
 }
@@ -37,14 +35,14 @@ private struct WorkoutDashboard: View {
                     let count = stats.coverage.muscleGroups[muscle] ?? 0
                     HStack { Text(muscle).font(.caption).frame(width: 48, alignment: .leading); GeometryReader { geo in ZStack(alignment: .leading) { Capsule().fill(Color.secondary.opacity(0.1)); Capsule().fill(coverageColor(muscle)).frame(width: geo.size.width * CGFloat(count) / CGFloat(maxValue)) } }.frame(height: 7); Text("\(count)").font(.caption2.monospacedDigit()).frame(width: 20) }
                 }
-                if !stats.coverage.untouched.isEmpty { Text("Not hit: \(stats.coverage.untouched.joined(separator: ", "))").font(.caption).foregroundStyle(Theme.calories) }
+                if !stats.coverage.untouched.isEmpty { Text("Not hit: \(stats.coverage.untouched.joined(separator: ", "))").font(.caption).foregroundStyle(Theme.carbs) }
             }.appCard()
             if !stats.prs.isEmpty {
-                VStack(alignment: .leading, spacing: 10) { SectionLabel(text: "Personal records"); ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(stats.prs.prefix(6)) { pr in VStack(alignment: .leading, spacing: 3) { Image(systemName: "trophy.fill").foregroundStyle(Theme.calories); Text(pr.exercise).font(.caption.weight(.semibold)).lineLimit(1); Text("\(pr.maxWeight.formatted()) lb").font(.caption2.monospacedDigit()).foregroundStyle(.secondary) }.frame(width: 118, alignment: .leading).padding(12).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 15)) } } } }.appCard()
+                VStack(alignment: .leading, spacing: 10) { SectionLabel(text: "Personal records"); ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(stats.prs.prefix(6)) { pr in VStack(alignment: .leading, spacing: 3) { Image(systemName: "trophy.fill").foregroundStyle(Theme.accent); Text(pr.exercise).font(.caption.weight(.semibold)).lineLimit(1); Text("\(pr.maxWeight.formatted()) lb").font(.caption2.monospacedDigit()).foregroundStyle(Theme.muted) }.frame(width: 118, alignment: .leading).padding(12).background(Theme.accentTint, in: RoundedRectangle(cornerRadius: 15)) } } } }.appCard()
             }
         }
     }
-    private func coverageColor(_ value: String) -> Color { value == "Push" ? Theme.calories : value == "Pull" ? Theme.carbs : value == "Abs" ? Theme.fat : Theme.protein }
+    private func coverageColor(_ value: String) -> Color { value == "Push" ? Theme.accent : value == "Pull" ? Theme.carbs : value == "Abs" ? Theme.fiber : Theme.protein }
 }
 
 private struct MetricBlock: View {
@@ -83,7 +81,7 @@ private struct WorkoutHistory: View {
     }
 }
 
-private struct WorkoutLoggerView: View {
+struct WorkoutLoggerView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var exercise = ""; @State private var type = "Push"; @State private var sets = [WorkoutSet(weight: 0, reps: 0)]; @State private var last: LastWorkoutPayload?; @State private var isSaving = false

@@ -27,6 +27,15 @@ MUSCLE_GROUPS = ("Quads", "Hams", "Push", "Pull", "Abs")
 #: The user's 3-day split. Workout days cycle in this order.
 WORKOUT_ROTATION = ("Push", "Pull", "Legs")
 
+#: Version 1 of ``workout_plans.plan`` is a per-user JSON object:
+#: ``{"version": 1, "rotation": ["Push", "Pull", "Legs"],
+#: "days_per_week": 4, "days": {"Push": {"label": "Push Day",
+#: "exercises": [{"name": "Bench Press", "sets": 3, "reps": "8-10",
+#: "rest_sec": 150, "swaps": ["Incline DB Press"], "optional": False}]}},
+#: "notes": ""}``. ``swaps`` and ``optional`` may be omitted. When swaps are
+#: omitted, clients look them up by exercise name in ``workout_library``.
+WORKOUT_PLAN_VERSION = 1
+
 MAX_SETS = 4
 MAX_WORKOUT_WEIGHT = 2000.0
 MAX_REPS = 300
@@ -228,6 +237,117 @@ def validate_name(name: str, field: str = "name") -> str:
     if len(text) > 200:
         raise MacroError(f"{field} must be 200 characters or fewer")
     return text
+
+
+def validate_workout_plan(plan: Any) -> dict[str, Any]:
+    """Validate and return a version-1 per-user workout plan.
+
+    Exercise membership in the shared library is deliberately checked by the
+    caller, where database access is available. Unknown names are warnings, not
+    validation errors, so a coach may introduce a legitimate future exercise.
+    """
+    if not isinstance(plan, dict):
+        raise ValueError("plan must be a JSON object")
+    if plan.get("version") != WORKOUT_PLAN_VERSION:
+        raise ValueError(f"plan.version must be {WORKOUT_PLAN_VERSION}")
+    rotation = plan.get("rotation")
+    if not isinstance(rotation, list) or not rotation:
+        raise ValueError("plan.rotation must be a non-empty array")
+    for index, workout_type in enumerate(rotation):
+        if workout_type not in WORKOUT_TYPES:
+            raise ValueError(
+                f"plan.rotation[{index}] must be one of {', '.join(WORKOUT_TYPES)}"
+            )
+    if len(set(rotation)) != len(rotation):
+        raise ValueError("plan.rotation must not contain duplicate workout types")
+    clean_plan: dict[str, Any] = {
+        "version": WORKOUT_PLAN_VERSION,
+        "rotation": list(rotation),
+    }
+    days_per_week = plan.get("days_per_week")
+    if isinstance(days_per_week, bool) or not isinstance(days_per_week, int):
+        raise ValueError("plan.days_per_week must be an integer")
+    if not 1 <= days_per_week <= 7:
+        raise ValueError("plan.days_per_week must be between 1 and 7")
+    clean_plan["days_per_week"] = days_per_week
+    days = plan.get("days")
+    if not isinstance(days, dict):
+        raise ValueError("plan.days must be an object keyed by workout type")
+    missing_days = [workout_type for workout_type in rotation if workout_type not in days]
+    if missing_days:
+        raise ValueError(
+            "plan.days is missing rotation workout types: " + ", ".join(missing_days)
+        )
+    clean_days: dict[str, Any] = {}
+    for day_name, day in days.items():
+        prefix = f"plan.days[{day_name!r}]"
+        if day_name not in WORKOUT_TYPES:
+            raise ValueError(f"{prefix} uses an unknown workout type")
+        if not isinstance(day, dict):
+            raise ValueError(f"{prefix} must be an object")
+        if not isinstance(day.get("label"), str) or not day["label"].strip():
+            raise ValueError(f"{prefix}.label must be a non-empty string")
+        exercises = day.get("exercises")
+        if not isinstance(exercises, list):
+            raise ValueError(f"{prefix}.exercises must be an array")
+        if len(exercises) > 30:
+            raise ValueError(f"{prefix}.exercises must contain at most 30 exercises")
+        clean_exercises: list[dict[str, Any]] = []
+        for index, exercise in enumerate(exercises):
+            exercise_prefix = f"{prefix}.exercises[{index}]"
+            if not isinstance(exercise, dict):
+                raise ValueError(f"{exercise_prefix} must be an object")
+            if not isinstance(exercise.get("name"), str) or not exercise["name"].strip():
+                raise ValueError(f"{exercise_prefix}.name must be a non-empty string")
+            sets = exercise.get("sets")
+            if (
+                isinstance(sets, bool)
+                or not isinstance(sets, int)
+                or not 1 <= sets <= 10
+            ):
+                raise ValueError(f"{exercise_prefix}.sets must be an integer between 1 and 10")
+            if not isinstance(exercise.get("reps"), str) or not exercise["reps"].strip():
+                raise ValueError(f"{exercise_prefix}.reps must be a non-empty string")
+            rest_sec = exercise.get("rest_sec")
+            if (
+                isinstance(rest_sec, bool)
+                or not isinstance(rest_sec, int)
+                or not 0 <= rest_sec <= 3600
+            ):
+                raise ValueError(
+                    f"{exercise_prefix}.rest_sec must be an integer between 0 and 3600"
+                )
+            swaps = exercise.get("swaps")
+            if swaps is not None and (
+                not isinstance(swaps, list)
+                or any(not isinstance(swap, str) or not swap.strip() for swap in swaps)
+            ):
+                raise ValueError(f"{exercise_prefix}.swaps must be an array of non-empty strings")
+            optional = exercise.get("optional")
+            if optional is not None and not isinstance(optional, bool):
+                raise ValueError(f"{exercise_prefix}.optional must be a boolean")
+            clean_exercise = {
+                "name": exercise["name"].strip(),
+                "sets": sets,
+                "reps": exercise["reps"].strip(),
+                "rest_sec": rest_sec,
+            }
+            if swaps is not None:
+                clean_exercise["swaps"] = [swap.strip() for swap in swaps]
+            if optional is not None:
+                clean_exercise["optional"] = optional
+            clean_exercises.append(clean_exercise)
+        clean_days[day_name] = {
+            "label": day["label"].strip(),
+            "exercises": clean_exercises,
+        }
+    clean_plan["days"] = clean_days
+    notes = plan.get("notes")
+    if notes is not None and not isinstance(notes, str):
+        raise ValueError("plan.notes must be a string")
+    if notes is not None:
+        clean_plan["notes"] = notes
+    return clean_plan
 
 
 # --------------------------------------------------------------------------- #

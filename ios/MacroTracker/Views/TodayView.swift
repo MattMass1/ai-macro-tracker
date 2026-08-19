@@ -2,6 +2,7 @@ import SwiftUI
 
 struct TodayView: View {
     @EnvironmentObject private var store: AppStore
+    @Binding var selectedTab: Int
     @State private var note = ""
     @State private var noteDay = ""
     @State private var lastPersistedNote = ""
@@ -9,20 +10,21 @@ struct TodayView: View {
     var body: some View {
         ZStack { Theme.canvas.ignoresSafeArea()
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 24) {
+                LazyVStack(alignment: .leading, spacing: 12) {
                     DayPicker(date: store.selectedDate, canGoForward: !store.isToday, isEnabled: !store.isLoadingDay && !isChangingDay) { delta in Task { await changeDay(by: delta) } }
+                    CoachStrip { selectedTab = 1 }
                     if store.isLoadingDay && store.day == nil { loading }
                     else if let day = store.day {
                         MacroRingsView(totals: day.totals, targets: day.targets, remaining: day.remaining)
+                        MealListView(meals: day.meals, onDelete: { id in Task { await store.deleteMeal(id) } }, onAdd: { selectedTab = 1 })
                         if let warning = day.warning { Label(warning, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(Theme.calories).appCard() }
                         BriefCard(text: $note) { Task { await persistCurrentNote() } }
                         PresetGridView(presets: store.presets) { preset in Task { await store.logPreset(preset) } }
-                        MealListView(meals: day.meals) { id in Task { await store.deleteMeal(id) } }
                     } else { EmptyState(icon: "wifi.exclamationmark", title: "No daily data", message: "Pull to refresh after checking your API settings.") }
-                }.padding(.horizontal, 16).padding(.bottom, 30)
+                }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 96)
             }.refreshable { await store.loadDay() }
         }
-        .navigationTitle("Macro Tracker").navigationBarTitleDisplayMode(.large)
+        .navigationBarHidden(true)
         .onChange(of: store.brief?.date) { _, _ in adoptBriefIfMatching() }
         .onChange(of: store.brief?.text) { _, _ in adoptBriefIfMatching() }
         .onChange(of: store.isLoadingDay) { _, loading in if !loading { adoptBriefIfMatching() } }
@@ -51,6 +53,26 @@ struct TodayView: View {
         defer { isChangingDay = false }
         await persistCurrentNote()
         await store.moveDay(by: delta)
+    }
+}
+
+private struct CoachStrip: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Text("🤖").font(.title3).frame(width: 42, height: 42).background(.white.opacity(0.16), in: Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Coach").font(.subheadline.weight(.bold)).foregroundStyle(.white)
+                    Text("Ready when you are").font(.caption).foregroundStyle(.white.opacity(0.75)).lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                Text("Ask →").font(.caption.weight(.bold)).foregroundStyle(Theme.accent).padding(.horizontal, 13).padding(.vertical, 7).background(.white, in: Capsule())
+            }
+            .padding(16)
+            .background(LinearGradient(colors: [Theme.accentDark, Theme.accent], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        }.buttonStyle(.plain)
     }
 }
 

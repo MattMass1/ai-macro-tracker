@@ -39,6 +39,7 @@ final class APIClient {
     func analyze(image: String, meal: String? = nil) async throws -> VisionPayload { try await send("api/vision-log", body: VisionRequest(image: image, meal: meal)) }
     func deleteMeal(_ id: String) async throws -> DayPayload { try await delete("api/meal/\(encoded(id))") }
     func exercises() async throws -> ExercisesPayload { try await get("api/exercises") }
+    func library() async throws -> LibraryPayload { try await get("api/library") }
     func plan() async throws -> WorkoutPlanPayload { try await get("api/plan") }
     func workoutStats() async throws -> WorkoutStatsPayload { try await get("api/workout-stats") }
     func workouts(_ date: String) async throws -> WorkoutsPayload { try await get("api/workouts/\(encoded(date))") }

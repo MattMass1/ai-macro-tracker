@@ -109,7 +109,21 @@ struct WorkoutPlanPayload: Codable {
     var lastWorkout: String?
     var upcoming: [PlannedDay]
     var core: [Exercise]
+    // Optional keeps decoding compatible with servers deployed before `has_plan`.
+    var hasPlan: Bool?
 }
+
+struct LibraryExercise: Codable, Identifiable, Hashable {
+    var id: String { name }
+    var name: String
+    var muscleGroup: [String]
+    var workoutType: String
+    var equipment: String
+    var difficulty: String
+    var swaps: [String]
+}
+
+struct LibraryPayload: Codable { var exercises: [LibraryExercise] }
 
 struct WorkoutStatsPayload: Codable {
     struct Today: Codable { var date: String; var entries: Int; var exercises: [ExerciseSummary] }

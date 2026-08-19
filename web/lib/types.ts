@@ -129,6 +129,7 @@ export type WorkoutPlanPayload = {
   last_workout: string | null;
   upcoming: { type: string; exercises: { name: string }[] }[];
   core: { name: string }[];
+  has_plan?: boolean;
 };
 
 export type WorkoutStatsPayload = {

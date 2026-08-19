@@ -277,10 +277,14 @@ async def test_daily_message_cap_returns_429(monkeypatch):
     assert fake.inserted == []  # capped turns are not persisted
 
 
-async def test_chat_endpoint_persists_turns_and_reports_onboarding(monkeypatch):
+async def test_gym_chat_uses_coach_and_reports_onboarding(monkeypatch):
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
     seen = {}
+
+    async def fake_parse(message):
+        assert message == "what should I do today?"
+        return [], None
 
     async def fake_run_agent(*, history, message, onboarding, handlers, record_usage=None, **_kw):
         seen.update(onboarding=onboarding, tools=sorted(handlers), history=history)
@@ -288,8 +292,9 @@ async def test_chat_endpoint_persists_turns_and_reports_onboarding(monkeypatch):
         return "Welcome! What's your goal?", [{"tool": "get_today", "input": {}, "ok": True}]
 
     monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
 
-    http_response = await srv.api_chat(chat_request({"message": "hi coach"}))
+    http_response = await srv.api_chat(chat_request({"message": "what should I do today?"}))
     assert http_response.status_code == 200
     payload = json.loads(http_response.body)
     assert payload == {"reply": "Welcome! What's your goal?", "has_plan": False,
@@ -305,11 +310,15 @@ async def test_chat_records_user_message_before_the_agent_loop(monkeypatch):
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
 
+    async def fake_parse(_message):
+        return [], None
+
     async def fake_run_agent(**_kw):
         assert [row[0] for row in fake.inserted] == ["user"]
         return "ok", []
 
     monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
     http_response = await srv.api_chat(chat_request({"message": "hi coach"}))
     assert http_response.status_code == 200
     assert [(row[0], row[1]) for row in fake.inserted] == [("user", "hi coach"), ("assistant", "ok")]
@@ -320,16 +329,61 @@ async def test_chat_failure_persists_user_and_synthetic_assistant(monkeypatch):
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
 
+    async def fake_parse(_message):
+        return [], None
+
     async def failing_run_agent(**_kw):
         raise CoachProviderError("The coach is having trouble connecting. Try again in a moment.")
 
     monkeypatch.setattr(srv, "run_agent", failing_run_agent)
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
     http_response = await srv.api_chat(chat_request({"message": "hi"}))
     assert http_response.status_code == 502
     assert [(row[0], row[1]) for row in fake.inserted] == [
         ("user", "hi"),
         ("assistant", "Sorry, I couldn't reach the coach. Try again."),
     ]
+
+
+async def test_food_chat_uses_light_parser_without_anthropic(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+
+    async def fake_parse(message):
+        assert message == "log 2 eggs"
+        return [{"name": "2 eggs", "calories": 144, "protein": 12.6,
+                 "carbs": 0.7, "fat": 9.5, "fiber": 0,
+                 "meal": "Breakfast", "note": "USDA"}], None
+
+    async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
+                              meal, day_value, allow_estimate=False, fiber=0):
+        assert (name, macro_source, meal, allow_estimate) == (
+            "2 eggs", "USDA", "Breakfast", True
+        )
+        return {"logged": {"name": name, "calories": calories, "protein": protein,
+                            "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
+
+    async def fake_day_payload(_day, ensure=None):
+        assert ensure and ensure[0]["name"] == "2 eggs"
+        return {"totals": {"calories": 144, "protein": 12.6, "carbs": 0.7,
+                            "fat": 9.5, "fiber": 0},
+                "targets": {"calories": 2000}}
+
+    async def unexpected_anthropic(**_kw):
+        pytest.fail("food logging must not call the Anthropic coach")
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+    monkeypatch.setattr(srv, "run_agent", unexpected_anthropic)
+
+    http_response = await srv.api_chat(chat_request({"message": "log 2 eggs"}))
+    payload = json.loads(http_response.body)
+    assert http_response.status_code == 200
+    assert set(payload) == {"reply", "logged", "totals"}
+    assert payload["logged"][0]["name"] == "2 eggs"
+    assert payload["totals"]["calories"] == 144
+    assert [row[0] for row in fake.inserted] == ["user", "assistant"]
 
 
 def test_chat_quota_window_rolls_at_4am_not_midnight():

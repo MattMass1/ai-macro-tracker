@@ -1474,16 +1474,7 @@ async def api_chat(request: Request) -> Any:
 
     client = store_client()
     history = await client.fetch_chat_messages(20)
-    plan, has_targets = await asyncio.gather(
-        client.fetch_workout_plan(), client.has_macro_targets()
-    )
-    async def record_usage(usage: Mapping[str, Any]) -> None:
-        await client.insert_coach_usage(
-            str(usage["model"]), int(usage["input_tokens"]), int(usage["output_tokens"])
-        )
-
-    handlers = _coach_tool_handlers()
-    # Persist the user turn before the agent loop so in-flight requests already
+    # Persist the user turn before either model call so in-flight requests already
     # count toward the daily cap and a failed loop still consumes quota. The
     # store enforces the cap atomically (per-user advisory lock around
     # count+insert), so concurrent turns at 49 cannot both land. On failure we
@@ -1494,6 +1485,51 @@ async def api_chat(request: Request) -> Any:
         await client.insert_user_chat_message(text, daily_cap=50)
     except ChatQuotaExceeded:
         return {"error": "You've reached today's coach limit. Ask Matt to raise it."}, 429
+
+    raw_items, _ = await parse_chat_message(text)
+    if raw_items:
+        requested_day = body.get("date")
+        day = domain.parse_date(requested_day) if requested_day is not None else domain.effective_date()
+        validated: list[tuple[str, dict[str, float], str, str]] = []
+        for raw in raw_items[:10]:
+            if not isinstance(raw, dict):
+                raise MacroError("I couldn't understand one of those food items. Please rephrase it.")
+            clean_name = domain.validate_name(str(raw.get("name", "")))
+            macros = domain.validate_macros(
+                raw.get("calories"), raw.get("protein"), raw.get("carbs"),
+                raw.get("fat"), raw.get("fiber", 0)
+            )
+            meal_name = domain.normalize_meal(raw.get("meal"))
+            validated.append(
+                (clean_name, macros, str(raw.get("note") or "Chat & Log"), meal_name)
+            )
+
+        logged: list[dict[str, Any]] = []
+        for clean_name, macros, note, meal_name in validated:
+            result = await write_meal(
+                clean_name, macros["calories"], macros["protein"], macros["carbs"],
+                macros["fat"], note, meal_name, day.isoformat(), allow_estimate=True,
+                fiber=macros["fiber"],
+            )
+            logged.append(result["logged"])
+
+        current = await day_payload(day, ensure=logged)
+        names = ", ".join(f'{item["name"]} {item["calories"]:g} kcal ✓' for item in logged)
+        totals = current["totals"]
+        targets = current["targets"]
+        reply = f'Logged {len(logged)} item{"s" if len(logged) != 1 else ""} — {names}. Total now {totals["calories"]:g}/{targets["calories"]:g} kcal.'
+        await client.insert_chat_message("assistant", reply)
+        return {"reply": reply, "logged": logged, "totals": totals}
+
+    plan, has_targets = await asyncio.gather(
+        client.fetch_workout_plan(), client.has_macro_targets()
+    )
+    async def record_usage(usage: Mapping[str, Any]) -> None:
+        await client.insert_coach_usage(
+            str(usage["model"]), int(usage["input_tokens"]), int(usage["output_tokens"])
+        )
+
+    handlers = _coach_tool_handlers()
     try:
         reply, tool_results = await run_agent(
             history=[{"role": row["role"], "content": row["content"]} for row in history],

@@ -221,7 +221,7 @@ struct ChatLogView: View {
         if fields.isEmpty {
             let numbers = values.numbers.keys.sorted().compactMap { key -> String? in
                 guard let value = values.numbers[key] else { return nil }
-                return "\(key) \(Self.formatMetric(value))"
+                return Self.usMetricSummary(key: key, value: value)
             }
             let texts = values.texts.keys.sorted().compactMap { key -> String? in
                 guard let text = values.texts[key] else { return nil }
@@ -232,11 +232,10 @@ struct ChatLogView: View {
             parts = fields.compactMap { field in
                 if field.isNumeric {
                     guard let value = values.numbers[field.key] else { return nil }
-                    let unit = field.unit.map { " \($0)" } ?? ""
-                    return "\(field.label) \(Self.formatMetric(value))\(unit)"
+                    return Self.usMetricSummary(key: field.key, value: value)
                 }
                 guard let text = values.texts[field.key] else { return nil }
-                return "\(field.label) \(text)"
+                return "\(MetricsField.defaultLabel(for: field.key)) \(text)"
             }
         }
         return "My metrics: " + parts.joined(separator: ", ")
@@ -244,6 +243,27 @@ struct ChatLogView: View {
 
     private static func formatMetric(_ value: Double) -> String {
         value.rounded() == value ? String(Int(value)) : String(value)
+    }
+
+    private static func usMetricSummary(key: String, value: Double) -> String {
+        switch key {
+        case "height_cm":
+            let totalInches = Int((value / 2.54).rounded())
+            return "Height \(totalInches / 12) ft \(totalInches % 12) in"
+        case "weight_kg":
+            return "Weight \(formatPounds(value * 2.2046226218)) lb"
+        case "goal_weight_kg":
+            return "Goal weight \(formatPounds(value * 2.2046226218)) lb"
+        case "age":
+            return "Age \(formatMetric(value))"
+        default:
+            return "\(MetricsField.defaultLabel(for: key)) \(formatMetric(value))"
+        }
+    }
+
+    private static func formatPounds(_ value: Double) -> String {
+        let rounded = (value * 10).rounded() / 10
+        return rounded.rounded() == rounded ? String(Int(rounded)) : String(format: "%.1f", rounded)
     }
 
     private func seedGreeting() {

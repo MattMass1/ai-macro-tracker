@@ -78,7 +78,7 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertEqual(reply.widget?.fields.map(\.key), ["height_cm", "weight_kg", "goal_weight_kg", "age", "activity_level"])
         XCTAssertEqual(reply.widget?.fields.map(\.kind), [.number, .number, .number, .number, .string])
         XCTAssertEqual(reply.widget?.fields.first?.label, "Height")
-        XCTAssertEqual(reply.widget?.fields.first?.unit, "cm")
+        XCTAssertEqual(reply.widget?.fields.first?.unit, "ft / in")
         XCTAssertEqual(reply.widget?.fields.last?.label, "Activity level")
         XCTAssertEqual(reply.widget?.fields.last?.isNumeric, Optional(false))
     }
@@ -124,5 +124,21 @@ final class ModelDecodingTests: XCTestCase {
         let field = try JSONDecoder().decode(MetricsField.self, from: json)
         XCTAssertEqual(field.kind, .string)
         XCTAssertFalse(field.isNumeric)
+    }
+
+    func testUSHeightConvertsToBackendCentimeters() throws {
+        let centimeters = try XCTUnwrap(
+            MetricsFormCard.heightCentimeters(feet: "5", inches: "10")
+        )
+        XCTAssertEqual(centimeters, 177.8, accuracy: 0.0001)
+        XCTAssertNil(MetricsFormCard.heightCentimeters(feet: "5", inches: "12"))
+    }
+
+    func testUSPoundsConvertToBackendKilograms() {
+        XCTAssertEqual(
+            MetricsFormCard.kilograms(fromPounds: 175),
+            79.37866475,
+            accuracy: 0.0000001
+        )
     }
 }

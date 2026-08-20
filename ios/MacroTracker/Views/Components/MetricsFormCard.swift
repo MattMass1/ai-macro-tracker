@@ -39,7 +39,12 @@ struct MetricsFormCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top) {
-                SectionLabel(text: "Your metrics")
+                VStack(alignment: .leading, spacing: 4) {
+                    SectionLabel(text: "Your metrics")
+                    Text("US units")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Theme.accent)
+                }
                 Spacer(minLength: 8)
                 Button {
                     inputFocused = false
@@ -57,25 +62,10 @@ struct MetricsFormCard: View {
 
             ForEach(fields, id: \.key) { field in
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(field.label)
+                    Text(displayLabel(for: field))
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Theme.ink)
-                    HStack(spacing: 8) {
-                        TextField(field.placeholder ?? field.label, text: binding(for: field.key))
-                            .keyboardType(keyboard(for: field))
-                            .focused($inputFocused)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .foregroundStyle(Theme.ink)
-                        if let unit = field.unit, !unit.isEmpty {
-                            Text(unit)
-                                .font(.subheadline)
-                                .foregroundStyle(Theme.muted)
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 11)
-                    .background(Theme.input, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    editor(for: field)
                 }
             }
 
@@ -97,6 +87,48 @@ struct MetricsFormCard: View {
         return field.key == "age" ? .numberPad : .decimalPad
     }
 
+    @ViewBuilder
+    private func editor(for field: MetricsField) -> some View {
+        if field.key == "height_cm" {
+            HStack(spacing: 10) {
+                unitInput(key: "height_feet", placeholder: "5", unit: "ft", keyboard: .numberPad)
+                unitInput(key: "height_inches", placeholder: "10", unit: "in", keyboard: .numberPad)
+            }
+        } else {
+            HStack(spacing: 8) {
+                TextField(displayPlaceholder(for: field), text: binding(for: field.key))
+                    .keyboardType(keyboard(for: field))
+                    .focused($inputFocused)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .foregroundStyle(Theme.ink)
+                if let unit = displayUnit(for: field) {
+                    Text(unit)
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.muted)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(Theme.input, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+    }
+
+    private func unitInput(key: String, placeholder: String, unit: String, keyboard: UIKeyboardType) -> some View {
+        HStack(spacing: 8) {
+            TextField(placeholder, text: binding(for: key))
+                .keyboardType(keyboard)
+                .focused($inputFocused)
+                .multilineTextAlignment(.trailing)
+            Text(unit)
+                .font(.subheadline)
+                .foregroundStyle(Theme.muted)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .background(Theme.input, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
     private func binding(for key: String) -> Binding<String> {
         Binding(
             get: { values[key] ?? "" },
@@ -105,7 +137,30 @@ struct MetricsFormCard: View {
     }
 
     private func parsedNumber(for field: MetricsField) -> Double? {
-        Self.parseNumber(values[field.key] ?? "", integer: field.key == "age")
+        switch field.key {
+        case "height_cm":
+            return Self.heightCentimeters(
+                feet: values["height_feet"] ?? "",
+                inches: values["height_inches"] ?? ""
+            )
+        case "weight_kg", "goal_weight_kg":
+            guard let pounds = Self.parseNumber(values[field.key] ?? "") else { return nil }
+            return Self.kilograms(fromPounds: pounds)
+        default:
+            return Self.parseNumber(values[field.key] ?? "", integer: field.key == "age")
+        }
+    }
+
+    private func displayLabel(for field: MetricsField) -> String {
+        MetricsField.defaultLabel(for: field.key)
+    }
+
+    private func displayUnit(for field: MetricsField) -> String? {
+        MetricsField.defaultUnit(for: field.key)
+    }
+
+    private func displayPlaceholder(for field: MetricsField) -> String {
+        MetricsField.defaultPlaceholder(for: field.key) ?? displayLabel(for: field)
     }
 
     private func submit() {
@@ -119,6 +174,18 @@ struct MetricsFormCard: View {
         guard let value = Double(trimmed), value.isFinite, value > 0 else { return nil }
         if integer, value != value.rounded() { return nil }
         return value
+    }
+
+    static func heightCentimeters(feet rawFeet: String, inches rawInches: String) -> Double? {
+        let feetText = rawFeet.trimmingCharacters(in: .whitespacesAndNewlines)
+        let inchesText = rawInches.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let feet = Int(feetText), (3...8).contains(feet) else { return nil }
+        guard let inches = Int(inchesText), (0...11).contains(inches) else { return nil }
+        return Double((feet * 12) + inches) * 2.54
+    }
+
+    static func kilograms(fromPounds pounds: Double) -> Double {
+        pounds * 0.45359237
     }
 
     static func parseText(_ raw: String) -> String? {

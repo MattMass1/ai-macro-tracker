@@ -240,19 +240,19 @@ struct MetricsField: Codable, Equatable {
 
     static func defaultUnit(for key: String) -> String? {
         switch key {
-        case "height_cm": return "cm"
-        case "weight_kg", "goal_weight_kg": return "kg"
+        case "height_cm": return "ft / in"
+        case "weight_kg", "goal_weight_kg": return "lb"
         default: return nil
         }
     }
 
     static func defaultPlaceholder(for key: String) -> String? {
         switch key {
-        case "height_cm": return "180"
-        case "weight_kg": return "80"
-        case "goal_weight_kg": return "75"
+        case "height_cm": return "5 ft 10 in"
+        case "weight_kg": return "175"
+        case "goal_weight_kg": return "165"
         case "age": return "32"
-        case "activity_level": return "moderate"
+        case "activity_level": return "Moderately active"
         default: return nil
         }
     }

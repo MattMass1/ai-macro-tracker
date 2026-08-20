@@ -1,7 +1,7 @@
 """Network-free tests for coach tool dispatch and loop guardrails."""
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 import httpx
@@ -212,7 +212,7 @@ async def test_usage_is_recorded_per_api_call_and_never_fatal(monkeypatch):
 
 
 class FakeStore:
-    def __init__(self, today_count=0, plan=None, has_targets=False):
+    def __init__(self, today_count=0, plan=None, has_targets=False, chat_messages=None):
         self.today_count = today_count
         self.plan = plan
         self.targets = has_targets
@@ -221,6 +221,8 @@ class FakeStore:
         self.saved_presets = []
         self.display_names = []
         self.metrics = []
+        self.chat_messages = chat_messages or []
+        self.history_day_start = None
 
     async def insert_user_chat_message(self, content, daily_cap):
         if self.today_count >= daily_cap:
@@ -249,6 +251,10 @@ class FakeStore:
 
     async def fetch_chat_messages(self, limit=20):
         return []
+
+    async def fetch_chat_messages_since(self, day_start, limit=20):
+        self.history_day_start = day_start
+        return [row for row in self.chat_messages if row["created_at"] >= day_start][:limit]
 
     async def fetch_meals(self, _start, _end=None):
         return []
@@ -337,9 +343,40 @@ async def test_gym_chat_uses_coach_and_reports_onboarding(monkeypatch):
         "widget": None,
     }
     assert seen["onboarding"] is True  # no plan + no targets → interview mode
-    assert len(seen["tools"]) == 19
+    assert len(seen["tools"]) == 20
     assert [row[0] for row in fake.inserted] == ["user", "assistant"]
     assert fake.usage == [("claude-sonnet-5", 10, 5)]
+
+
+async def test_chat_history_is_current_coaching_day_only_and_onboarding_persists(monkeypatch):
+    day_start, _ = domain.effective_day_window()
+    fake = FakeStore(
+        plan={"version": 1},
+        has_targets=True,
+        chat_messages=[
+            {"role": "user", "content": "yesterday food", "created_at": day_start - timedelta(seconds=1)},
+            {"role": "assistant", "content": "today plan", "created_at": day_start + timedelta(seconds=1)},
+        ],
+    )
+    monkeypatch.setattr(srv, "_client", fake)
+    seen = {}
+
+    async def fake_parse(_message):
+        return [], None
+
+    async def fake_run_agent(**kwargs):
+        seen.update(kwargs)
+        return "Fresh day.", []
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+
+    response = await srv.api_chat(chat_request({"message": "hello"}))
+
+    assert response.status_code == 200
+    assert fake.history_day_start == day_start
+    assert seen["history"] == [{"role": "assistant", "content": "today plan"}]
+    assert seen["onboarding"] is False
 
 
 async def test_chat_records_user_message_before_the_agent_loop(monkeypatch):
@@ -479,6 +516,41 @@ def test_chat_quota_window_rolls_at_4am_not_midnight():
     start, end = domain.effective_day_window(datetime(2026, 8, 19, 12, 0, tzinfo=tz))
     assert start == datetime(2026, 8, 19, 4, 0, tzinfo=tz)
     assert end == datetime(2026, 8, 20, 4, 0, tzinfo=tz)
+
+
+async def test_store_fetch_chat_messages_since_excludes_prior_day():
+    day_start = datetime(2026, 8, 19, 4, 0, tzinfo=domain.LOCAL_TZ)
+
+    class HistoryPool:
+        def __init__(self):
+            self.sql = ""
+            self.args = ()
+
+        async def fetch(self, sql, *args):
+            self.sql = sql
+            self.args = args
+            rows = [
+                {"id": "old", "role": "user", "content": "yesterday", "tool_calls": None,
+                 "created_at": day_start - timedelta(seconds=1)},
+                {"id": "new", "role": "assistant", "content": "today", "tool_calls": None,
+                 "created_at": day_start + timedelta(seconds=1)},
+            ]
+            return [row for row in rows if row["created_at"] >= args[1]][:args[2]]
+
+    pool = HistoryPool()
+    store = Store("postgresql://unused/unused")
+    store.pool = pool
+    user_id = uuid4()
+    token = bind_user(user_id)
+    try:
+        rows = await store.fetch_chat_messages_since(day_start)
+    finally:
+        reset_user(token)
+
+    assert [row["content"] for row in rows] == ["today"]
+    assert "WHERE user_id=$1 AND created_at >= $2" in pool.sql
+    assert "ORDER BY created_at DESC, id DESC LIMIT" in pool.sql
+    assert pool.args == (user_id, day_start, 20)
 
 
 async def test_coach_save_preset_requires_a_real_macro_source(monkeypatch):

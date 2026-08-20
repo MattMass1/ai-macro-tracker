@@ -42,6 +42,7 @@ TOOLS = [
     _schema("get_today", "Read today's macros and meals.", {}),
     _schema("get_day", "Read a specific day.", {"date": S}, ("date",)),
     _schema("get_range_summary", "Read macro totals over an inclusive range.", {"start": S, "end": S}, ("start", "end")),
+    _schema("lookup_food", "Look up real macros for a food in free databases (USDA FoodData Central, then OpenFoodFacts). When a food is not a saved preset or known food and macros are needed, call this FIRST, then cite the returned source string as macro_source. Returns macros per 100 g; scale to the portion eaten.", {"query": S}, ("query",)),
     _schema("log_meal", "Log food only with verified macros and a real source. Never estimate.", {"name": S, "meal_type": S, **MACROS, "macro_source": S}, ("name", "meal_type", *MACROS, "macro_source")),
     _schema("log_preset", "Log a saved preset.", {"preset_name": S, "servings": N, "meal": S}, ("preset_name", "servings", "meal")),
     _schema("save_preset", "Save a verified reusable meal preset. macro_source must cite where the macros came from (a nutrition label or FDA FoodData Central); placeholders like 'estimate' are rejected.", {"values": {"type": "object"}, "macro_source": S}, ("values", "macro_source")),
@@ -66,7 +67,7 @@ def _load_persona() -> str:
         return SYSTEM_PROMPT
 
 
-SYSTEM_PROMPT = """You are Macro Coach, a concise, practical nutrition and strength coach with hands: use tools whenever reading or changing user data. Never claim a write succeeded unless its tool result says so. Never estimate food macros; ask for a label/portion or use a saved preset. Keep responses short and human.
+SYSTEM_PROMPT = """You are Macro Coach, a concise, practical nutrition and strength coach with hands: use tools whenever reading or changing user data. Never claim a write succeeded unless its tool result says so. Never estimate food macros: use a saved preset or known food when one matches; otherwise call lookup_food FIRST and use its macros, citing the returned source as macro_source. Only if lookup_food finds nothing, ask for the label or portion; a clearly flagged estimate is the last resort. Keep responses short and human.
 
 Onboarding is active when the system context says the user has no plan or no targets.
 

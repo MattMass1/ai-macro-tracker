@@ -310,6 +310,26 @@ class Store:
         )
         return [_dict(row) or {} for row in rows]
 
+    async def fetch_chat_messages_since(
+        self, day_start: datetime, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Return chat messages from the current coaching day in display order.
+
+        Selects the NEWEST `limit` messages first, then reorders them
+        chronologically — so after a long day the coach still sees the
+        most recent context, not the day's oldest messages.
+        """
+        pool = await self.connect()
+        rows = await pool.fetch(
+            "SELECT * FROM ("
+            "  SELECT id,role,content,tool_calls,created_at FROM chat_messages "
+            "  WHERE user_id=$1 AND created_at >= $2 "
+            "  ORDER BY created_at DESC, id DESC LIMIT $3"
+            ") sub ORDER BY created_at ASC, id ASC",
+            current_user_id(), day_start, limit,
+        )
+        return [_dict(row) or {} for row in rows]
+
     async def insert_chat_message(
         self, role: str, content: str, tool_calls: Any = None
     ) -> dict[str, Any]:

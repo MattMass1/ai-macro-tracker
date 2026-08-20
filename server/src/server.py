@@ -39,6 +39,7 @@ from store import Store, StoreError  # noqa: E402
 from store import ChatQuotaExceeded, InviteAlreadyClaimed, InviteNotFound  # noqa: E402
 from auth import bind_user, current_user_id, reset_user  # noqa: E402
 from coach import CoachProviderError, run_agent  # noqa: E402
+import food_lookup  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -605,8 +606,8 @@ Known foods (values are calories/protein/carbs/fat unless labeled):
 {KNOWN_CHAT_FOODS}
 
 For a food-related message, output ONLY a JSON array with one object per item:
-[{{"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"meal":"Breakfast|Lunch|Dinner|Snack","note":"source"}}]
-Use a matching preset or known-food value when possible. Infer the meal from context and time; default to Snack. For an ambiguous or unknown food, make a reasonable macro estimate and set note exactly to ESTIMATE. Coffee without stated additions is 5 kcal with zero macros. Never add commentary around a food JSON array.
+[{{"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"grams":null,"meal":"Breakfast|Lunch|Dinner|Snack","note":"source"}}]
+Use a matching preset or known-food value when possible. Infer the meal from context and time; default to Snack. Set grams only when the user states the portion weight ("100g chicken" -> 100, "3 oz venison" -> 85, converting oz/lb to grams); leave grams null when no weight is stated — never guess it. For an ambiguous or unknown food, make a reasonable macro estimate and set note exactly to ESTIMATE. Coffee without stated additions is 5 kcal with zero macros. Never add commentary around a food JSON array.
 If the message is a greeting, question, or otherwise not asking to log food, output [] followed by one short plain-text reply. Do not invent food items."""
     try:
         payload = {
@@ -623,6 +624,31 @@ If the message is a greeting, question, or otherwise not asking to log food, out
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
         raise MacroError("I couldn't parse that right now. Please try again in a moment.") from exc
     return _extract_chat_items(str(content))
+
+
+async def _upgrade_estimate(
+    name: str, grams: Any
+) -> tuple[dict[str, float], str] | None:
+    """Try the free database cascade before writing a parser ESTIMATE.
+
+    Only a user-stated gram portion can size the database hit — scaling by the
+    parser's estimated calories would be circular. Without usable grams the
+    flagged estimate stands.
+    """
+    try:
+        portion = float(grams)
+    except (TypeError, ValueError):
+        return None
+    if not (0 < portion <= 5000):
+        return None
+    try:
+        found = await food_lookup.resolve_food(name)
+        if not found:
+            return None
+        return food_lookup.portion_from_grams(found, portion)
+    except Exception:
+        logger.exception("Food lookup failed; keeping the estimate")
+        return None
 
 
 async def analyze_food_image(image: str, meal_hint: str | None = None) -> dict[str, Any]:
@@ -1455,6 +1481,15 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
     async def library_tool(args):
         query = str(args["query"]).strip().casefold(); rows = await store_client().fetch_workout_library()
         return {"exercises": [row for row in rows if not query or query in json.dumps(row).casefold()][:50]}
+    async def lookup_food_tool(args):
+        current_user_id()  # fail closed: only run inside an authenticated tenant context
+        found = await food_lookup.resolve_food(str(args["query"]))
+        if not found:
+            return {"result": "not found",
+                    "guidance": "No free-database match. Ask for the nutrition "
+                                "label or portion; a clearly flagged estimate is "
+                                "the last resort."}
+        return found
     async def readiness_tool(_args):
         workouts, plan, integration = await asyncio.gather(
             store_client().fetch_workouts(), store_client().fetch_workout_plan(),
@@ -1479,7 +1514,8 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
             "get_metrics": get_metrics_tool,
             "request_metrics_form": request_metrics_form_tool,
             "get_today": get_today_tool, "get_day": get_day_tool,
-            "get_range_summary": get_range_tool, "log_meal": log_meal_tool,
+            "get_range_summary": get_range_tool, "lookup_food": lookup_food_tool,
+            "log_meal": log_meal_tool,
             "log_preset": log_preset_tool, "save_preset": save_preset_tool,
             "undo_last_meal": undo_tool, "get_targets": get_targets_tool,
             "set_targets": set_targets_tool, "log_workout": log_workout_tool,
@@ -1498,7 +1534,8 @@ async def api_chat(request: Request) -> Any:
         raise MacroError("message must be 1000 characters or fewer")
 
     client = store_client()
-    history = await client.fetch_chat_messages(20)
+    day_start, _ = domain.effective_day_window()
+    history = await client.fetch_chat_messages_since(day_start, 20)
     # Persist the user turn before either model call so in-flight requests already
     # count toward the daily cap and a failed loop still consumes quota. The
     # store enforces the cap atomically (per-user advisory lock around
@@ -1537,7 +1574,7 @@ async def api_chat(request: Request) -> Any:
         try:
             requested_day = body.get("date")
             day = domain.parse_date(requested_day) if requested_day is not None else domain.effective_date()
-            validated: list[tuple[str, dict[str, float], str, str]] = []
+            validated: list[tuple[str, dict[str, float], str, str, Any]] = []
             for raw in raw_items[:10]:
                 if not isinstance(raw, dict):
                     raise MacroError("I couldn't understand one of those food items. Please rephrase it.")
@@ -1548,11 +1585,22 @@ async def api_chat(request: Request) -> Any:
                 )
                 meal_name = domain.normalize_meal(raw.get("meal"))
                 validated.append(
-                    (clean_name, macros, str(raw.get("note") or "Chat & Log"), meal_name)
+                    (clean_name, macros, str(raw.get("note") or "Chat & Log"),
+                     meal_name, raw.get("grams"))
                 )
 
             logged: list[dict[str, Any]] = []
-            for clean_name, macros, note, meal_name in validated:
+            # Free-database upgrade: a parser ESTIMATE becomes a real sourced
+            # entry when the user stated a gram portion and USDA FDC or
+            # OpenFoodFacts knows the food. Bounded so one request cannot fan
+            # out into many external calls.
+            lookups_left = 3
+            for clean_name, macros, note, meal_name, grams in validated:
+                if note.strip().upper() == "ESTIMATE" and grams is not None and lookups_left > 0:
+                    lookups_left -= 1
+                    upgraded = await _upgrade_estimate(clean_name, grams)
+                    if upgraded:
+                        macros, note = upgraded
                 result = await write_meal(
                     clean_name, macros["calories"], macros["protein"], macros["carbs"],
                     macros["fat"], note, meal_name, day.isoformat(), allow_estimate=True,

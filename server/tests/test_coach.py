@@ -24,15 +24,28 @@ from store import ChatQuotaExceeded, Store  # noqa: E402
 import server as srv  # noqa: E402
 
 
-def response(content, stop_reason="tool_use", status=200, **extra):
+def response(message, status=200, **extra):
     return httpx.Response(
-        status, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-        json={"content": content, "stop_reason": stop_reason, **extra},
+        status, request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+        json={"choices": [{"message": message}], **extra},
     )
 
 
+def tool_call(call_id, name, arguments=None):
+    return {"id": call_id, "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments or {})}}
+
+
+def tool_response(*calls):
+    return response({"role": "assistant", "content": None, "tool_calls": list(calls)})
+
+
+def text_response(content, **extra):
+    return response({"role": "assistant", "content": content}, **extra)
+
+
 async def test_tool_dispatch_keeps_authenticated_user_scope(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
     wanted_user = uuid4()
     seen = []
     calls = 0
@@ -41,9 +54,15 @@ async def test_tool_dispatch_keeps_authenticated_user_scope(monkeypatch):
         nonlocal calls
         calls += 1
         if calls == 1:
-            return response([{"type": "tool_use", "id": "t1", "name": "get_today", "input": {}}])
-        assert payload["messages"][-1]["content"][0]["type"] == "tool_result"
-        return response([{"type": "text", "text": "You're all set."}], "end_turn")
+            assert payload["model"] == "gpt-5.6-luna"
+            assert payload["max_tokens"] == 1200
+            assert payload["messages"][0]["role"] == "system"
+            assert "system" not in payload
+            assert payload["tools"][0]["function"]["parameters"]["type"] == "object"
+            return tool_response(tool_call("t1", "get_today"))
+        assert payload["messages"][-1]["role"] == "tool"
+        assert payload["messages"][-1]["tool_call_id"] == "t1"
+        return text_response("You're all set.")
 
     async def get_today(_args):
         seen.append(current_user_id())
@@ -61,14 +80,13 @@ async def test_tool_dispatch_keeps_authenticated_user_scope(monkeypatch):
 
 
 async def test_tool_iteration_cap_stops_after_eight_executions(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
     provider_calls = tool_calls = 0
 
     async def fake_post(_token, _payload):
         nonlocal provider_calls
         provider_calls += 1
-        return response([{"type": "tool_use", "id": f"t{provider_calls}",
-                          "name": "get_today", "input": {}}])
+        return tool_response(tool_call(f"t{provider_calls}", "get_today"))
 
     async def get_today(_args):
         nonlocal tool_calls
@@ -84,12 +102,11 @@ async def test_tool_iteration_cap_stops_after_eight_executions(monkeypatch):
 
 async def test_total_execution_cap_bounds_multi_tool_rounds(monkeypatch):
     """One round can carry many tool_use blocks; the cap counts executions, not rounds."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
     executed = 0
 
     async def fake_post(_token, _payload):
-        return response([{"type": "tool_use", "id": f"t{i}", "name": "get_today", "input": {}}
-                         for i in range(6)])
+        return tool_response(*(tool_call(f"t{i}", "get_today") for i in range(6)))
 
     async def get_today(_args):
         nonlocal executed
@@ -104,12 +121,12 @@ async def test_total_execution_cap_bounds_multi_tool_rounds(monkeypatch):
 
 async def test_same_role_history_is_merged_before_the_api_call(monkeypatch):
     """Orphaned user rows (failed prior turns) must not produce consecutive user roles."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
     captured = {}
 
     async def fake_post(_token, payload):
         captured["messages"] = payload["messages"]
-        return response([{"type": "text", "text": "Merged fine."}], "end_turn")
+        return text_response("Merged fine.")
 
     history = [
         {"role": "assistant", "content": "orphaned lead reply"},
@@ -119,24 +136,24 @@ async def test_same_role_history_is_merged_before_the_api_call(monkeypatch):
     reply, _ = await run_agent(history=history, message="new question", onboarding=False,
                                handlers={}, post=fake_post)
     assert reply == "Merged fine."
-    assert [m["role"] for m in captured["messages"]] == ["user"]
-    merged = captured["messages"][0]["content"]
+    assert [m["role"] for m in captured["messages"]] == ["system", "user"]
+    merged = captured["messages"][1]["content"]
     assert "first orphan" in merged and "second orphan" in merged and "new question" in merged
 
 
 async def test_tool_error_is_returned_to_model(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
     calls = 0
 
     async def fake_post(_token, payload):
         nonlocal calls
         calls += 1
         if calls == 1:
-            return response([{"type": "tool_use", "id": "bad", "name": "log_meal", "input": {}}])
-        result = payload["messages"][-1]["content"][0]
+            return tool_response(tool_call("bad", "log_meal"))
+        result = json.loads(payload["messages"][-1]["content"])
         assert result["is_error"] is True
-        assert "macro_source is required" in result["content"]
-        return response([{"type": "text", "text": "I need a real macro source first."}], "end_turn")
+        assert "macro_source is required" in result["result"]["error"]
+        return text_response("I need a real macro source first.")
 
     async def log_meal(_args):
         raise ValueError("macro_source is required")
@@ -148,15 +165,15 @@ async def test_tool_error_is_returned_to_model(monkeypatch):
 
 
 async def test_transient_overload_is_retried_once(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
     calls = 0
 
     async def fake_post(_token, _payload):
         nonlocal calls
         calls += 1
         if calls == 1:
-            return response([], status=529)
-        return response([{"type": "text", "text": "Back online."}], "end_turn")
+            return response({}, status=529)
+        return text_response("Back online.")
 
     reply, _ = await run_agent(history=[], message="hi", onboarding=False,
                                handlers={}, post=fake_post)
@@ -165,13 +182,13 @@ async def test_transient_overload_is_retried_once(monkeypatch):
 
 
 async def test_second_provider_failure_becomes_friendly_error(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
     calls = 0
 
     async def fake_post(_token, _payload):
         nonlocal calls
         calls += 1
-        return response([], status=529)
+        return response({}, status=529)
 
     with pytest.raises(CoachProviderError, match="trouble connecting"):
         await run_agent(history=[], message="hi", onboarding=False,
@@ -180,19 +197,21 @@ async def test_second_provider_failure_becomes_friendly_error(monkeypatch):
 
 
 async def test_usage_is_recorded_per_api_call_and_never_fatal(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
     calls = 0
     rows = []
 
     async def fake_post(_token, _payload):
         nonlocal calls
         calls += 1
-        usage = {"input_tokens": 100 * calls, "output_tokens": calls}
+        usage = {"prompt_tokens": 100 * calls, "completion_tokens": calls}
         if calls == 1:
-            return response([{"type": "tool_use", "id": "t1", "name": "get_today", "input": {}}],
-                            model="claude-sonnet-5", usage=usage)
-        return response([{"type": "text", "text": "Done."}], "end_turn",
-                        model="claude-sonnet-5", usage=usage)
+            result = tool_response(tool_call("t1", "get_today"))
+        else:
+            result = text_response("Done.")
+        data = json.loads(result.content)
+        data.update(model="gpt-5.6-luna", usage=usage)
+        return httpx.Response(200, request=result.request, json=data)
 
     async def record_usage(row):
         rows.append(row)
@@ -206,8 +225,8 @@ async def test_usage_is_recorded_per_api_call_and_never_fatal(monkeypatch):
                                record_usage=record_usage)
     assert reply == "Done."
     assert rows == [
-        {"model": "claude-sonnet-5", "input_tokens": 100, "output_tokens": 1},
-        {"model": "claude-sonnet-5", "input_tokens": 200, "output_tokens": 2},
+        {"model": "gpt-5.6-luna", "input_tokens": 100, "output_tokens": 1},
+        {"model": "gpt-5.6-luna", "input_tokens": 200, "output_tokens": 2},
     ]
 
 
@@ -319,7 +338,7 @@ async def test_gym_chat_uses_coach_and_reports_onboarding(monkeypatch):
 
     async def fake_run_agent(*, history, message, onboarding, handlers, record_usage=None, **_kw):
         seen.update(onboarding=onboarding, tools=sorted(handlers), history=history)
-        await record_usage({"model": "claude-sonnet-5", "input_tokens": 10, "output_tokens": 5})
+        await record_usage({"model": "gpt-5.6-luna", "input_tokens": 10, "output_tokens": 5})
         return "Welcome! What's your goal?", [{"tool": "get_today", "input": {}, "ok": True}]
 
     async def fake_day_payload(day):
@@ -345,7 +364,7 @@ async def test_gym_chat_uses_coach_and_reports_onboarding(monkeypatch):
     assert seen["onboarding"] is True  # no plan + no targets → interview mode
     assert len(seen["tools"]) == 20
     assert [row[0] for row in fake.inserted] == ["user", "assistant"]
-    assert fake.usage == [("claude-sonnet-5", 10, 5)]
+    assert fake.usage == [("gpt-5.6-luna", 10, 5)]
 
 
 async def test_chat_history_is_current_coaching_day_only_and_onboarding_persists(monkeypatch):
@@ -466,7 +485,7 @@ async def test_food_path_failure_persists_synthetic_assistant(monkeypatch):
     ]
 
 
-async def test_food_chat_uses_light_parser_without_anthropic(monkeypatch):
+async def test_food_chat_uses_light_parser_without_coach(monkeypatch):
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
 
@@ -490,13 +509,13 @@ async def test_food_chat_uses_light_parser_without_anthropic(monkeypatch):
                             "fat": 9.5, "fiber": 0},
                 "targets": {"calories": 2000}}
 
-    async def unexpected_anthropic(**_kw):
-        pytest.fail("food logging must not call the Anthropic coach")
+    async def unexpected_coach(**_kw):
+        pytest.fail("food logging must not call the OpenAI coach")
 
     monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
     monkeypatch.setattr(srv, "write_meal", fake_write_meal)
     monkeypatch.setattr(srv, "day_payload", fake_day_payload)
-    monkeypatch.setattr(srv, "run_agent", unexpected_anthropic)
+    monkeypatch.setattr(srv, "run_agent", unexpected_coach)
 
     http_response = await srv.api_chat(chat_request({"message": "log 2 eggs"}))
     payload = json.loads(http_response.body)

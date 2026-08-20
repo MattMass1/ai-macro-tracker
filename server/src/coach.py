@@ -1,4 +1,4 @@
-"""Anthropic-backed coach loop with bounded, application-owned tool execution."""
+"""OpenAI-backed coach loop with bounded, application-owned tool execution."""
 from __future__ import annotations
 
 import json
@@ -85,11 +85,11 @@ def system_prompt(onboarding: bool) -> str:
     return _load_persona() + f"\n\nSystem context: onboarding={str(onboarding).lower()}."
 
 
-async def post_anthropic(token: str, payload: dict[str, Any]) -> httpx.Response:
+async def post_openai(token: str, payload: dict[str, Any]) -> httpx.Response:
     async with httpx.AsyncClient(timeout=90.0) as client:
         return await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": token, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            "https://api.openai.com/v1/chat/completions",
+            headers={"authorization": f"Bearer {token}", "content-type": "application/json"},
             json=payload,
         )
 
@@ -113,18 +113,17 @@ async def _call_provider(post: PostMessages, token: str, payload: dict[str, Any]
 
 async def run_agent(
     *, history: list[dict[str, str]], message: str, onboarding: bool,
-    handlers: Mapping[str, ToolHandler], post: PostMessages = post_anthropic,
+    handlers: Mapping[str, ToolHandler], post: PostMessages = post_openai,
     record_usage: RecordUsage | None = None, max_rounds: int = 8,
     max_tool_calls: int = 16,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Run one bounded Messages API tool loop and return text plus tool audit."""
-    token = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    """Run one bounded Chat Completions tool loop and return text plus tool audit."""
+    token = os.environ.get("OPENAI_ACCESS_TOKEN", "").strip()
     if not token:
         raise CoachProviderError("The coach is not configured yet.")
     # Persisted history can contain consecutive same-role rows (e.g. a user turn
-    # whose assistant reply never landed). The Messages API requires alternating
-    # roles starting with user, so merge same-role neighbors and drop an
-    # orphaned leading assistant row instead of failing the whole chat.
+    # whose assistant reply never landed). Normalize those rows to keep the
+    # provider context coherent and drop an orphaned leading assistant reply.
     messages: list[dict[str, Any]] = []
     for item in history:
         if item.get("role") not in {"user", "assistant"}:
@@ -140,41 +139,58 @@ async def run_agent(
     else:
         messages.append({"role": "user", "content": message})
     system = system_prompt(onboarding)
-    available_tools = [tool for tool in TOOLS if tool["name"] in handlers]
+    available_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["input_schema"],
+            },
+        }
+        for tool in TOOLS
+        if tool["name"] in handlers
+    ]
     audit: list[dict[str, Any]] = []
     executed_tool_calls = 0
 
     for round_number in range(max_rounds + 1):
-        payload = {"model": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5"), "max_tokens": 1200,
-                   "system": system, "tools": available_tools, "messages": messages}
+        payload = {
+            "model": os.environ.get("COACH_MODEL", "gpt-5.6-luna"),
+            "max_completion_tokens": 1200,
+            "tools": available_tools,
+            "messages": [{"role": "system", "content": system}, *messages],
+        }
         try:
             response = await _call_provider(post, token, payload)
             data = response.json()
-            blocks = data["content"]
-        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            assistant = data["choices"][0]["message"]
+        except (httpx.HTTPError, IndexError, KeyError, TypeError, ValueError) as exc:
             raise CoachProviderError("The coach is having trouble connecting. Try again in a moment.") from exc
-        if not isinstance(blocks, list):
+        if not isinstance(assistant, dict):
             raise CoachProviderError("The coach returned an invalid response. Try again.")
         if record_usage is not None:
             usage = data.get("usage") or {}
             try:
                 await record_usage({"model": str(data.get("model") or payload["model"]),
-                                    "input_tokens": int(usage.get("input_tokens") or 0),
-                                    "output_tokens": int(usage.get("output_tokens") or 0)})
+                                    "input_tokens": int(usage.get("prompt_tokens") or 0),
+                                    "output_tokens": int(usage.get("completion_tokens") or 0)})
             except Exception:
                 pass  # Usage telemetry must never take down the chat itself.
 
-        uses = [block for block in blocks if isinstance(block, dict) and block.get("type") == "tool_use"]
+        uses = assistant.get("tool_calls") or []
+        if not isinstance(uses, list) or not all(isinstance(use, dict) for use in uses):
+            raise CoachProviderError("The coach returned an invalid response. Try again.")
         if not uses:
-            text = "\n".join(str(block.get("text", "")) for block in blocks if isinstance(block, dict) and block.get("type") == "text").strip()
+            text = str(assistant.get("content") or "").strip()
             if not text:
                 raise CoachProviderError("The coach did not return a reply. Try again.")
             return text, audit
         if round_number >= max_rounds:
             raise CoachProviderError("The coach reached its tool limit. Please split that into a smaller request.")
 
-        messages.append({"role": "assistant", "content": blocks})
-        results = []
+        messages.append({"role": "assistant", "content": assistant.get("content"),
+                         "tool_calls": uses})
         for use in uses:
             # One API round may carry many tool_use blocks, so the round cap
             # alone does not bound writes — recheck before every execution.
@@ -183,19 +199,30 @@ async def run_agent(
                     "The coach reached its tool limit. Please split that into a smaller request."
                 )
             executed_tool_calls += 1
-            name, tool_input = use.get("name"), use.get("input") or {}
-            handler = handlers.get(str(name))
-            is_error = handler is None
-            if handler is None:
-                result: Any = {"error": "Unknown tool"}
+            function = use.get("function")
+            name = function.get("name") if isinstance(function, dict) else None
+            raw_arguments = function.get("arguments", "{}") if isinstance(function, dict) else "{}"
+            try:
+                tool_input = json.loads(raw_arguments)
+                if not isinstance(tool_input, dict):
+                    raise ValueError("Tool arguments must be a JSON object")
+            except (TypeError, ValueError) as exc:
+                tool_input = {}
+                is_error = True
+                result: Any = {"error": f"Invalid tool arguments: {exc}"}
             else:
-                try:
-                    result = await handler(tool_input)
-                except Exception as exc:  # Tool failures are observations, not API crashes.
-                    is_error = True
-                    result = {"error": str(exc)}
+                handler = handlers.get(str(name))
+                is_error = handler is None
+                if handler is None:
+                    result = {"error": "Unknown tool"}
+                else:
+                    try:
+                        result = await handler(tool_input)
+                    except Exception as exc:  # Tool failures are observations, not API crashes.
+                        is_error = True
+                        result = {"error": str(exc)}
             audit.append({"tool": name, "input": tool_input, "ok": not is_error})
-            results.append({"type": "tool_result", "tool_use_id": use.get("id"),
-                            "content": json.dumps(result, default=str), "is_error": is_error})
-        messages.append({"role": "user", "content": results})
+            messages.append({"role": "tool", "tool_call_id": use.get("id"),
+                             "content": json.dumps({"result": result, "is_error": is_error},
+                                                   default=str)})
     raise CoachProviderError("The coach reached its tool limit.")

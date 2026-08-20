@@ -41,7 +41,7 @@ final class AuthService: ObservableObject {
                 errorMessage = "Could not store your access key securely. Try again."
                 return
             }
-            displayName = claim.displayName
+            self.displayName = claim.displayName
             freshClaim = true
             isAuthenticated = true
         } catch {

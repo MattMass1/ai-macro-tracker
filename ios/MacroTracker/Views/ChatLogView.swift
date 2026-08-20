@@ -12,12 +12,6 @@ struct ChatMessage: Identifiable {
 }
 
 struct ChatLogView: View {
-    let scanFoodTrigger: Int
-
-    init(scanFoodTrigger: Int = 0) {
-        self.scanFoodTrigger = scanFoodTrigger
-    }
-
     @EnvironmentObject private var store: AppStore
     @EnvironmentObject private var auth: AuthService
     @State private var messages: [ChatMessage] = []
@@ -33,7 +27,6 @@ struct ChatLogView: View {
     @State private var showScanSheet = false
     @State private var scanMode: ScanFoodMode = .barcode
     @State private var showManual = false
-    @State private var handledScanFoodTrigger = 0
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -69,14 +62,20 @@ struct ChatLogView: View {
                             Color.clear.frame(height: 1).id("end")
                         }.padding(16)
                     }
-                    .scrollDismissesKeyboard(.immediately)
-                    .onTapGesture { inputFocused = false }  // Tap chat to dismiss keyboard
+                    .scrollDismissesKeyboard(.interactively)
                     .onChange(of: messages.count) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
                 }
                 composer
             }
         }
         .navigationBarHidden(true)
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") { dismissKeyboard() }
+                    .fontWeight(.semibold)
+            }
+        }
         .sheet(isPresented: $showManual) { ManualFoodView() }
         .sheet(isPresented: $showCamera) { CameraPicker(image: $image) }
         .sheet(isPresented: $showScanSheet, onDismiss: { scanMode = .barcode }) {
@@ -104,10 +103,7 @@ struct ChatLogView: View {
             analysisGeneration += 1
             Task { await loadPhoto(item) }
         }
-        .onChange(of: scanFoodTrigger) { _, _ in
-            handleScanFoodTrigger()
-        }
-        .onAppear { seedGreeting(); handleScanFoodTrigger() }
+        .onAppear { seedGreeting() }
         .confirmationDialog("Sign out?", isPresented: $showSignOutConfirm, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { auth.signOut() }
         } message: {
@@ -120,7 +116,11 @@ struct ChatLogView: View {
             Menu {
                 Button("Sign out", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { showSignOutConfirm = true }
             } label: {
-                Text("🤖").font(.title3).frame(width: 40, height: 40).background(Theme.accentTint, in: Circle())
+                Image(systemName: "figure.mind.and.body")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 44, height: 44)
+                    .background(Theme.accentTint, in: Circle())
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text("Coach").font(.headline).foregroundStyle(Theme.ink)
@@ -136,19 +136,17 @@ struct ChatLogView: View {
             Divider()
             HStack(spacing: 9) {
                 Menu {
+                    Button("Scan Barcode", systemImage: "barcode.viewfinder") {
+                        dismissKeyboard()
+                        scanMode = .barcode
+                        showScanSheet = true
+                    }
                     Button("Take Photo", systemImage: "camera") { showCamera = true }
                     PhotosPicker(selection: $photoItem, matching: .images) { Label("Choose Photo", systemImage: "photo") }
                 } label: { Image(systemName: "camera.fill").font(.body).foregroundStyle(Theme.accent).frame(width: 42, height: 42).background(Theme.accentTint, in: Circle()) }
                 TextField("Message Coach", text: $input, axis: .vertical).lineLimit(1...4).focused($inputFocused).padding(.horizontal, 14).padding(.vertical, 11).background(Theme.input, in: RoundedRectangle(cornerRadius: 18))
                     .submitLabel(.send)
                     .onSubmit { if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { Task { await send() } } }
-                    .toolbar {
-                        ToolbarItemGroup(placement: .keyboard) {
-                            Spacer()
-                            Button("Done") { inputFocused = false }
-                        }
-                    }
-                Button { inputFocused = true } label: { Image(systemName: "mic.fill").foregroundStyle(Theme.muted).frame(width: 30, height: 42) }.accessibilityLabel("Use dictation")
                 Button { Task { await send() } } label: { Image(systemName: "arrow.up").fontWeight(.bold).frame(width: 44, height: 44).background(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary.opacity(0.14) : Theme.accent, in: Circle()).foregroundStyle(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary : .white) }.disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
             }.padding(12).background(Theme.surface)
         }
@@ -159,6 +157,16 @@ struct ChatLogView: View {
         input = ""
         inputFocused = false  // Dismiss the keyboard after sending
         await sendChat(message)
+    }
+
+    private func dismissKeyboard() {
+        inputFocused = false
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
     }
 
     @discardableResult
@@ -241,8 +249,6 @@ struct ChatLogView: View {
     private func seedGreeting() {
         guard messages.isEmpty else { return }
         if needsOnboarding {
-            let trimmed = auth.displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let name = trimmed.isEmpty ? "" : " \(trimmed)"
             messages.append(ChatMessage(role: .assistant, text: "Welcome! What should I call you?"))
         } else {
             messages.append(ChatMessage(role: .assistant, text: "Tell me what you ate and I'll log it."))
@@ -256,13 +262,6 @@ struct ChatLogView: View {
     }
 
     private var imageIdentity: ObjectIdentifier? { image.map { ObjectIdentifier($0) } }
-
-    private func handleScanFoodTrigger() {
-        guard scanFoodTrigger > handledScanFoodTrigger else { return }
-        handledScanFoodTrigger = scanFoodTrigger
-        scanMode = .barcode
-        showScanSheet = true
-    }
 
     private func loadPhoto(_ item: PhotosPickerItem?) async {
         guard let item else { return }
@@ -321,18 +320,30 @@ struct ManualFoodView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""; @State private var meal = "Snack"; @State private var calories = ""; @State private var protein = ""; @State private var carbs = ""; @State private var fat = ""; @State private var fiber = ""
+    @FocusState private var isInputFocused: Bool
     let meals = ["Breakfast", "Lunch", "Dinner", "Snack"]
     var body: some View {
         NavigationStack {
             Form {
-                Section("Food") { TextField("Name", text: $name); Picker("Meal", selection: $meal) { ForEach(meals, id: \.self) { Text($0) } } }
+                Section("Food") { TextField("Name", text: $name).focused($isInputFocused); Picker("Meal", selection: $meal) { ForEach(meals, id: \.self) { Text($0) } } }
                 Section("Macros") { numberField("Calories", $calories); numberField("Protein (g)", $protein); numberField("Carbs (g)", $carbs); numberField("Fat (g)", $fat); numberField("Fiber (g)", $fiber) }
                 Section { Text("Enter the label values as written. You can delete the entry from Today if anything needs correcting.").font(.caption).foregroundStyle(.secondary) }
-            }.navigationTitle("Manual entry").navigationBarTitleDisplayMode(.inline).toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }; ToolbarItem(placement: .confirmationAction) { Button("Log") { submit() }.disabled(name.trimmingCharacters(in: .whitespaces).isEmpty) } }
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .navigationTitle("Manual entry")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Log") { submit() }.disabled(name.trimmingCharacters(in: .whitespaces).isEmpty) }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { isInputFocused = false }
+                }
+            }
         }.presentationDetents([.medium, .large])
     }
-    private func numberField(_ title: String, _ value: Binding<String>) -> some View { TextField(title, text: value).keyboardType(.decimalPad) }
-    private func submit() { Task { let body = LogMealBody(name: name, calories: Double(calories) ?? 0, protein: Double(protein) ?? 0, carbs: Double(carbs) ?? 0, fat: Double(fat) ?? 0, fiber: Double(fiber) ?? 0, macroSource: "Manual iOS entry", meal: meal, day: store.isToday ? nil : store.dateString); if await store.logMeal(body) { dismiss() } } }
+    private func numberField(_ title: String, _ value: Binding<String>) -> some View { TextField(title, text: value).keyboardType(.decimalPad).focused($isInputFocused) }
+    private func submit() { isInputFocused = false; Task { let body = LogMealBody(name: name, calories: Double(calories) ?? 0, protein: Double(protein) ?? 0, carbs: Double(carbs) ?? 0, fat: Double(fat) ?? 0, fiber: Double(fiber) ?? 0, macroSource: "Manual iOS entry", meal: meal, day: store.isToday ? nil : store.dateString); if await store.logMeal(body) { dismiss() } } }
 }
 
 private struct CameraPicker: UIViewControllerRepresentable {

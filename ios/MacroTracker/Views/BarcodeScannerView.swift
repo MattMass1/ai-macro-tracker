@@ -41,6 +41,7 @@ struct BarcodeScannerView: View {
                 topBar
                 Spacer()
             }
+            .safeAreaPadding(.top, 8)
         }
         .onAppear { bindCallbacks() }
         .task { await boot() }
@@ -77,7 +78,7 @@ struct BarcodeScannerView: View {
 
     private var scanFrameOverlay: some View {
         GeometryReader { geometry in
-            let width = min(280, geometry.size.width - 48)
+            let width = max(0, min(280, geometry.size.width - 48))
             let height: CGFloat = 168
             let rect = CGRect(
                 x: (geometry.size.width - width) / 2,
@@ -172,6 +173,7 @@ struct ScanFoodSheet: View {
     @State private var notFound = false
     @State private var statusMessage: String?
     @State private var gramsText = ""
+    @FocusState private var gramsFocused: Bool
 
     var body: some View {
         ZStack {
@@ -180,6 +182,13 @@ struct ScanFoodSheet: View {
                 productCard(product)
             } else {
                 scannerStack
+            }
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") { gramsFocused = false }
+                    .fontWeight(.semibold)
             }
         }
         .presentationDetents([.large])
@@ -199,6 +208,7 @@ struct ScanFoodSheet: View {
                     lookupBanner(text: statusMessage, progress: false)
                 }
             }
+            .safeAreaPadding(.top, 8)
             .padding(.top, 58)
             .padding(.horizontal, 16)
         }
@@ -288,6 +298,7 @@ struct ScanFoodSheet: View {
                 Color.clear.frame(width: 36, height: 36)
             }
             .padding(.horizontal, 16)
+            .safeAreaPadding(.top, 8)
             .padding(.top, 12)
 
             ScrollView {
@@ -336,6 +347,7 @@ struct ScanFoodSheet: View {
                             .foregroundStyle(Theme.ink)
                         TextField("Grams", text: $gramsText)
                             .keyboardType(.decimalPad)
+                            .focused($gramsFocused)
                             .padding(14)
                             .background(Theme.input, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                         Button {
@@ -353,6 +365,7 @@ struct ScanFoodSheet: View {
                 .padding(16)
                 .padding(.bottom, 24)
             }
+            .scrollDismissesKeyboard(.interactively)
         }
     }
 
@@ -411,6 +424,7 @@ struct ScanFoodSheet: View {
     }
 
     private func resetScan() {
+        gramsFocused = false
         product = nil
         notFound = false
         statusMessage = nil
@@ -419,6 +433,7 @@ struct ScanFoodSheet: View {
     }
 
     private func logProduct(_ product: BarcodeFoodPayload, grams: Double?) async {
+        gramsFocused = false
         let factor = grams.map { $0 / 100 } ?? 1
         let calories = product.calories * factor
         let name: String

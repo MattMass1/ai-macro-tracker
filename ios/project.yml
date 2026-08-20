@@ -6,7 +6,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     PRODUCT_BUNDLE_IDENTIFIER: com.biz21.macrotracker
-    INFOPLIST_FILE: MacroTracker/Info.plist
+    INFOPLIST_FILE: MacroTracker/Resources/Info.plist
 configFiles:
   Debug: Config.xcconfig
   Release: Config.xcconfig
@@ -17,6 +17,7 @@ targets:
     sources: [MacroTracker]
     settings:
       base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_NAME: MacroTracker
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
@@ -30,4 +31,3 @@ targets:
     sources: [MacroTrackerTests]
     dependencies:
       - target: MacroTracker
-

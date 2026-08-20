@@ -63,6 +63,7 @@ struct InviteView: View {
 
     private func join() {
         guard !joinDisabled else { return }
+        focused = false
         Task { await auth.claimInvite(code: code, deviceLabel: UIDevice.current.name) }
     }
 }

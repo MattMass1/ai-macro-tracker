@@ -14,6 +14,7 @@ struct MetricsFormCard: View {
     let onDismiss: () -> Void
 
     @State private var values: [String: String] = [:]
+    @FocusState private var inputFocused: Bool
 
     private var parsed: MetricsFieldValues {
         var numbers: [String: Double] = [:]
@@ -40,11 +41,14 @@ struct MetricsFormCard: View {
             HStack(alignment: .top) {
                 SectionLabel(text: "Your metrics")
                 Spacer(minLength: 8)
-                Button(action: onDismiss) {
+                Button {
+                    inputFocused = false
+                    onDismiss()
+                } label: {
                     Image(systemName: "xmark")
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(Theme.muted)
-                        .frame(width: 28, height: 28)
+                        .frame(width: 44, height: 44)
                         .background(Theme.input, in: Circle())
                 }
                 .accessibilityLabel("Skip")
@@ -59,6 +63,7 @@ struct MetricsFormCard: View {
                     HStack(spacing: 8) {
                         TextField(field.placeholder ?? field.label, text: binding(for: field.key))
                             .keyboardType(keyboard(for: field))
+                            .focused($inputFocused)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .foregroundStyle(Theme.ink)
@@ -105,6 +110,7 @@ struct MetricsFormCard: View {
 
     private func submit() {
         guard canSave else { return }
+        inputFocused = false
         onSave(parsed)
     }
 

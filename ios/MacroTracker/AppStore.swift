@@ -39,8 +39,9 @@ final class AppStore: ObservableObject {
         let requestedIsToday = Calendar.current.isDateInToday(requestedDate)
         isLoadingDay = true
         defer {
-            guard session == sessionGeneration, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
-            isLoadingDay = false
+            if session == sessionGeneration, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) {
+                isLoadingDay = false
+            }
         }
         do {
             async let dayResult = requestedIsToday ? api.today() : api.day(requestedDateString)
@@ -61,8 +62,9 @@ final class AppStore: ObservableObject {
         let requestedDateString = Self.dateFormatter.string(from: requestedDate)
         isLoadingWorkouts = true
         defer {
-            guard session == sessionGeneration, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
-            isLoadingWorkouts = false
+            if session == sessionGeneration, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) {
+                isLoadingWorkouts = false
+            }
         }
         do {
             async let workoutResult = api.workouts(requestedDateString)

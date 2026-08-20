@@ -52,6 +52,15 @@ struct MealRollup: Codable, Identifiable, Equatable {
     var fiber: Double
 }
 
+struct DayRollup: Codable, Equatable {
+    var date: String
+    var calories: Double
+    var protein: Double
+    var carbs: Double
+    var fat: Double
+    var fiber: Double
+}
+
 struct DayPayload: Codable, Equatable {
     var date: String
     var dayLabel: String
@@ -61,7 +70,7 @@ struct DayPayload: Codable, Equatable {
     var meals: [FoodEntry]
     var presets: [Preset]?
     var warning: String?
-    var dayRollup: MealRollup?
+    var dayRollup: DayRollup?
     var mealRollups: [MealRollup]?
 }
 

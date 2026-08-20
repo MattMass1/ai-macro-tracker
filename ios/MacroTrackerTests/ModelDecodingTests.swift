@@ -3,11 +3,12 @@ import XCTest
 
 final class ModelDecodingTests: XCTestCase {
     func testDayPayloadDecodesSnakeCase() throws {
-        let json = #"{"date":"2026-08-18","day_label":"Today","totals":{"calories":1200,"protein":91,"carbs":110,"fat":42,"fiber":18},"targets":{"calories":2100,"protein":175,"carbs":210,"fat":70,"fiber":30},"remaining":{"calories":900,"protein":84,"carbs":100,"fat":28,"fiber":12},"meals":[]}"#.data(using: .utf8)!
+        let json = #"{"date":"2026-08-18","day_label":"Today","totals":{"calories":1200,"protein":91,"carbs":110,"fat":42,"fiber":18},"targets":{"calories":2100,"protein":175,"carbs":210,"fat":70,"fiber":30},"remaining":{"calories":900,"protein":84,"carbs":100,"fat":28,"fiber":12},"meals":[],"day_rollup":{"date":"2026-08-18","calories":1200,"protein":91,"carbs":110,"fat":42,"fiber":18}}"#.data(using: .utf8)!
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
         let payload = try decoder.decode(DayPayload.self, from: json)
         XCTAssertEqual(payload.dayLabel, "Today")
         XCTAssertEqual(payload.remaining.protein, 84)
+        XCTAssertEqual(payload.dayRollup?.date, "2026-08-18")
     }
 
     func testWorkoutSetsDecodeAsProductionShape() throws {
@@ -125,4 +126,3 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertFalse(field.isNumeric)
     }
 }
-

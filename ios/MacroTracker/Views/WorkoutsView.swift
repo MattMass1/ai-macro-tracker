@@ -368,6 +368,7 @@ struct WorkoutLoggerView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var exercise: String; @State private var type: String; @State private var sets = [WorkoutSet(weight: 0, reps: 0)]; @State private var last: LastWorkoutPayload?; @State private var isSaving = false
+    @FocusState private var inputFocused: Bool
     private let types = ["Push", "Pull", "Legs", "Abs", "Cardio", "Full Body", "Rest"]
     private var suggestions: [KnownExercise] { store.exercises.filter { $0.workoutType.contains(type) } }
     init(initialType: String = "Push", initialExercise: String = "") {
@@ -377,21 +378,32 @@ struct WorkoutLoggerView: View {
     var body: some View {
         NavigationStack {
             ScrollView { VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 9) { SectionLabel(text: "Training type"); ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(types, id: \.self) { item in Button(item) { type = item; exercise = item == "Rest" ? "Rest Day" : ""; sets = [WorkoutSet(weight: 0, reps: 0)] }.buttonStyle(.borderedProminent).tint(type == item ? Theme.accent : Color.secondary.opacity(0.2)).foregroundStyle(type == item ? .white : .primary) } } } }
+                VStack(alignment: .leading, spacing: 9) { SectionLabel(text: "Training type"); ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(types, id: \.self) { item in Button(item) { inputFocused = false; type = item; exercise = item == "Rest" ? "Rest Day" : ""; sets = [WorkoutSet(weight: 0, reps: 0)] }.buttonStyle(.borderedProminent).tint(type == item ? Theme.accent : Theme.input).foregroundStyle(type == item ? .white : Theme.sectionInk) } } } }
                 if type != "Rest" {
                     VStack(alignment: .leading, spacing: 9) {
                         HStack { SectionLabel(text: "Exercise"); Spacer(); if let last, !last.sets.isEmpty { Button("Fill last time") { sets = Array(last.sets.prefix(4)) }.font(.caption.weight(.bold)) } }
-                        TextField("Barbell bench press", text: $exercise).textInputAutocapitalization(.words).padding(14).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14)).onChange(of: exercise) { _, value in lookupLastWorkout(value) }.onDisappear { lastWorkoutTask?.cancel() }
-                        if !suggestions.isEmpty { ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(suggestions) { item in Button(item.name) { exercise = item.name }.font(.caption).buttonStyle(.bordered) } } } }
+                        TextField("Barbell bench press", text: $exercise).textInputAutocapitalization(.words).focused($inputFocused).padding(14).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14)).onChange(of: exercise) { _, value in lookupLastWorkout(value) }.onDisappear { lastWorkoutTask?.cancel() }
+                        if !suggestions.isEmpty { ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(suggestions) { item in Button(item.name) { inputFocused = false; exercise = item.name }.font(.caption).buttonStyle(.bordered) } } } }
                     }
                     VStack(alignment: .leading, spacing: 10) {
                         HStack { SectionLabel(text: "Sets"); Spacer(); Button("Add set", systemImage: "plus") { if sets.count < 4 { sets.append(WorkoutSet(weight: 0, reps: 0)) } }.font(.caption.weight(.bold)).disabled(sets.count == 4) }
                         HStack { Text("SET").frame(width: 30); Text("WEIGHT").frame(maxWidth: .infinity); Text("REPS").frame(maxWidth: .infinity); Color.clear.frame(width: 28) }.font(.caption2.weight(.bold)).foregroundStyle(.secondary)
-                        ForEach(sets.indices, id: \.self) { index in HStack { Text("\(index + 1)").font(.caption.monospacedDigit()).frame(width: 30); TextField("lb", value: $sets[index].weight, format: .number).keyboardType(.decimalPad).multilineTextAlignment(.center).padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12)); TextField("reps", value: $sets[index].reps, format: .number).keyboardType(.numberPad).multilineTextAlignment(.center).padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12)); Button(role: .destructive) { if sets.count > 1 { sets.remove(at: index) } } label: { Image(systemName: "minus.circle") }.frame(width: 28).disabled(sets.count == 1) } }
+                        ForEach(sets.indices, id: \.self) { index in HStack { Text("\(index + 1)").font(.caption.monospacedDigit()).frame(width: 30); TextField("lb", value: $sets[index].weight, format: .number).keyboardType(.decimalPad).focused($inputFocused).multilineTextAlignment(.center).padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12)); TextField("reps", value: $sets[index].reps, format: .number).keyboardType(.numberPad).focused($inputFocused).multilineTextAlignment(.center).padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12)); Button(role: .destructive) { inputFocused = false; if sets.count > 1 { sets.remove(at: index) } } label: { Image(systemName: "minus.circle").frame(width: 44, height: 44) }.disabled(sets.count == 1) } }
                     }
                 }
                 Button { submit() } label: { if isSaving { ProgressView().tint(.white) } else { Text(type == "Rest" ? "Log rest day" : "Log exercise").fontWeight(.bold) } }.frame(maxWidth: .infinity).frame(height: 52).background(Theme.accent, in: RoundedRectangle(cornerRadius: 16)).foregroundStyle(.white).disabled(isSaving || (type != "Rest" && (exercise.trimmingCharacters(in: .whitespaces).isEmpty || !sets.contains { $0.weight > 0 || $0.reps > 0 }))).opacity(isSaving ? 0.6 : 1)
-            }.padding(16) }.background(Theme.canvas).navigationTitle("Log workout").navigationBarTitleDisplayMode(.inline).toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            }.padding(16) }
+            .scrollDismissesKeyboard(.interactively)
+            .background(Theme.canvas)
+            .navigationTitle("Log workout")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { inputFocused = false }.fontWeight(.semibold)
+                }
+            }
         }
         .presentationDetents([.large])
         .task {
@@ -409,5 +421,5 @@ struct WorkoutLoggerView: View {
             last = result
         }
     }
-    private func submit() { Task { isSaving = true; let valid = type == "Rest" ? [] : sets.filter { $0.weight > 0 || $0.reps > 0 }; if await store.logWorkout(exercise: type == "Rest" ? "Rest Day" : exercise, sets: valid, type: type) { dismiss() }; isSaving = false } }
+    private func submit() { inputFocused = false; Task { isSaving = true; let valid = type == "Rest" ? [] : sets.filter { $0.weight > 0 || $0.reps > 0 }; if await store.logWorkout(exercise: type == "Rest" ? "Rest Day" : exercise, sets: valid, type: type) { dismiss() }; isSaving = false } }
 }

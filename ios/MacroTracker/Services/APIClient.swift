@@ -71,6 +71,15 @@ final class APIClient {
     private func send<T: Decodable, Body: Encodable>(_ path: String, body: Body) async throws -> T { try await request(path, method: "POST", body: encoder.encode(body)) }
 
     private func request<T: Decodable>(_ path: String, method: String, body: Data?, authenticated: Bool = true) async throws -> T {
+        func debugPreview(_ data: Data, limit: Int = 400) -> String {
+            let text = String(data: data, encoding: .utf8) ?? "<non-utf8 data, \(data.count) bytes>"
+            if text.count > limit {
+                let prefix = text.prefix(limit)
+                return String(prefix) + " … (truncated, total \(text.count) chars)"
+            }
+            return text
+        }
+
         guard let baseURL else { throw APIError(status: 500, message: "MACRO_API_URL is missing from Config.xcconfig.") }
         guard let url = URL(string: path, relativeTo: baseURL.appendingPathComponent("/")) else { throw APIError(status: 500, message: "Invalid API URL.") }
         var request = URLRequest(url: url)
@@ -85,20 +94,36 @@ final class APIClient {
             }
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
+
+        print("[API] → \(method) \(url.absoluteString)")
+
         let data: Data
         let response: URLResponse
         do { (data, response) = try await session.data(for: request) }
         catch { throw APIError(status: 503, message: "Could not reach the macro service.") }
+
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        
         guard let http = response as? HTTPURLResponse else { throw APIError(status: 503, message: "The server returned an invalid response.") }
+        
         guard (200..<300).contains(http.statusCode) else {
             if authenticated, http.statusCode == 401 {
                 NotificationCenter.default.post(name: .deviceTokenRejected, object: nil)
             }
+            let preview = debugPreview(data)
+            print("[API] ← \(http.statusCode) for \(method) \(url.absoluteString)\n[API] Body: \n\(preview)")
             let serverMessage = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
-            throw APIError(status: http.statusCode, message: serverMessage ?? String(data: data, encoding: .utf8) ?? "Request failed.")
+            throw APIError(status: http.statusCode, message: serverMessage ?? (String(data: data, encoding: .utf8) ?? "Request failed."))
         }
-        do { return try decoder.decode(T.self, from: data) }
-        catch { throw APIError(status: 500, message: "The server response could not be read: \(error.localizedDescription)") }
+        do {
+            let decoded = try decoder.decode(T.self, from: data)
+            print("[API] ← \(statusCode) OK for \(method) \(url.absoluteString)")
+            return decoded
+        } catch {
+            let preview = debugPreview(data)
+            print("[API] ✳︎ Decode failed for \(method) \(url.absoluteString): \n\(preview)\nError: \(error)")
+            throw APIError(status: 500, message: "The server response could not be read: \(error.localizedDescription)")
+        }
     }
 
     private func encoded(_ value: String) -> String {

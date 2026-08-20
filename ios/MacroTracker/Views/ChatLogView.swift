@@ -66,7 +66,9 @@ struct ChatLogView: View {
                             if let image { VisionCard(image: image, result: vision, analyzing: isAnalyzing, onLog: logVision, onCancel: clearVision) }
                             Color.clear.frame(height: 1).id("end")
                         }.padding(16)
-                    }.onChange(of: messages.count) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
+                    }
+                    .scrollDismissesKeyboard(.immediately)
+                    .onChange(of: messages.count) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
                 }
                 composer
             }
@@ -123,6 +125,14 @@ struct ChatLogView: View {
                     PhotosPicker(selection: $photoItem, matching: .images) { Label("Choose Photo", systemImage: "photo") }
                 } label: { Image(systemName: "camera.fill").font(.body).foregroundStyle(Theme.accent).frame(width: 42, height: 42).background(Theme.accentTint, in: Circle()) }
                 TextField("Message Coach", text: $input, axis: .vertical).lineLimit(1...4).focused($inputFocused).padding(.horizontal, 14).padding(.vertical, 11).background(Theme.input, in: RoundedRectangle(cornerRadius: 18))
+                    .submitLabel(.send)
+                    .onSubmit { if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { Task { await send() } } }
+                    .toolbar {
+                        ToolbarItemGroup(placement: .keyboard) {
+                            Spacer()
+                            Button("Done") { inputFocused = false }
+                        }
+                    }
                 Button { inputFocused = true } label: { Image(systemName: "mic.fill").foregroundStyle(Theme.muted).frame(width: 30, height: 42) }.accessibilityLabel("Use dictation")
                 Button { Task { await send() } } label: { Image(systemName: "arrow.up").fontWeight(.bold).frame(width: 44, height: 44).background(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary.opacity(0.14) : Theme.accent, in: Circle()).foregroundStyle(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary : .white) }.disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
             }.padding(12).background(Theme.surface)

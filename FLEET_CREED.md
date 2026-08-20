@@ -52,11 +52,11 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 | Role | Agent | Owns | Never touches |
 |---|---|---|---|
 | **Orchestrator** | Hermes | Planning, triage, dispatch, review aggregation, deploy | Writing feature code directly |
-| **UI Builder** | Claude Code (Mac) + Sol/Grok (VM) | `ios/` SwiftUI: screens, theme, components, Keychain | Backend logic, schema |
+| **UI Builder** | Sol/Grok (Codex, VM) | `ios/` SwiftUI: screens, theme, components, Keychain | Backend logic, schema |
 | **Backend Builder** | Sol (Codex) | `server/`: store, auth, coach tools, schema | SwiftUI files |
 | **Writer** | Luna (Codex) | Tests, migrations, backfill scripts, mechanical code | Architecture decisions |
-| **Design Reviewer** | Fable (Claude) | Design/architecture review, Swift idioms, taste | Writing feature code |
-| **Correctness Reviewer** | Grok (Cursor) | Edge cases, race conditions, data-loss hunting | Writing feature code |
+| **Design Reviewer** | Sol/Grok (Codex) | Design/architecture review, Swift idioms, taste | Writing feature code |
+| **Correctness Reviewer** | Grok (Codex) | Edge cases, race conditions, data-loss hunting | Writing feature code |
 
 ### Work rules
 
@@ -76,8 +76,8 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 ## Build flow (the loop)
 
 1. **Hermes** writes the brief (what + constraints + who owns it).
-2. **Owning builder** implements (Claude Code on Mac for UI, Sol for backend).
-3. **Reviewers** inspect: Fable (design/idioms) + Grok (edge cases), and Sol
+2. **Owning builder** implements (Sol for backend, Sol/Grok for SwiftUI — all Codex).
+3. **Reviewers** inspect: Sol/Grok (design/idioms) + Grok (edge cases), and Sol
    for contract when backend touched. Independent, parallel.
 4. **Hermes** aggregates findings, routes fixes back to the owner.
 5. **Re-review** until approved. Then commit + push.

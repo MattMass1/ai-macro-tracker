@@ -158,6 +158,7 @@ async def run_agent(
         payload = {
             "model": os.environ.get("COACH_MODEL", "gpt-5.6-luna"),
             "max_completion_tokens": 1200,
+            "reasoning_effort": "none",  # gpt-5.6-luna requires this for function tools in chat/completions
             "tools": available_tools,
             "messages": [{"role": "system", "content": system}, *messages],
         }

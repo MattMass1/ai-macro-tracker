@@ -8,7 +8,9 @@ INSERT and the SELECT. These tests pin that reconciliation, plus the
 normalization and provenance recorded on the way into the store.
 """
 
+import json
 import os
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -17,6 +19,7 @@ os.environ.setdefault("APP_SHARED_TOKEN", "test-token")
 os.environ.setdefault("DATABASE_URL", "postgresql://test/test")
 
 import server as srv  # noqa: E402
+from starlette.requests import Request  # noqa: E402
 
 TODAY = srv.domain.effective_date().isoformat()
 
@@ -95,6 +98,28 @@ class FakeStore:
         if not self.lagging:
             self.visible = [row for row in self.visible if row["id"] != row_id]
 
+    async def resolve_device(self, raw_token):
+        return uuid4() if raw_token == "device-token" else None
+
+
+def barcode_request(payload, token="device-token"):
+    body = json.dumps(payload).encode()
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request({
+        "type": "http",
+        "method": "POST",
+        "path": "/api/food/barcode",
+        "headers": [(b"authorization", f"Bearer {token}".encode())],
+    }, receive)
+
 
 @pytest.fixture
 def lagging(monkeypatch):
@@ -128,6 +153,48 @@ async def test_log_meal_response_includes_the_row_it_just_wrote(lagging):
     assert payload["remaining"]["protein"] == 157.0
     assert payload["logged"]["macro_source"] == "Fairlife Core Power label"
     assert "warning" not in payload
+
+
+async def test_barcode_route_returns_product_and_404(monkeypatch, lagging):
+    async def hit(code):
+        assert code == "12345678905"  # leading GTIN padding is harmless
+        return {
+            "name": "Chocolate protein bar",
+            "macros_per_100g": {
+                "calories": 364.0, "protein": 36.4, "carbs": 32.7,
+                "fat": 14.5, "fiber": 5.5,
+            },
+            "source": "OpenFoodFacts barcode: 12345678905",
+            "serving_size": "1 bar (55 g)",
+            "macros_per_serving": {"calories": 200.0, "protein": 20.0,
+                                   "carbs": 18.0, "fat": 8.0, "fiber": 3.0},
+        }
+
+    monkeypatch.setattr(srv.food_lookup, "resolve_by_barcode", hit)
+    response = await srv.api_food_barcode(barcode_request({"code": "00012345678905"}))
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert payload["calories"] == 364.0
+    assert payload["serving_size"] == "1 bar (55 g)"
+    assert payload["macros_per_serving"]["calories"] == 200.0
+
+    async def miss(_code):
+        return None
+
+    monkeypatch.setattr(srv.food_lookup, "resolve_by_barcode", miss)
+    response = await srv.api_food_barcode(barcode_request({"code": "737628064502"}))
+    assert response.status_code == 404
+    assert json.loads(response.body) == {"error": "Barcode not found in database"}
+
+
+async def test_barcode_route_rejects_invalid_code(monkeypatch, lagging):
+    async def unexpected(_code):
+        pytest.fail("invalid barcodes must not reach OpenFoodFacts")
+
+    monkeypatch.setattr(srv.food_lookup, "resolve_by_barcode", unexpected)
+    response = await srv.api_food_barcode(barcode_request({"code": "ABC-123"}))
+    assert response.status_code == 400
+    assert json.loads(response.body) == {"error": "code must contain 8 to 14 digits"}
 
 
 async def test_log_meal_does_not_double_count_once_the_query_catches_up(monkeypatch):

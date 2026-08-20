@@ -39,6 +39,26 @@ OFF_PAYLOAD = {"products": [{
                    "fiber_100g": 1.8},
 }]}
 
+OFF_BARCODE_PAYLOAD = {
+    "status": 1,
+    "product": {
+        "product_name": "Chocolate protein bar",
+        "serving_size": "1 bar (55 g)",
+        "nutriments": {
+            "energy-kcal_100g": 364,
+            "proteins_100g": 36.4,
+            "carbohydrates_100g": 32.7,
+            "fat_100g": 14.5,
+            "fiber_100g": 5.5,
+            "energy-kcal_serving": 200,
+            "proteins_serving": 20,
+            "carbohydrates_serving": 18,
+            "fat_serving": 8,
+            "fiber_serving": 3,
+        },
+    },
+}
+
 BANANA_HIT = {
     "name": "Bananas, raw",
     "macros_per_100g": {"calories": 89.0, "protein": 1.09, "carbs": 22.84,
@@ -69,6 +89,46 @@ async def test_client_sends_identifying_user_agent():
             "MacroCoach/1.0 (ai-macro-tracker; contact@biz21.com)"
     finally:
         await client.aclose()
+
+
+async def test_barcode_hit_parses_per_100g_and_serving_macros(monkeypatch):
+    def handler(request):
+        assert request.method == "GET"
+        assert request.url == httpx.URL(
+            "https://world.openfoodfacts.org/api/v2/product/737628064502.json"
+        )
+        assert request.headers["User-Agent"] == food_lookup.USER_AGENT
+        return httpx.Response(200, json=OFF_BARCODE_PAYLOAD)
+
+    mock_transport(monkeypatch, handler)
+    assert await food_lookup.search_openfoodfacts_by_code("737628064502") == {
+        "name": "Chocolate protein bar",
+        "macros_per_100g": {
+            "calories": 364.0, "protein": 36.4, "carbs": 32.7,
+            "fat": 14.5, "fiber": 5.5,
+        },
+        "source": "OpenFoodFacts barcode: 737628064502",
+        "serving_size": "1 bar (55 g)",
+        "macros_per_serving": {
+            "calories": 200.0, "protein": 20.0, "carbs": 18.0,
+            "fat": 8.0, "fiber": 3.0,
+        },
+    }
+
+
+async def test_barcode_not_found_returns_none(monkeypatch):
+    mock_transport(monkeypatch, lambda _request: httpx.Response(
+        200, json={"status": 0, "status_verbose": "product not found"}
+    ))
+    assert await food_lookup.resolve_by_barcode("737628064502") is None
+
+
+async def test_barcode_network_error_returns_none(monkeypatch):
+    def handler(_request):
+        raise httpx.ReadTimeout("slow")
+
+    mock_transport(monkeypatch, handler)
+    assert await food_lookup.search_openfoodfacts_by_code("737628064502") is None
 
 
 async def test_usda_hit_parses_macros_and_source(monkeypatch):

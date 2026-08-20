@@ -20,6 +20,7 @@ TIMEOUT = 5.0
 USER_AGENT = "MacroCoach/1.0 (ai-macro-tracker; contact@biz21.com)"
 USDA_SEARCH_URL = "https://api.nal.usda.gov/fdc/v1/foods/search"
 OFF_SEARCH_URL = "https://world.openfoodfacts.org/cgi/search.pl"
+OFF_PRODUCT_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 MACRO_KEYS = ("calories", "protein", "carbs", "fat", "fiber")
 
@@ -27,6 +28,13 @@ MACRO_KEYS = ("calories", "protein", "carbs", "fat", "fiber")
 _FDC_NUTRIENTS = {1008: "calories", 1003: "protein", 1005: "carbs", 1004: "fat", 1079: "fiber"}
 _OFF_NUTRIMENTS = {"energy-kcal_100g": "calories", "proteins_100g": "protein",
                    "carbohydrates_100g": "carbs", "fat_100g": "fat", "fiber_100g": "fiber"}
+_OFF_SERVING_NUTRIMENTS = {
+    "energy-kcal_serving": "calories",
+    "proteins_serving": "protein",
+    "carbohydrates_serving": "carbs",
+    "fat_serving": "fat",
+    "fiber_serving": "fiber",
+}
 
 
 def _client() -> httpx.AsyncClient:
@@ -126,6 +134,51 @@ async def search_openfoodfacts(query: str) -> dict[str, Any] | None:
     except Exception:
         return None
     return None
+
+
+async def search_openfoodfacts_by_code(barcode: str) -> dict[str, Any] | None:
+    """Return an exact OpenFoodFacts barcode match, or None on any failure."""
+    code = str(barcode or "").strip()
+    if not code:
+        return None
+    try:
+        data = await _get_json(OFF_PRODUCT_URL.format(barcode=code), {})
+        if not isinstance(data, Mapping) or data.get("status") != 1:
+            return None
+        product = data.get("product")
+        if not isinstance(product, Mapping):
+            return None
+        nutriments = product.get("nutriments")
+        if not isinstance(nutriments, Mapping):
+            return None
+        macros = _macros({
+            key: nutriments.get(field) for field, key in _OFF_NUTRIMENTS.items()
+        })
+        name = str(product.get("product_name") or "").strip()
+        if macros is None or not name:
+            return None
+        result: dict[str, Any] = {
+            "name": name,
+            "macros_per_100g": macros,
+            "source": f"OpenFoodFacts barcode: {code}",
+        }
+        serving_size = str(product.get("serving_size") or "").strip()
+        serving_macros = _macros({
+            key: nutriments.get(field)
+            for field, key in _OFF_SERVING_NUTRIMENTS.items()
+        })
+        if serving_size:
+            result["serving_size"] = serving_size
+        if serving_macros is not None:
+            result["macros_per_serving"] = serving_macros
+        return result
+    except Exception:
+        return None
+
+
+async def resolve_by_barcode(code: str) -> dict[str, Any] | None:
+    """Resolve a barcode separately from the text-search cascade."""
+    return await search_openfoodfacts_by_code(code)
 
 
 def _nutrition_value(text: str, label: str) -> float | None:

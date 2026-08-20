@@ -1375,6 +1375,32 @@ async def api_presets(request: Request) -> Any:
     return {"presets": await fetch_presets()}
 
 
+@api_route("/api/food/barcode", methods=["POST"])
+async def api_food_barcode(request: Request) -> Any:
+    body = await _json_body(request)
+    code = body.get("code")
+    if not isinstance(code, str):
+        raise MacroError("code must be a string")
+    raw_code = code.strip()
+    if not re.fullmatch(r"\d{8,14}", raw_code):
+        raise MacroError("code must contain 8 to 14 digits")
+    normalized_code = raw_code.lstrip("0") or "0"
+    found = await food_lookup.resolve_by_barcode(normalized_code)
+    if found is None:
+        return {"error": "Barcode not found in database"}, 404
+    macros = found["macros_per_100g"]
+    result = {
+        "name": found["name"],
+        **macros,
+        "source": found["source"],
+    }
+    if found.get("serving_size"):
+        result["serving_size"] = found["serving_size"]
+    if found.get("macros_per_serving"):
+        result["macros_per_serving"] = found["macros_per_serving"]
+    return result
+
+
 @api_route("/api/log-preset", methods=["POST"])
 async def api_log_preset(request: Request) -> Any:
     body = await _json_body(request)

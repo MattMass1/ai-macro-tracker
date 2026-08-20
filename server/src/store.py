@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 import asyncpg
 
 from auth import current_user_id
+from domain import effective_day_window, validate_macro_source
 
 
 class StoreError(RuntimeError):
@@ -26,6 +27,10 @@ class InviteAlreadyClaimed(StoreError):
     pass
 
 
+class ChatQuotaExceeded(StoreError):
+    """The user's daily chat message quota is exhausted."""
+
+
 def hash_device_token(token: str) -> str:
     """Return the one-way identifier persisted for a raw device token."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -36,6 +41,8 @@ def _value(value: Any) -> Any:
         return float(value)
     if isinstance(value, (date, datetime)):
         return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
     return value
 
 
@@ -82,7 +89,7 @@ class Store:
             hash_device_token(raw_token),
         )
 
-    async def claim_invite(self, code: str, label: str | None = None) -> dict[str, str]:
+    async def claim_invite(self, code: str, label: str | None = None, display_name: str | None = None) -> dict[str, str]:
         pool = await self.connect()
         async with pool.acquire() as conn, conn.transaction():
             invite = await conn.fetchrow(
@@ -99,7 +106,14 @@ class Store:
                 hash_device_token(raw_token), invite["user_id"], label,
             )
             await conn.execute("UPDATE invite_codes SET claimed_at=now() WHERE code=$1", code)
-            return {"token": raw_token, "display_name": invite["display_name"]}
+            name = display_name
+            if name:
+                name = name.strip()[:40]
+                if name:
+                    await conn.execute(
+                        "UPDATE users SET display_name=$1 WHERE id=$2", name, invite["user_id"]
+                    )
+            return {"token": raw_token, "display_name": name or invite["display_name"]}
 
     async def fetch_meals(self, start: date, end: date | None = None):
         pool = await self.connect(); end = end or start; user_id = current_user_id()
@@ -167,6 +181,40 @@ class Store:
         )
         return json.loads(stored) if isinstance(stored, str) else dict(stored)
 
+    async def put_display_name(self, name: str) -> dict[str, str]:
+        """Update the authenticated user's display name."""
+        pool = await self.connect()
+        stored = await pool.fetchval(
+            "UPDATE users SET display_name=$1 WHERE id=$2 RETURNING display_name",
+            name, current_user_id(),
+        )
+        if stored is None:
+            raise StoreError("Authenticated user was not found")
+        return {"display_name": str(stored)}
+
+    async def get_metrics(self) -> dict[str, Any] | None:
+        """Return measurements for the authenticated user."""
+        pool = await self.connect()
+        return _dict(await pool.fetchrow(
+            "SELECT height_cm,weight_kg,goal_weight_kg,age,activity_level,updated_at "
+            "FROM user_metrics WHERE user_id=$1", current_user_id(),
+        ))
+
+    async def put_metrics(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        """Upsert measurements for the authenticated user."""
+        pool = await self.connect()
+        row = await pool.fetchrow(
+            "INSERT INTO user_metrics(user_id,height_cm,weight_kg,goal_weight_kg,age,activity_level) "
+            "VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(user_id) DO UPDATE SET "
+            "height_cm=EXCLUDED.height_cm,weight_kg=EXCLUDED.weight_kg,"
+            "goal_weight_kg=EXCLUDED.goal_weight_kg,age=EXCLUDED.age,"
+            "activity_level=EXCLUDED.activity_level,updated_at=now() "
+            "RETURNING height_cm,weight_kg,goal_weight_kg,age,activity_level,updated_at",
+            current_user_id(), values["height_cm"], values["weight_kg"],
+            values["goal_weight_kg"], values.get("age"), values.get("activity_level"),
+        )
+        return _dict(row) or {}
+
     async def fetch_workout_library(self) -> list[dict[str, Any]]:
         """Return the shared exercise library in stable type/name order."""
         pool = await self.connect()
@@ -217,8 +265,11 @@ class Store:
         r=await pool.fetchrow("INSERT INTO fitness_tracker(id,user_id,exercise_name,workout_type,muscle_group,weight_1,reps_1,weight_2,reps_2,weight_3,reps_3,weight_4,reps_4,day) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *",id,user_id,exercise,workout_type,muscle_group,*vals,day); return workout(r)
 
     async def save_preset(self, values: Mapping[str, Any], existing_id: str | None = None):
+        # Provenance choke point: no caller may persist a preset without citing
+        # where its macros came from — a preset is a deferred meal log.
+        macro_source = validate_macro_source(str(values.get('macro_source') or ''))
         pool=await self.connect(); id=existing_id or str(uuid4()); user_id=current_user_id()
-        r=await pool.fetchrow("INSERT INTO meal_presets(id,user_id,name,emoji,calories,protein,carbs,fat,fiber,meal,sort_order,active) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,emoji=EXCLUDED.emoji,calories=EXCLUDED.calories,protein=EXCLUDED.protein,carbs=EXCLUDED.carbs,fat=EXCLUDED.fat,fiber=EXCLUDED.fiber,meal=EXCLUDED.meal,active=true WHERE meal_presets.user_id=EXCLUDED.user_id RETURNING *",id,user_id,values['name'],values['emoji'],values['calories'],values['protein'],values['carbs'],values['fat'],values['fiber'],values['meal'],values.get('sort_order',0));
+        r=await pool.fetchrow("INSERT INTO meal_presets(id,user_id,name,emoji,calories,protein,carbs,fat,fiber,meal,sort_order,active,macro_source) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,emoji=EXCLUDED.emoji,calories=EXCLUDED.calories,protein=EXCLUDED.protein,carbs=EXCLUDED.carbs,fat=EXCLUDED.fat,fiber=EXCLUDED.fiber,meal=EXCLUDED.meal,active=true,macro_source=EXCLUDED.macro_source WHERE meal_presets.user_id=EXCLUDED.user_id RETURNING *",id,user_id,values['name'],values['emoji'],values['calories'],values['protein'],values['carbs'],values['fat'],values['fiber'],values['meal'],values.get('sort_order',0),macro_source);
         if r is None: raise StoreError("Preset does not belong to authenticated user")
         return _dict(r)
 
@@ -246,6 +297,106 @@ class Store:
 
     async def put_brief(self, day: date, text: str):
         pool=await self.connect(); await pool.execute("INSERT INTO briefs(user_id,day,text) VALUES($1,$2,$3) ON CONFLICT(user_id,day) DO UPDATE SET text=EXCLUDED.text,updated_at=now()",current_user_id(),day,text)
+
+    async def fetch_chat_messages(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Return the authenticated user's newest chat messages in display order."""
+        pool = await self.connect()
+        rows = await pool.fetch(
+            "SELECT id,role,content,tool_calls,created_at FROM ("
+            "SELECT id,role,content,tool_calls,created_at FROM chat_messages "
+            "WHERE user_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2) recent "
+            "ORDER BY created_at,id",
+            current_user_id(), limit,
+        )
+        return [_dict(row) or {} for row in rows]
+
+    async def fetch_chat_messages_since(
+        self, day_start: datetime, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Return chat messages from the current coaching day in display order.
+
+        Selects the NEWEST `limit` messages first, then reorders them
+        chronologically — so after a long day the coach still sees the
+        most recent context, not the day's oldest messages.
+        """
+        pool = await self.connect()
+        rows = await pool.fetch(
+            "SELECT * FROM ("
+            "  SELECT id,role,content,tool_calls,created_at FROM chat_messages "
+            "  WHERE user_id=$1 AND created_at >= $2 "
+            "  ORDER BY created_at DESC, id DESC LIMIT $3"
+            ") sub ORDER BY created_at ASC, id ASC",
+            current_user_id(), day_start, limit,
+        )
+        return [_dict(row) or {} for row in rows]
+
+    async def insert_chat_message(
+        self, role: str, content: str, tool_calls: Any = None
+    ) -> dict[str, Any]:
+        """Persist one chat turn for the authenticated user."""
+        pool = await self.connect()
+        row = await pool.fetchrow(
+            "INSERT INTO chat_messages(user_id,role,content,tool_calls) "
+            "VALUES($1,$2,$3,$4::jsonb) RETURNING id,role,content,tool_calls,created_at",
+            current_user_id(), role, content,
+            json.dumps(tool_calls) if tool_calls is not None else None,
+        )
+        return _dict(row) or {}
+
+    async def insert_user_chat_message(self, content: str, daily_cap: int) -> dict[str, Any]:
+        """Persist one user chat turn iff the daily cap allows it.
+
+        The count (current logging day, 4am rollover) and the insert run in one
+        transaction behind a per-user advisory lock, so two concurrent turns at
+        cap-1 serialize instead of both passing a stale count. Raises
+        ChatQuotaExceeded — and persists nothing — once the cap is reached.
+        """
+        pool = await self.connect()
+        user_id = current_user_id()
+        start, end = effective_day_window()
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.fetchval(
+                "SELECT pg_advisory_xact_lock(hashtextextended('chat_cap:' || $1, 0))",
+                str(user_id),
+            )
+            used = await conn.fetchval(
+                "SELECT count(*) FROM chat_messages WHERE user_id=$1 AND role='user' "
+                "AND created_at >= $2 AND created_at < $3",
+                user_id, start, end,
+            )
+            if int(used) >= daily_cap:
+                raise ChatQuotaExceeded(f"daily chat cap of {daily_cap} reached")
+            row = await conn.fetchrow(
+                "INSERT INTO chat_messages(user_id,role,content,tool_calls) "
+                "VALUES($1,'user',$2,NULL) RETURNING id,role,content,tool_calls,created_at",
+                user_id, content,
+            )
+            return _dict(row) or {}
+
+    async def insert_coach_usage(self, model: str, input_tokens: int, output_tokens: int) -> None:
+        """Record one coach provider call's token spend for the authenticated user."""
+        pool = await self.connect()
+        await pool.execute(
+            "INSERT INTO coach_usage(user_id,model,input_tokens,output_tokens) "
+            "VALUES($1,$2,$3,$4)",
+            current_user_id(), model, input_tokens, output_tokens,
+        )
+
+    async def has_macro_targets(self) -> bool:
+        pool = await self.connect()
+        return bool(await pool.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM macro_targets WHERE user_id=$1)",
+            current_user_id(),
+        ))
+
+    async def fetch_integration(self, provider: str) -> dict[str, Any] | None:
+        """Return an integration internally; API routes must never expose tokens."""
+        pool = await self.connect()
+        return _dict(await pool.fetchrow(
+            "SELECT provider,access_token,refresh_token,scopes,expires_at "
+            "FROM integrations WHERE user_id=$1 AND lower(provider)=lower($2)",
+            current_user_id(), provider,
+        ))
 
 
 meal_row = meal

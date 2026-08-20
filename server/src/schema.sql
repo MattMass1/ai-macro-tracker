@@ -39,6 +39,16 @@ CREATE TABLE IF NOT EXISTS workout_plans (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS user_metrics (
+  user_id UUID PRIMARY KEY REFERENCES users(id),
+  height_cm NUMERIC NOT NULL,
+  weight_kg NUMERIC NOT NULL,
+  goal_weight_kg NUMERIC NOT NULL,
+  age INTEGER,
+  activity_level TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS workout_library (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL UNIQUE,
@@ -62,6 +72,17 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 CREATE INDEX IF NOT EXISTS chat_messages_user_created_idx
   ON chat_messages(user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS coach_usage (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id),
+  model TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS coach_usage_user_created_idx
+  ON coach_usage(user_id, created_at);
 
 CREATE TABLE IF NOT EXISTS days (
   user_id UUID REFERENCES users(id),
@@ -123,9 +144,14 @@ CREATE TABLE IF NOT EXISTS meal_presets (
   protein NUMERIC NOT NULL DEFAULT 0, carbs NUMERIC NOT NULL DEFAULT 0,
   fat NUMERIC NOT NULL DEFAULT 0, fiber NUMERIC NOT NULL DEFAULT 0,
   meal TEXT NOT NULL DEFAULT 'Dinner', sort_order NUMERIC NOT NULL DEFAULT 0,
-  active BOOLEAN NOT NULL DEFAULT true, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  active BOOLEAN NOT NULL DEFAULT true, macro_source TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE meal_presets ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id);
+-- The '' default exists only to backfill legacy rows when the column is first
+-- added; drop it immediately so every new preset must state its provenance.
+ALTER TABLE meal_presets ADD COLUMN IF NOT EXISTS macro_source TEXT NOT NULL DEFAULT '';
+ALTER TABLE meal_presets ALTER COLUMN macro_source DROP DEFAULT;
 
 CREATE TABLE IF NOT EXISTS macro_targets (
   id TEXT PRIMARY KEY, user_id UUID REFERENCES users(id), name TEXT NOT NULL,

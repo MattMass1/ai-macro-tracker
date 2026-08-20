@@ -5,14 +5,23 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import asyncpg
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server/src"))
+from domain import validate_macro_source  # noqa: E402
+
 EXPORT_DIR = Path("/opt/data/migration-export")
 SCHEMA = Path(__file__).resolve().parents[1] / "server/src/schema.sql"
+
+# The Notion export has no provenance column — presets predate macro_source,
+# which is NOT NULL with no default. Validated at import so a placeholder
+# edit here fails before the loader touches the database.
+PRESET_MACRO_SOURCE = validate_macro_source("migrated from Notion export")
 
 
 def prop(row: dict[str, Any], name: str) -> dict[str, Any]:
@@ -60,7 +69,10 @@ async def run() -> None:
             maxes={r['id']:max([number(r,f'Weight {i}') or 0 for i in range(1,5)]) for r in fitness}
             data=rows('max_weight'); await conn.executemany("INSERT INTO max_weight(id,exercise_name,muscle_group,all_time_max,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING",[(r['id'],text(r,'Exercise Name'),multi(r,'Muscle Group'),max([maxes.get(x.get('id'),0) for x in prop(r,'Primary Fitness Tracker').get('relation',[])] or [0]),created(r)) for r in data]); counts['max_weight']=len(data)
             data=rows('exercise_max_reps'); await conn.executemany("INSERT INTO exercise_max_reps(id,exercise,max_weight,date_achieved,workout_type,source_entry,created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING",[(r['id'],text(r,'Exercise'),num(r,'Max weight'),day(r,'Date achieved'),multi(r,'Workout type'),relation(r,'Source entry'),created(r)) for r in data]); counts['exercise_max_reps']=len(data)
-            data=rows('meal_presets'); await conn.executemany("INSERT INTO meal_presets(id,name,emoji,calories,protein,carbs,fat,fiber,meal,sort_order,active,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id) DO NOTHING",[(r['id'],text(r,'Name'),text(r,'Emoji','rich_text') or '🍽️',num(r,'Calories'),num(r,'Protein'),num(r,'Carbs'),num(r,'Fat'),num(r,'Fiber'),selected(r,'Meal') or 'Dinner',num(r,'Sort Order'),bool(prop(r,'Active').get('checkbox')),created(r)) for r in data]); counts['meal_presets']=len(data)
+            data=rows('meal_presets'); await conn.executemany("INSERT INTO meal_presets(id,name,emoji,calories,protein,carbs,fat,fiber,meal,sort_order,active,macro_source,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(id) DO NOTHING",[(r['id'],text(r,'Name'),text(r,'Emoji','rich_text') or '🍽️',num(r,'Calories'),num(r,'Protein'),num(r,'Carbs'),num(r,'Fat'),num(r,'Fiber'),selected(r,'Meal') or 'Dinner',num(r,'Sort Order'),bool(prop(r,'Active').get('checkbox')),PRESET_MACRO_SOURCE,created(r)) for r in data]); counts['meal_presets']=len(data)
+            # Rows loaded before the macro_source column existed were backfilled
+            # to '' by the schema's ADD COLUMN default; stamp their provenance.
+            await conn.execute("UPDATE meal_presets SET macro_source=$1 WHERE macro_source=''", PRESET_MACRO_SOURCE)
             data=rows('macro_targets'); await conn.executemany("INSERT INTO macro_targets(id,name,calories,protein,carbs,fat,fiber,effective_date,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO NOTHING",[(r['id'],text(r,'Name'),num(r,'Calories'),num(r,'Protein'),num(r,'Carbs'),num(r,'Fat'),num(r,'Fiber'),day(r,'Effective Date'),created(r)) for r in data]); counts['macro_targets']=len(data)
         for table, count in counts.items(): print(f"{table}: {count} row(s)")
         print(f"total: {sum(counts.values())} row(s)")

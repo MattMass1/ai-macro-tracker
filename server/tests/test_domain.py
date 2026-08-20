@@ -161,6 +161,7 @@ def test_validate_macros_rounds_and_coerces():
         "protein": 30.0,
         "carbs": 3.0,
         "fat": 2.5,
+        "fiber": 0.0,
     }
 
 
@@ -276,6 +277,7 @@ def test_remaining_can_go_negative():
         "protein": 95.0,
         "carbs": 0.0,
         "fat": 0.0,
+        "fiber": 0.0,
     }
 
 
@@ -285,6 +287,7 @@ def test_remaining_treats_missing_targets_as_zero():
         "protein": 0.0,
         "carbs": 0.0,
         "fat": 0.0,
+        "fiber": 0.0,
     }
 
 
@@ -298,6 +301,7 @@ def test_average_totals():
         "protein": 210.0,
         "carbs": 160.0,
         "fat": 65.0,
+        "fiber": 0.0,
     }
     assert average_totals([]) == domain.zero_totals()
 

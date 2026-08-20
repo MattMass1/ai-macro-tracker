@@ -133,6 +133,212 @@ async def test_missing_usda_key_skips_straight_to_openfoodfacts(monkeypatch):
     assert [c.url.host for c in calls] == ["world.openfoodfacts.org"]
 
 
+async def test_tavily_clean_nutrition_hit_parses_macros(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
+
+    def handler(request):
+        assert request.method == "POST"
+        assert request.url == httpx.URL(food_lookup.TAVILY_SEARCH_URL)
+        payload = json.loads(request.content)
+        assert payload == {
+            "api_key": "tavily-key",
+            "query": "McDonald's grilled chicken sandwich",
+            "search_depth": "basic",
+            "max_results": 3,
+            "include_answer": False,
+        }
+        return httpx.Response(200, json={"results": [{
+            "title": "McDonald's Grilled Chicken Sandwich Nutrition",
+            "url": "https://example.com/mcdonalds-chicken",
+            "content": (
+                "Per 100g: Calories 220, Protein 18g, Carbohydrates 22g, "
+                "Fat 7.5g, Fiber 1.5g."
+            ),
+        }]})
+
+    mock_transport(monkeypatch, handler)
+    assert await food_lookup.search_tavily("McDonald's grilled chicken sandwich") == {
+        "name": "McDonald's Grilled Chicken Sandwich Nutrition",
+        "macros_per_100g": {
+            "calories": 220.0,
+            "protein": 18.0,
+            "carbs": 22.0,
+            "fat": 7.5,
+            "fiber": 1.5,
+        },
+        "source": "Tavily: https://example.com/mcdonalds-chicken",
+    }
+
+
+def test_tavily_per_bar_panel_is_normalized_to_100g():
+    result = food_lookup._tavily_result("Barebells protein bar", {
+        "title": "Barebells Protein Bar Nutrition",
+        "url": "https://example.com/barebells",
+        "content": (
+            "Per 55g bar: Calories 200, Protein 20g, Carbs 18g, "
+            "Fat 8g, Fiber 3g."
+        ),
+    })
+
+    assert result is not None
+    assert result["macros_per_100g"]["calories"] == pytest.approx(363.64)
+    macros, _source = food_lookup.portion_from_grams(result, 55)
+    assert macros["calories"] == pytest.approx(200.0, abs=0.01)
+
+
+def test_tavily_us_serving_size_with_weight_is_normalized_to_100g():
+    result = food_lookup._tavily_result("55g Barebells protein bar", {
+        "title": "Barebells Protein Bar Nutrition",
+        "url": "https://example.com/barebells-us",
+        "content": (
+            "Serving Size 1 bar (55g), Calories 200, Protein 20g, "
+            "Carbs 18g, Fat 8g, Fiber 3g."
+        ),
+    })
+
+    assert result is not None
+    macros, _source = food_lookup.portion_from_grams(result, 55)
+    assert macros["calories"] == pytest.approx(200.0, abs=0.01)
+
+
+def test_tavily_us_weightless_serving_supports_only_whole_item_query():
+    panel = {
+        "title": "Barebells Nutrition",
+        "url": "https://example.com/barebells-us",
+        "content": (
+            "Serving: 1 bar, Calories 200, Protein 20g, Carbs 18g, "
+            "Fat 8g, Fiber 3g."
+        ),
+    }
+    result = food_lookup._tavily_result("log 1 Barebells", panel)
+
+    assert result is not None
+    assert result["basis"] == "serving"
+    assert result["serving"] == "1 bar"
+    assert result["macros_per_serving"]["calories"] == 200.0
+    assert food_lookup.portion_from_grams(result, 55) is None
+    assert food_lookup._tavily_result("log one Barebells", panel) is not None
+    assert food_lookup._tavily_result("log 1/2 Barebells", panel) is None
+    assert food_lookup._tavily_result("log 1.5 Barebells", panel) is None
+
+    assert food_lookup._tavily_result("55g Barebells", {
+        "title": "Barebells Nutrition",
+        "content": (
+            "Serving Size 1 bar, Calories 200, Protein 20g, Carbs 18g, "
+            "Fat 8g, Fiber 3g."
+        ),
+    }) is None
+
+
+def test_tavily_dual_column_panel_keeps_values_with_item_basis():
+    result = food_lookup._tavily_result("Barebells protein bar", {
+        "title": "Barebells Protein Bar Nutrition",
+        "url": "https://example.com/barebells",
+        "content": (
+            "Per 55g bar: Calories 200, Protein 20g, Carbs 18g, "
+            "Fat 8g, Fiber 3g. Per 100g: Calories 364, Protein 36.4g, "
+            "Carbs 32.7g, Fat 14.5g, Fiber 5.5g."
+        ),
+    })
+
+    assert result is not None
+    macros, _source = food_lookup.portion_from_grams(result, 55)
+    assert macros["calories"] == pytest.approx(200.0, abs=0.01)
+
+
+def test_tavily_conflicting_dual_column_panel_returns_none():
+    assert food_lookup._tavily_result("Barebells protein bar", {
+        "title": "Barebells Protein Bar Nutrition",
+        "content": (
+            "Per 55g bar: Calories 200, Protein 20g, Carbs 18g, "
+            "Fat 8g, Fiber 3g. Per 100g: Calories 500, Protein 36.4g, "
+            "Carbs 32.7g, Fat 14.5g, Fiber 5.5g."
+        ),
+    }) is None
+
+
+def test_tavily_per_serving_without_weight_returns_none():
+    assert food_lookup._tavily_result("Barebells protein bar", {
+        "title": "Barebells Protein Bar Nutrition",
+        "content": (
+            "Per serving: Calories 200, Protein 20g, Carbs 18g, "
+            "Fat 8g, Fiber 3g."
+        ),
+    }) is None
+
+
+def test_tavily_per_100g_panel_is_accepted_as_is():
+    result = food_lookup._tavily_result("Greek yogurt", {
+        "title": "Greek Yogurt Nutrition",
+        "url": "https://example.com/yogurt",
+        "content": (
+            "Per 100 grams: Calories 97, Protein 9g, Carbs 4g, "
+            "Fat 5g, Fiber 0g."
+        ),
+    })
+
+    assert result is not None
+    assert result["macros_per_100g"] == {
+        "calories": 97.0, "protein": 9.0, "carbs": 4.0,
+        "fat": 5.0, "fiber": 0.0,
+    }
+
+
+def test_tavily_ambiguous_panel_without_basis_returns_none():
+    assert food_lookup._tavily_result("Niche Cafe Bowl", {
+        "title": "Niche Cafe Bowl nutrition",
+        "content": "Calories: 310 Protein: 20g Carbs: 35g Fat: 9g Fiber: 6g",
+    }) is None
+
+
+async def test_tavily_result_without_nutrition_patterns_returns_none(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
+    mock_transport(monkeypatch, lambda _request: httpx.Response(200, json={
+        "results": [{"title": "McDonald's menu", "content": "Browse our latest menu."}]
+    }))
+    assert await food_lookup.search_tavily("McDonald's burger") is None
+
+
+@pytest.mark.parametrize("response", [httpx.Response(500), httpx.ReadTimeout("slow")])
+async def test_tavily_error_or_timeout_returns_none(monkeypatch, response):
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
+
+    def handler(_request):
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    mock_transport(monkeypatch, handler)
+    assert await food_lookup.search_tavily("restaurant meal") is None
+
+
+async def test_cascade_reaches_tavily_only_after_usda_and_off_miss(monkeypatch):
+    monkeypatch.setenv("USDA_API_KEY", "demo-key")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
+
+    def handler(request):
+        if request.url.host == "api.nal.usda.gov":
+            return httpx.Response(200, json={"foods": []})
+        if request.url.host == "world.openfoodfacts.org":
+            return httpx.Response(200, json={"products": []})
+        return httpx.Response(200, json={"results": [{
+            "title": "Niche Cafe Bowl nutrition",
+            "url": "https://example.com/bowl",
+            "content": (
+                "Per 100g: Calories: 310 Protein: 20g Carbs: 35g "
+                "Fat: 9g Fiber: 6g"
+            ),
+        }]})
+
+    calls = mock_transport(monkeypatch, handler)
+    result = await food_lookup.resolve_food("Niche Cafe Bowl")
+    assert result is not None
+    assert result["source"] == "Tavily: https://example.com/bowl"
+    assert [call.url.host for call in calls] == [
+        "api.nal.usda.gov", "world.openfoodfacts.org", "api.tavily.com"
+    ]
+
+
 @pytest.mark.parametrize("usda_body, off_body", [
     # Nutrients are a string, not a list of dicts.
     ({"foods": [{"fdcId": 1, "description": "x", "foodNutrients": "garbage"}]},

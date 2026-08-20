@@ -95,6 +95,16 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 - No em-dashes in user-facing copy.
 - Tenancy isolation is the highest-priority correctness property in this app.
   When in doubt, scope tighter, never looser.
+- **MATT'S DATA IS NEVER DELETED — EVER.** Matthew (be6333cc-e4c1-48f2-adb1-5e7f14dbf7c2)
+  is the production user. Any operation that deletes, modifies, or touches
+  Matthew's rows requires explicit approval. Spoof/test users are disposable —
+  Matthew's data is not. Never write delete logic that could match Matthew's
+  user_id. When in doubt, scope the delete to the spoof user only.
+- **Unknown registrations are treated as REAL USERS.** A claim from a new
+  invite code (different device, different place) is likely a real person —
+  never delete, never alter their data, never assume they're a spoof. Only
+  explicitly-created spoof users (minted with NEW_USER for testing) may be
+  deleted, and only on Matthew's request.
 
 ## Style (code + copy)
 

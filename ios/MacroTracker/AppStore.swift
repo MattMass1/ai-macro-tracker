@@ -155,6 +155,7 @@ final class AppStore: ObservableObject {
         try await api.chat(message, metrics: metrics)
     }
     func analyze(image: String) async throws -> VisionPayload { try await api.analyze(image: image) }
+    func barcodeFood(code: String) async throws -> BarcodeFoodPayload { try await api.barcodeFood(code: code) }
 
     /// Called on sign-out so the next user never sees the previous user's data.
     func reset() {

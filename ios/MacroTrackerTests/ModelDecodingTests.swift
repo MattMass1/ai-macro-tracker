@@ -92,6 +92,32 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertTrue(age.isNumeric)
     }
 
+    func testBarcodeFoodPayloadDecodesSnakeCase() throws {
+        let json = #"{"name":"Greek Yogurt","calories":97,"protein":9,"carbs":4,"fat":5,"fiber":0,"source":"Open Food Facts","serving_size":"150 g"}"#.data(using: .utf8)!
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let payload = try decoder.decode(BarcodeFoodPayload.self, from: json)
+        XCTAssertEqual(payload.name, "Greek Yogurt")
+        XCTAssertEqual(payload.calories, 97)
+        XCTAssertEqual(payload.protein, 9)
+        XCTAssertEqual(payload.source, "Open Food Facts")
+        XCTAssertEqual(payload.servingSize, "150 g")
+    }
+
+    func testBarcodeFoodPayloadDecodesWithoutServingSize() throws {
+        let json = #"{"name":"Cola","calories":42,"protein":0,"carbs":10.6,"fat":0,"fiber":0,"source":"Open Food Facts"}"#.data(using: .utf8)!
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let payload = try decoder.decode(BarcodeFoodPayload.self, from: json)
+        XCTAssertEqual(payload.name, "Cola")
+        XCTAssertNil(payload.servingSize)
+        XCTAssertEqual(payload.carbs, 10.6)
+    }
+
+    func testBarcodeFoodRequestEncodesCode() throws {
+        let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
+        let json = try JSONSerialization.jsonObject(with: encoder.encode(BarcodeFoodRequest(code: "012345678905"))) as! [String: Any]
+        XCTAssertEqual(json["code"] as? String, "012345678905")
+    }
+
     func testMetricsFieldExplicitTypeWinsOverKeyInference() throws {
         let json = #"{"key":"height_cm","label":"Height","type":"string"}"#.data(using: .utf8)!
         let field = try JSONDecoder().decode(MetricsField.self, from: json)

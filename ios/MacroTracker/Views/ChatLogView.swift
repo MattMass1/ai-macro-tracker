@@ -30,6 +30,8 @@ struct ChatLogView: View {
     @State private var isAnalyzing = false
     @State private var analysisGeneration = 0
     @State private var showCamera = false
+    @State private var showScanSheet = false
+    @State private var scanMode: ScanFoodMode = .barcode
     @State private var showManual = false
     @State private var handledScanFoodTrigger = 0
     @FocusState private var inputFocused: Bool
@@ -68,6 +70,7 @@ struct ChatLogView: View {
                         }.padding(16)
                     }
                     .scrollDismissesKeyboard(.immediately)
+                    .onTapGesture { inputFocused = false }  // Tap chat to dismiss keyboard
                     .onChange(of: messages.count) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
                 }
                 composer
@@ -76,6 +79,18 @@ struct ChatLogView: View {
         .navigationBarHidden(true)
         .sheet(isPresented: $showManual) { ManualFoodView() }
         .sheet(isPresented: $showCamera) { CameraPicker(image: $image) }
+        .sheet(isPresented: $showScanSheet, onDismiss: { scanMode = .barcode }) {
+            if scanMode == .photo {
+                CameraPicker(image: $image)
+            } else {
+                ScanFoodSheet(
+                    onChoosePhoto: { scanMode = .photo },
+                    onLogged: { name, calories in
+                        messages.append(ChatMessage(role: .assistant, text: "Logged \(name), \(Int(calories)) kcal."))
+                    }
+                )
+            }
+        }
         .onChange(of: imageIdentity) { old, new in
             guard old != new else { return }
             vision = nil
@@ -142,6 +157,7 @@ struct ChatLogView: View {
     private func send() async {
         let message = input.trimmingCharacters(in: .whitespacesAndNewlines); guard !message.isEmpty else { return }
         input = ""
+        inputFocused = false  // Dismiss the keyboard after sending
         await sendChat(message)
     }
 
@@ -244,7 +260,8 @@ struct ChatLogView: View {
     private func handleScanFoodTrigger() {
         guard scanFoodTrigger > handledScanFoodTrigger else { return }
         handledScanFoodTrigger = scanFoodTrigger
-        showCamera = true
+        scanMode = .barcode
+        showScanSheet = true
     }
 
     private func loadPhoto(_ item: PhotosPickerItem?) async {

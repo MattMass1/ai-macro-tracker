@@ -51,6 +51,9 @@ final class APIClient {
         try await send("api/chat", body: ChatRequest(message: message, date: nil, metrics: metrics))
     }
     func analyze(image: String, meal: String? = nil) async throws -> VisionPayload { try await send("api/vision-log", body: VisionRequest(image: image, meal: meal)) }
+    func barcodeFood(code: String) async throws -> BarcodeFoodPayload {
+        try await send("api/food/barcode", body: BarcodeFoodRequest(code: code))
+    }
     func deleteMeal(_ id: String) async throws -> DayPayload { try await delete("api/meal/\(encoded(id))") }
     func exercises() async throws -> ExercisesPayload { try await get("api/exercises") }
     func library() async throws -> LibraryPayload { try await get("api/library") }

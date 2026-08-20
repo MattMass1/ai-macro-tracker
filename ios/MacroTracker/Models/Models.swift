@@ -289,5 +289,16 @@ struct ClaimInviteBody: Codable { var code: String; var label: String?; var disp
 struct ClaimInvitePayload: Codable { var token: String; var displayName: String }
 struct VisionRequest: Codable { var image: String; var meal: String? }
 struct VisionPayload: Codable { var name: String; var note: String; var meal: String?; var calories: Double; var protein: Double; var carbs: Double; var fat: Double; var fiber: Double }
+struct BarcodeFoodRequest: Codable { var code: String }
+struct BarcodeFoodPayload: Codable, Equatable {
+    var name: String
+    var calories: Double
+    var protein: Double
+    var carbs: Double
+    var fat: Double
+    var fiber: Double
+    var source: String
+    var servingSize: String?
+}
 struct BriefPayload: Codable { var text: String?; var date: String }
 struct BriefRequest: Codable { var text: String; var date: String? }

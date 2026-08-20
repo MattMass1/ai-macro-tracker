@@ -496,6 +496,7 @@ async def write_meal(
         **macros,
         "date": day.isoformat(),
         "created_time": page.get("created_time", ""),
+        "macro_source": source,
     }
     payload = await day_payload(day, ensure=logged)
     payload["logged"] = {**logged, "macro_source": source}

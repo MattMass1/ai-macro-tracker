@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var store: AppStore
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab = 1  // Coach home
     @State private var showManualMeal = false
     @State private var showWorkoutLogger = false
@@ -58,6 +59,17 @@ struct ContentView: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.78), value: store.toast)
         .animation(.spring(response: 0.38, dampingFraction: 0.82), value: selectedTab)
         .task { await store.loadAll() }
+        .onChange(of: scenePhase) { _, phase in
+            // Reload when the app returns to foreground so the day rolls over
+            // even if it was open across midnight (or slept for hours).
+            if phase == .active {
+                let now = Date()
+                if !Calendar.current.isDateInToday(store.selectedDate) {
+                    store.selectedDate = now
+                }
+                Task { await store.loadAll() }
+            }
+        }
         .sheet(isPresented: $showManualMeal) { ManualFoodView() }
         .sheet(isPresented: $showWorkoutLogger) { WorkoutLoggerView() }
         .alert("Couldn’t complete that", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {

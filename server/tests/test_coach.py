@@ -55,7 +55,7 @@ async def test_tool_dispatch_keeps_authenticated_user_scope(monkeypatch):
         calls += 1
         if calls == 1:
             assert payload["model"] == "gpt-5.6-luna"
-            assert payload["max_tokens"] == 1200
+            assert payload["max_completion_tokens"] == 1200
             assert payload["messages"][0]["role"] == "system"
             assert "system" not in payload
             assert payload["tools"][0]["function"]["parameters"]["type"] == "object"

@@ -912,6 +912,7 @@ async def test_get_today_session_returns_rotation_day_and_done_state(monkeypatch
         "exercises": [{"name": "Bench Press", "sets": 3, "reps": "8-10", "rest_sec": 90}],
         "done": False,
         "has_plan": True,
+        "session_size": None,
     }
 
     # A completion recorded today pins today's type and flips done.

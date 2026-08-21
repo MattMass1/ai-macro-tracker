@@ -1,15 +1,19 @@
 """Typed, tenant-scoped PostgreSQL store for the macro tracker."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import secrets
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Mapping
 from uuid import UUID, uuid4
 
 import asyncpg
+
+SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
 from auth import current_user_id
 from domain import effective_day_window, validate_macro_source
@@ -72,11 +76,25 @@ class Store:
     def __init__(self, database_url: str):
         if not database_url: raise ValueError("DATABASE_URL is required")
         self.database_url, self.pool = database_url, None
+        self._connect_lock = asyncio.Lock()
 
     async def connect(self) -> asyncpg.Pool:
+        """Create the pool once, applying schema.sql before the first query.
+
+        Deploys run no migration step, so a release that adds a table would
+        otherwise 500 on live until someone applies the schema by hand. The
+        schema is idempotent (IF NOT EXISTS / guarded DO blocks) and already
+        reapplied freely by the scripts/ migrations.
+        """
         if self.pool is None:
-            try: self.pool = await asyncpg.create_pool(self.database_url, min_size=1, max_size=10)
-            except asyncpg.PostgresError as exc: raise StoreError(str(exc)) from exc
+            async with self._connect_lock:
+                if self.pool is None:
+                    try:
+                        pool = await asyncpg.create_pool(self.database_url, min_size=1, max_size=10)
+                        await pool.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
+                    except asyncpg.PostgresError as exc:
+                        raise StoreError(str(exc)) from exc
+                    self.pool = pool
         return self.pool
 
     async def aclose(self) -> None:

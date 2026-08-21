@@ -226,7 +226,16 @@ async def _resolve_today_session() -> tuple[int, str, list[dict[str, Any]], bool
     rotation = [str(t) for t in (plan.get("rotation") or []) if str(t).strip()]
     if not rotation:
         rotation = list(domain.WORKOUT_ROTATION)
-    days = plan.get("days") if isinstance(plan.get("days"), dict) else {}
+    days_raw = plan.get("days")
+    if isinstance(days_raw, dict):
+        days = days_raw
+    elif isinstance(days_raw, list):
+        # Legacy plans store days as [{type, exercises}] rows, the same shape
+        # workout_plan_payload already reads.
+        days = {str(item["type"]): item
+                for item in days_raw if isinstance(item, dict) and item.get("type")}
+    else:
+        days = {}
     state = await store_client().fetch_session_day_state()
     index: int | None = None
     done = False

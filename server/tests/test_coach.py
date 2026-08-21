@@ -791,6 +791,28 @@ async def test_store_fetch_chat_messages_since_excludes_prior_day():
     assert pool.args == (user_id, day_start, 20)
 
 
+async def test_store_connect_applies_schema_before_first_query(monkeypatch):
+    """Deploys run no migration step: connect() must apply schema.sql so a
+    table added by a release (coach_usage, session_day_state) exists on live
+    before the first query can 500 with UndefinedTableError."""
+    executed = []
+
+    class SchemaPool:
+        async def execute(self, sql, *args):
+            executed.append(sql)
+
+    async def fake_create_pool(url, min_size, max_size):
+        return SchemaPool()
+
+    monkeypatch.setattr("store.asyncpg.create_pool", fake_create_pool)
+    store = Store("postgresql://unused/unused")
+
+    pool = await store.connect()
+    assert "CREATE TABLE IF NOT EXISTS session_day_state" in executed[0]
+    assert await store.connect() is pool  # pool caches; schema applies once
+    assert len(executed) == 1
+
+
 async def test_coach_save_preset_requires_a_real_macro_source(monkeypatch):
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
@@ -940,6 +962,24 @@ async def test_today_session_advances_past_last_logged_workout(monkeypatch):
 
     session = await srv._coach_tool_handlers()["get_today_session"]({})
     assert session["today_type"] == "Pull"  # after Push, Pull is next
+    assert session["done"] is False
+
+
+async def test_get_today_session_reads_legacy_list_shaped_days(monkeypatch):
+    """Live rows written before the dict-days schema store days as a
+    [{type, exercises}] list; today's session must still surface exercises."""
+    plan = rotation_plan()
+    plan["days"] = [
+        {"type": "Push", "exercises": [{"name": "Bench Press"}]},
+        {"type": "Pull", "exercises": [{"name": "Lat Pulldown"}]},
+        {"type": "Legs", "exercises": [{"name": "Squat"}]},
+    ]
+    fake = FakeStore(plan=plan)
+    monkeypatch.setattr(srv, "_client", fake)
+
+    session = await srv._coach_tool_handlers()["get_today_session"]({})
+    assert session["today_type"] == "Push"
+    assert session["exercises"] == [{"name": "Bench Press"}]
     assert session["done"] is False
 
 

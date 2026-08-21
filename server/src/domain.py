@@ -365,6 +365,17 @@ def validate_workout_plan(plan: Any) -> dict[str, Any]:
             raise ValueError(f"{prefix}.exercises must contain at most 30 exercises")
         if len(exercises) > 8:
             raise ValueError(f"{prefix}.exercises must contain at most 8 exercises (keep sessions focused — the user can add more from the library)")
+        # Honor the user's chosen session size range (e.g. "3-4", "5-7", "7-8")
+        session_size = plan.get("session_size")
+        if isinstance(session_size, str) and "-" in session_size:
+            try:
+                upper = int(session_size.split("-")[-1].strip())
+                if upper >= 1 and len(exercises) > upper:
+                    raise ValueError(
+                        f"{prefix}.exercises exceeds the user's chosen session size ({session_size}) — keep it to {upper} exercises"
+                    )
+            except ValueError:
+                pass  # malformed session_size — ignore, rely on the 8 cap
         clean_exercises: list[dict[str, Any]] = []
         for index, exercise in enumerate(exercises):
             exercise_prefix = f"{prefix}.exercises[{index}]"

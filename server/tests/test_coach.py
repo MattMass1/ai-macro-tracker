@@ -898,6 +898,56 @@ async def test_set_workout_plan_canonicalizes_library_exercise_name(monkeypatch)
     assert result["plan"]["days"]["Legs"]["exercises"][0]["name"] == "Back Squat"
 
 
+async def test_set_workout_plan_injects_server_owned_version(monkeypatch):
+    fake = FakeStore(library=[{"id": "squat-1", "name": "Back Squat"}])
+    monkeypatch.setattr(srv, "_client", fake)
+    plan = workout_plan({"name": "Back Squat"})
+    plan.pop("version")
+
+    result = await srv._coach_tool_handlers()["set_workout_plan"]({"plan": plan})
+
+    assert result["plan"]["version"] == domain.WORKOUT_PLAN_VERSION
+    assert fake.plan == result["plan"]
+
+
+async def test_chat_text_metrics_can_complete_onboarding_with_versionless_plan(monkeypatch):
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
+    fake = FakeStore(library=[{"id": "squat-1", "name": "Back Squat"}])
+    monkeypatch.setattr(srv, "_client", fake)
+    plan = workout_plan({"name": "Back Squat"})
+    plan.pop("version")
+    calls = 0
+
+    async def fake_post(_token, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return tool_response(
+                tool_call("metrics", "set_metrics", {
+                    "height_cm": 180, "weight_kg": 85, "goal_weight_kg": 80,
+                    "age": 22, "activity_level": "moderate",
+                }),
+                tool_call("plan", "set_workout_plan", {"plan": plan}),
+            )
+        tool_messages = payload["messages"][-2:]
+        assert all(json.loads(item["content"])["is_error"] is False
+                   for item in tool_messages)
+        return text_response("Your metrics and plan are saved.")
+
+    reply, audit = await run_agent(
+        history=[],
+        message="no injuries, height 180cm weight 85kg goal 80kg age 22 moderate",
+        onboarding=True,
+        handlers=srv._coach_tool_handlers(),
+        post=fake_post,
+    )
+
+    assert reply == "Your metrics and plan are saved."
+    assert [entry["ok"] for entry in audit] == [True, True]
+    assert fake.metrics[-1]["age"] == 22
+    assert fake.plan["version"] == domain.WORKOUT_PLAN_VERSION
+
+
 async def test_set_workout_plan_exact_name_wins_over_substring_matches(monkeypatch):
     fake = FakeStore(library=[
         {"id": "squat-1", "name": "Squat"},

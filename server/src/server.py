@@ -1795,7 +1795,11 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
         return {"workouts": (await store_client().fetch_workouts())[:int(args["n"])]}
     async def get_plan_tool(_args): return {"plan": await store_client().fetch_workout_plan()}
     async def set_plan_tool(args):
-        try: plan = domain.validate_workout_plan(args["plan"])
+        raw_plan = args["plan"]
+        if not isinstance(raw_plan, dict):
+            raise MacroError("plan must be a JSON object")
+        versioned_plan = {**raw_plan, "version": domain.WORKOUT_PLAN_VERSION}
+        try: plan = domain.validate_workout_plan(versioned_plan)
         except ValueError as exc: raise MacroError(str(exc)) from None
         library = await store_client().fetch_workout_library()
         by_id = {str(row["id"]): row for row in library if row.get("id") is not None}
@@ -1829,7 +1833,7 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
             return matches[0]
 
         unknown = []
-        raw_days = args["plan"].get("days", {})
+        raw_days = raw_plan.get("days", {})
         for day_name, day in plan["days"].items():
             raw_exercises = raw_days.get(day_name, {}).get("exercises", [])
             for index, exercise in enumerate(day["exercises"]):

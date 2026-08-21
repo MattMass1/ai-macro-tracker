@@ -52,7 +52,7 @@ TOOLS = [
     _schema("log_workout", "Log one exercise and its sets.", {"exercise": S, "workout_type": S, "muscle_group": S, "sets": {"type": "array", "items": {"type": "object", "properties": {"weight": N, "reps": N}, "required": ["weight", "reps"]}}}, ("exercise", "workout_type", "muscle_group", "sets")),
     _schema("get_recent_workouts", "Read recent workout history.", {"n": {"type": "integer", "minimum": 1, "maximum": 30}}, ("n",)),
     _schema("get_workout_plan", "Read the current workout plan.", {}),
-    _schema("set_workout_plan", "Validate and write a workout plan built from the library.", {"plan": {"type": "object"}}, ("plan",)),
+    _schema("set_workout_plan", "Validate and write a workout plan built from the library. The server adds the plan format version automatically.", {"plan": {"type": "object"}}, ("plan",)),
     _schema("get_library", "Search the exercise library.", {"query": S}, ("query",)),
     _schema("get_readiness", "Read WHOOP readiness when available, otherwise rotation context.", {}),
 ]

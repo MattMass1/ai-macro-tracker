@@ -850,6 +850,55 @@ async def test_widget_is_emitted_when_metrics_form_tool_was_called(monkeypatch):
     }
 
 
+async def test_onboarding_weight_question_emits_metrics_form_without_tool_call(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+
+    async def fake_parse(_message): return [], None
+    async def fake_run_agent(**_kwargs):
+        return "What is your current weight?", []
+    async def fake_day_payload(_day): return {"totals": {"calories": 0}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+
+    response = await srv.api_chat(chat_request({"message": "Ready."}))
+    payload = json.loads(response.body)
+
+    assert payload["widget"] == {
+        "type": "metrics_form",
+        "fields": ["height_cm", "weight_kg", "goal_weight_kg", "age", "activity_level"],
+    }
+
+
+async def test_metrics_fallback_does_not_repeat_form_when_metrics_are_saved(monkeypatch):
+    fake = FakeStore()
+    fake.metrics.append(ONBOARDING_METRICS)
+    monkeypatch.setattr(srv, "_client", fake)
+
+    async def fake_parse(_message): return [], None
+    async def fake_run_agent(**_kwargs):
+        return "Your measurements are already saved.", []
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+
+    response = await srv.api_chat(chat_request({"message": "What next?"}))
+
+    assert json.loads(response.body)["widget"] is None
+
+
+def test_metrics_form_prompt_forbids_plain_text_measurement_questions():
+    form_tool = next(tool for tool in TOOLS if tool["name"] == "request_metrics_form")
+    assert "CALL THIS TOOL" in form_tool["description"]
+    assert "instead of asking for weight" in form_tool["description"]
+    for prompt in (SYSTEM_PROMPT, system_prompt(onboarding=True)):
+        normalized = " ".join(prompt.replace("`", "").split())
+        assert "request_metrics_form" in normalized
+        assert "never ask for weight, height" in normalized.casefold()
+
+
 async def test_library_tool_returns_enriched_exercise_objects(monkeypatch):
     exercise = {
         "name": "Bench Press", "muscle_group": ["Chest", "Triceps"],

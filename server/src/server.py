@@ -1736,7 +1736,19 @@ def exercise_card_widget(
             "video_url": exercise.get("video_url"),
             "instructions": exercise.get("instructions"),
             "workout_type": exercise.get("workout_type"),
-        }}
+    }}
+
+
+def reply_requests_metrics(reply: str) -> bool:
+    """Recognize a model request that should have used request_metrics_form."""
+    text = " ".join(reply.casefold().split())
+    return any(re.search(pattern, text) for pattern in (
+        r"\bmeasurements?\b",
+        r"\bbody (?:metrics|measurements|stats)\b",
+        r"\bheight\b",
+        r"\b(?:your|current|goal) weight\b",
+        r"\bhow much do you weigh\b",
+    ))
 
 
 def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[Any]]]:
@@ -2110,6 +2122,7 @@ async def api_chat(request: Request) -> Any:
     plan, has_targets = await asyncio.gather(
         client.fetch_workout_plan(), client.has_macro_targets()
     )
+    onboarding = plan is None or not has_targets
     async def record_usage(usage: Mapping[str, Any]) -> None:
         await client.insert_coach_usage(
             str(usage["model"]), int(usage["input_tokens"]), int(usage["output_tokens"])
@@ -2121,7 +2134,7 @@ async def api_chat(request: Request) -> Any:
     try:
         reply, tool_results = await run_agent(
             history=[{"role": row["role"], "content": row["content"]} for row in history],
-            message=agent_message, onboarding=plan is None or not has_targets,
+            message=agent_message, onboarding=onboarding,
             handlers=handlers, record_usage=record_usage,
         )
     except Exception:
@@ -2138,6 +2151,12 @@ async def api_chat(request: Request) -> Any:
         "height_cm", "weight_kg", "goal_weight_kg", "age", "activity_level"
     ]} if any(result.get("tool") == "request_metrics_form" and result.get("ok")
               for result in tool_results) else None)
+    if widget is None and onboarding and reply_requests_metrics(reply):
+        saved_metrics = await client.get_metrics()
+        if not saved_metrics:
+            widget = {"type": "metrics_form", "fields": [
+                "height_cm", "weight_kg", "goal_weight_kg", "age", "activity_level"
+            ]}
     if widget is None:
         widget = exercise_card_widget(reply, tool_results)
     return {"reply": reply, "logged": [], "totals": current["totals"],

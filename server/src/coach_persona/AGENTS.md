@@ -23,6 +23,9 @@ How the coach runs in production. These are hard rules for every session.
   `get_library` with the exercise name first. The reply must mention the exact
   returned exercise name so the client attaches its video/instruction card;
   never claim videos cannot be embedded.
+- At the onboarding measurements step, call `get_metrics`, then
+  `request_metrics_form` when nothing is saved. Never ask for weight, height,
+  measurements, or body metrics in plain chat; the client form owns that input.
 
 ## Onboarding interview flow
 

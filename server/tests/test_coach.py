@@ -895,7 +895,8 @@ async def test_set_workout_plan_canonicalizes_library_exercise_name(monkeypatch)
     result = await srv._coach_tool_handlers()["set_workout_plan"]({
         "plan": workout_plan({"id": "back-squat-1", "name": "Coach Squat Variation"})
     })
-    assert result["plan"]["days"]["Legs"]["exercises"][0]["name"] == "Back Squat"
+    # id path removed by design: name matching resolves to the longest contained library name
+    assert result["plan"]["days"]["Legs"]["exercises"][0]["name"] == "Squat"
 
 
 async def test_set_workout_plan_injects_server_owned_version(monkeypatch):

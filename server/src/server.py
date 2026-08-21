@@ -1643,7 +1643,16 @@ async def api_vision_log(request: Request) -> Any:
     meal_hint = body.get("meal")
     if meal_hint is not None and not isinstance(meal_hint, str):
         raise MacroError("meal must be a string")
-    return await analyze_food_image(image, meal_hint)
+    # M3 (Fable): daily cap on the paid vision path — barcodes are unaffected.
+    user_id = getattr(request.state, "user_id", None)
+    if user_id is not None:
+        used = await store_client().count_vision_logs_today(user_id)
+        if used >= 20:
+            raise MacroError("Daily vision-log limit reached (20 photos/day). Use chat logging or barcodes instead.")
+    result = await analyze_food_image(image, meal_hint)
+    if user_id is not None:
+        await store_client().record_vision_log(user_id)
+    return result
 
 
 _LIBRARY_STOPWORDS = {

@@ -1798,9 +1798,50 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
         try: plan = domain.validate_workout_plan(args["plan"])
         except ValueError as exc: raise MacroError(str(exc)) from None
         library = await store_client().fetch_workout_library()
-        known = {row["name"].casefold() for row in library}
-        unknown = [exercise["name"] for day in plan["days"].values()
-                   for exercise in day["exercises"] if exercise["name"].casefold() not in known]
+        by_id = {str(row["id"]): row for row in library if row.get("id") is not None}
+        by_name: dict[str, list[Mapping[str, Any]]] = {}
+        for row in library:
+            by_name.setdefault(str(row["name"]).casefold(), []).append(row)
+        normalized = [(re.sub(r"[^a-z0-9]", "", str(row["name"]).casefold()), row)
+                      for row in library]
+
+        def match_library_name(exercise_name: str) -> Mapping[str, Any] | None:
+            exact_matches = by_name.get(exercise_name.casefold(), [])
+            if len(exact_matches) > 1:
+                raise MacroError("ambiguous exercise name, use the exact library name")
+            if exact_matches:
+                return exact_matches[0]
+            plan_name = re.sub(r"[^a-z0-9]", "", exercise_name.casefold())
+            if not plan_name:
+                return None
+            candidates = [(len(name), row) for name, row in normalized
+                          if name and (plan_name in name or name in plan_name)]
+            if not candidates:
+                return None
+            longest = max(length for length, _row in candidates)
+            matches = [row for length, row in candidates if length == longest]
+            if len(matches) > 1:
+                names = ", ".join(str(row["name"]) for row in matches)
+                raise MacroError(
+                    f"Ambiguous workout library exercise {exercise_name!r}: {names}. "
+                    "Use a clearer exercise name."
+                )
+            return matches[0]
+
+        unknown = []
+        raw_days = args["plan"].get("days", {})
+        for day_name, day in plan["days"].items():
+            raw_exercises = raw_days.get(day_name, {}).get("exercises", [])
+            for index, exercise in enumerate(day["exercises"]):
+                raw = raw_exercises[index] if index < len(raw_exercises) else {}
+                exercise_id = raw.get("library_id", raw.get("id"))
+                match = by_id.get(str(exercise_id)) if exercise_id is not None else None
+                if match is None:
+                    match = match_library_name(exercise["name"])
+                if match is None:
+                    unknown.append(exercise["name"])
+                else:
+                    exercise["name"] = str(match["name"])
         if unknown: raise MacroError("Plan exercises must come from workout_library: " + ", ".join(unknown))
         return {"plan": await store_client().put_workout_plan(plan)}
     async def library_tool(args):

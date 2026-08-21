@@ -489,6 +489,10 @@ class FakeStore:
     async def fetch_workout_plan(self):
         return self.plan
 
+    async def put_workout_plan(self, plan):
+        self.plan = plan
+        return plan
+
     async def fetch_workout_library(self):
         return self.library
 
@@ -860,6 +864,152 @@ async def test_library_tool_returns_enriched_exercise_objects(monkeypatch):
 
     assert result["exercises"][0]["video_url"] == exercise["video_url"]
     assert result["exercises"][0]["instructions"] == exercise["instructions"]
+
+
+def workout_plan(exercise):
+    return {
+        "version": 1,
+        "rotation": ["Legs"],
+        "days_per_week": 1,
+        "days": {"Legs": {"label": "Legs", "exercises": [{
+            **exercise, "sets": 3, "reps": "8-10", "rest_sec": 90,
+        }]}},
+    }
+
+
+async def test_set_workout_plan_canonicalizes_library_exercise_name(monkeypatch):
+    fake = FakeStore(library=[
+        {"id": "squat-1", "name": "Squat"},
+        {"id": "back-squat-1", "name": "Back Squat"},
+        {"id": "front-squat-1", "name": "Front Squat"},
+    ])
+    monkeypatch.setattr(srv, "_client", fake)
+
+    result = await srv._coach_tool_handlers()["set_workout_plan"]({
+        "plan": workout_plan({"library_id": "missing", "name": "Barbell Back Squat"})
+    })
+
+    assert result["plan"]["days"]["Legs"]["exercises"][0]["name"] == "Back Squat"
+    assert fake.plan == result["plan"]
+
+    result = await srv._coach_tool_handlers()["set_workout_plan"]({
+        "plan": workout_plan({"id": "back-squat-1", "name": "Coach Squat Variation"})
+    })
+    assert result["plan"]["days"]["Legs"]["exercises"][0]["name"] == "Back Squat"
+
+
+async def test_set_workout_plan_exact_name_wins_over_substring_matches(monkeypatch):
+    fake = FakeStore(library=[
+        {"id": "squat-1", "name": "Squat"},
+        {"id": "back-squat-1", "name": "Back Squat"},
+    ])
+    monkeypatch.setattr(srv, "_client", fake)
+
+    result = await srv._coach_tool_handlers()["set_workout_plan"]({
+        "plan": workout_plan({"name": "sQuAt"})
+    })
+
+    assert result["plan"]["days"]["Legs"]["exercises"][0]["name"] == "Squat"
+
+
+async def test_set_workout_plan_casefold_name_collision_is_tool_error(monkeypatch):
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
+    fake = FakeStore(library=[
+        {"id": "squat-1", "name": "Squat"},
+        {"id": "squat-2", "name": "SQUAT"},
+    ])
+    monkeypatch.setattr(srv, "_client", fake)
+    calls = 0
+
+    async def fake_post(_token, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return tool_response(tool_call(
+                "ambiguous", "set_workout_plan",
+                {"plan": workout_plan({"name": "Squat"})},
+            ))
+        error_result = json.loads(payload["messages"][-1]["content"])
+        assert error_result["is_error"] is True
+        assert error_result["result"]["error"] == (
+            "ambiguous exercise name, use the exact library name"
+        )
+        return text_response("Please use the exact library name.")
+
+    reply, audit = await run_agent(
+        history=[], message="Build my plan", onboarding=True,
+        handlers=srv._coach_tool_handlers(), post=fake_post,
+    )
+
+    assert reply.startswith("Please use")
+    assert [entry["ok"] for entry in audit] == [False]
+    assert fake.plan is None
+
+
+async def test_set_workout_plan_tied_name_matches_are_tool_error(monkeypatch):
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
+    fake = FakeStore(library=[
+        {"id": "back-squat-1", "name": "Back Squat"},
+        {"id": "hack-squat-1", "name": "Hack Squat"},
+    ])
+    monkeypatch.setattr(srv, "_client", fake)
+    calls = 0
+
+    async def fake_post(_token, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+                return tool_response(tool_call(
+                    "ambiguous", "set_workout_plan",
+                    {"plan": workout_plan({"name": "Back Squat Hack Squat"})},
+                ))
+        error_result = json.loads(payload["messages"][-1]["content"])
+        assert error_result["is_error"] is True
+        assert "Ambiguous workout library exercise" in error_result["result"]["error"]
+        return text_response("Please clarify which squat you want.")
+
+    reply, audit = await run_agent(
+        history=[], message="Build my plan", onboarding=True,
+        handlers=srv._coach_tool_handlers(), post=fake_post,
+    )
+
+    assert reply.startswith("Please clarify")
+    assert [entry["ok"] for entry in audit] == [False]
+    assert fake.plan is None
+
+
+async def test_set_workout_plan_unknown_exercise_is_tool_error_and_can_retry(monkeypatch):
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
+    fake = FakeStore(library=[{"id": "squat-1", "name": "Back Squat"}])
+    monkeypatch.setattr(srv, "_client", fake)
+    calls = 0
+
+    async def fake_post(_token, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return tool_response(tool_call(
+                "unknown", "set_workout_plan",
+                {"plan": workout_plan({"name": "Moon Walk Lunge"})},
+            ))
+        if calls == 2:
+            error_result = json.loads(payload["messages"][-1]["content"])
+            assert error_result["is_error"] is True
+            assert "Moon Walk Lunge" in error_result["result"]["error"]
+            return tool_response(tool_call(
+                "retry", "set_workout_plan",
+                {"plan": workout_plan({"name": "Back Squat"})},
+            ))
+        return text_response("I fixed the exercise and saved your plan.")
+
+    reply, audit = await run_agent(
+        history=[], message="Build my plan", onboarding=True,
+        handlers=srv._coach_tool_handlers(), post=fake_post,
+    )
+
+    assert reply.startswith("I fixed")
+    assert [entry["ok"] for entry in audit] == [False, True]
+    assert fake.plan["days"]["Legs"]["exercises"][0]["name"] == "Back Squat"
 
 
 async def test_library_call_emits_exercise_card_widget(monkeypatch):

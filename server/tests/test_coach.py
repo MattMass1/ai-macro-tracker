@@ -17,6 +17,7 @@ os.environ.setdefault("DATABASE_URL", "postgresql://test/test")
 from starlette.requests import Request  # noqa: E402
 
 import domain  # noqa: E402
+import food_lookup  # noqa: E402
 from auth import bind_user, current_user_id, reset_user  # noqa: E402
 from coach import CoachProviderError, SYSTEM_PROMPT, TOOLS, run_agent, system_prompt  # noqa: E402
 from domain import MacroError  # noqa: E402
@@ -441,6 +442,8 @@ class FakeStore:
         self.chat_messages = chat_messages or []
         self.history_day_start = None
         self.library = library or []
+        self.workouts = []
+        self.session_state = None
 
     async def insert_user_chat_message(self, content, daily_cap):
         if self.today_count >= daily_cap:
@@ -451,6 +454,12 @@ class FakeStore:
 
     async def fetch_presets(self, active_only=True):
         return []
+
+    async def insert_meal(self, **kwargs):
+        if not hasattr(self, "meals"):
+            self.meals = []
+        self.meals.append(dict(kwargs))
+        return {"id": "m1", "created_time": "", **kwargs}
 
     async def save_preset(self, values, existing_id=None):
         self.saved_presets.append((dict(values), existing_id))
@@ -495,6 +504,19 @@ class FakeStore:
 
     async def fetch_workout_library(self):
         return self.library
+
+    async def fetch_workouts(self, start=None, end=None, exercise=None):
+        return list(self.workouts)
+
+    async def fetch_prs(self):
+        return []
+
+    async def fetch_session_day_state(self):
+        return self.session_state
+
+    async def put_session_day_state(self, rotation_index, done_date):
+        self.session_state = {"rotation_index": rotation_index, "done_date": done_date}
+        return dict(self.session_state)
 
     async def has_macro_targets(self):
         return self.targets
@@ -568,7 +590,7 @@ async def test_gym_chat_uses_coach_and_reports_onboarding(monkeypatch):
         "widget": None,
     }
     assert seen["onboarding"] is True  # no plan + no targets → interview mode
-    assert len(seen["tools"]) == 20
+    assert len(seen["tools"]) == 22
     assert [row[0] for row in fake.inserted] == ["user", "assistant"]
     assert fake.usage == [("gpt-5.6-luna", 10, 5)]
 
@@ -644,19 +666,21 @@ async def test_chat_failure_persists_user_and_synthetic_assistant(monkeypatch):
     ]
 
 
-async def test_parser_failure_falls_through_to_coach_with_raw_message(monkeypatch):
+async def test_every_message_routes_to_coach_without_parser(monkeypatch):
+    """One agent under the hood: no parser fast-path exists anymore, so every
+    message — including food and plan requests — reaches the coach raw."""
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
     seen = {}
 
-    async def failing_parse(_message):
-        raise MacroError("parser unavailable")
+    async def unexpected_parse(_message):
+        pytest.fail("there is no parser path anymore")
 
     async def fake_run_agent(**kwargs):
         seen.update(kwargs)
         return "Let's work on that.", []
 
-    monkeypatch.setattr(srv, "parse_chat_message", failing_parse)
+    monkeypatch.setattr(srv, "parse_chat_message", unexpected_parse)
     monkeypatch.setattr(srv, "run_agent", fake_run_agent)
 
     http_response = await srv.api_chat(chat_request({"message": "  build me a gym plan  "}))
@@ -668,68 +692,57 @@ async def test_parser_failure_falls_through_to_coach_with_raw_message(monkeypatc
     ]
 
 
-async def test_food_path_failure_persists_synthetic_assistant(monkeypatch):
+async def test_coach_error_keeps_friendly_fallback_without_parser(monkeypatch):
+    """A coach failure still yields the friendly 502 reply; the parser path
+    must never be resurrected as a fallback."""
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
 
-    async def fake_parse(_message):
-        return [{"name": "eggs", "calories": 140, "protein": 12,
-                 "carbs": 1, "fat": 10, "fiber": 0,
-                 "meal": "Breakfast", "note": "USDA"}], None
+    async def unexpected_parse(_message):
+        pytest.fail("the parser fast-path must not be resurrected on coach error")
 
-    async def failing_write_meal(*_args, **_kwargs):
-        raise MacroError("database unavailable")
+    async def failing_run_agent(**_kw):
+        raise CoachProviderError("The coach is having trouble connecting. Try again in a moment.")
 
-    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
-    monkeypatch.setattr(srv, "write_meal", failing_write_meal)
+    monkeypatch.setattr(srv, "parse_chat_message", unexpected_parse)
+    monkeypatch.setattr(srv, "run_agent", failing_run_agent)
 
-    http_response = await srv.api_chat(chat_request({"message": "log eggs"}))
-    assert http_response.status_code == 400
+    http_response = await srv.api_chat(chat_request({"message": "log 2 eggs"}))
+    assert http_response.status_code == 502
     assert [(row[0], row[1]) for row in fake.inserted] == [
-        ("user", "log eggs"),
-        ("assistant", "Sorry, I couldn't log that. Try again."),
+        ("user", "log 2 eggs"),
+        ("assistant", "Sorry, I couldn't reach the coach. Try again."),
     ]
 
 
-async def test_food_chat_uses_light_parser_without_coach(monkeypatch):
+async def test_food_message_goes_through_coach_not_parser(monkeypatch):
+    """Matt's one-agent directive: a food message goes to the coach loop, not
+    the gpt-4o-mini parser fast-path. The coach holds the food tools."""
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
+    seen = {}
 
-    async def fake_parse(message):
-        assert message == "log 2 eggs"
-        return [{"name": "2 eggs", "calories": 144, "protein": 12.6,
-                 "carbs": 0.7, "fat": 9.5, "fiber": 0,
-                 "meal": "Breakfast", "note": "USDA"}], None
+    async def unexpected_parse(_message):
+        pytest.fail("food logging must go through the coach, never the parser fast-path")
 
-    async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
-                              meal, day_value, allow_estimate=False, fiber=0):
-        assert (name, macro_source, meal, allow_estimate) == (
-            "2 eggs", "ESTIMATE", "Breakfast", True
-        )
-        return {"logged": {"name": name, "calories": calories, "protein": protein,
-                            "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
+    async def fake_run_agent(*, history, message, onboarding, handlers, record_usage=None, **_kw):
+        seen.update(message=message, onboarding=onboarding)
+        assert "lookup_food" in handlers and "log_meal" in handlers
+        return "2 eggs and toast, on it.", [{"tool": "log_meal", "input": {}, "ok": True}]
 
-    async def fake_day_payload(_day, ensure=None):
-        assert ensure and ensure[0]["name"] == "2 eggs"
-        return {"totals": {"calories": 144, "protein": 12.6, "carbs": 0.7,
-                            "fat": 9.5, "fiber": 0},
-                "targets": {"calories": 2000}}
+    async def fake_day_payload(_day):
+        return {"totals": {"calories": 0}}
 
-    async def unexpected_coach(**_kw):
-        pytest.fail("food logging must not call the OpenAI coach")
-
-    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
-    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    monkeypatch.setattr(srv, "parse_chat_message", unexpected_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
     monkeypatch.setattr(srv, "day_payload", fake_day_payload)
-    monkeypatch.setattr(srv, "run_agent", unexpected_coach)
 
-    http_response = await srv.api_chat(chat_request({"message": "log 2 eggs"}))
+    http_response = await srv.api_chat(chat_request({"message": "log 2 eggs and toast"}))
     payload = json.loads(http_response.body)
     assert http_response.status_code == 200
-    assert set(payload) == {"reply", "logged", "totals", "widget"}
-    assert payload["widget"] is None
-    assert payload["logged"][0]["name"] == "2 eggs"
-    assert payload["totals"]["calories"] == 144
+    assert seen["message"] == "log 2 eggs and toast"
+    assert payload["reply"] == "2 eggs and toast, on it."
+    assert payload["logged"] == []
     assert [row[0] for row in fake.inserted] == ["user", "assistant"]
 
 
@@ -795,6 +808,176 @@ async def test_coach_save_preset_requires_a_real_macro_source(monkeypatch):
     saved_values, existing_id = fake.saved_presets[0]
     assert saved_values["macro_source"] == "Fairlife Core Power label"
     assert existing_id is None
+
+
+FOOD_HIT = {
+    "name": "Egg, whole, cooked",
+    "macros_per_100g": {"calories": 155, "protein": 13, "carbs": 1.1,
+                        "fat": 11, "fiber": 0},
+    "source": "USDA FDC: 171705",
+}
+
+
+async def test_coach_logs_food_through_lookup_and_meal_tools(monkeypatch):
+    """The coach is the only agent: when it decides a message is food it runs
+    lookup_food and then log_meal with the looked-up macro_source."""
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    calls = 0
+    written = {}
+
+    async def fake_post(_token, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return tool_response(tool_call("lookup-1", "lookup_food", {"query": "2 eggs"}))
+        if calls == 2:
+            return tool_response(tool_call("log-1", "log_meal", {
+                "name": "2 eggs", "meal_type": "Breakfast",
+                "calories": 144, "protein": 12.6, "carbs": 0.7, "fat": 9.5,
+                "fiber": 0, "macro_source": "USDA FDC: 171705",
+            }))
+        return text_response("Logged 2 eggs, 144 kcal.")
+
+    async def fake_resolve(query):
+        assert query == "2 eggs"
+        return FOOD_HIT
+
+    async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
+                              meal, day_value, allow_estimate=False, fiber=0):
+        written.update(name=name, macro_source=macro_source,
+                       allow_estimate=allow_estimate, meal=meal)
+        return {"logged": {"name": name, "calories": calories}}
+
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+
+    token = bind_user(uuid4())
+    try:
+        reply, audit = await run_agent(
+            history=[], message="log 2 eggs and toast", onboarding=False,
+            handlers=srv._coach_tool_handlers(), post=fake_post,
+        )
+    finally:
+        reset_user(token)
+
+    assert calls == 3
+    assert [entry["tool"] for entry in audit] == ["lookup_food", "log_meal"]
+    assert [entry["ok"] for entry in audit] == [True, True]
+    assert reply == "Logged 2 eggs, 144 kcal."
+    assert written == {"name": "2 eggs", "macro_source": "USDA FDC: 171705",
+                       "allow_estimate": False, "meal": "Breakfast"}
+
+
+async def test_log_meal_still_requires_real_macro_source(monkeypatch):
+    """Food provenance survives the unification: log_meal rejects placeholder
+    macro_sources exactly as before."""
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    handler = srv._coach_tool_handlers()["log_meal"]
+    args = {"name": "2 eggs", "meal_type": "Breakfast", "calories": 144,
+            "protein": 12.6, "carbs": 0.7, "fat": 9.5, "fiber": 0}
+
+    with pytest.raises(MacroError):
+        await handler({**args, "macro_source": "estimate"})
+    with pytest.raises(MacroError):
+        await handler({**args, "macro_source": " "})
+
+
+def rotation_plan():
+    return {
+        "version": 1,
+        "rotation": ["Push", "Pull", "Legs"],
+        "days": {
+            "Push": {"label": "Push Day", "exercises": [
+                {"name": "Bench Press", "sets": 3, "reps": "8-10", "rest_sec": 90}]},
+            "Pull": {"label": "Pull Day", "exercises": [
+                {"name": "Lat Pulldown", "sets": 3, "reps": "10", "rest_sec": 90}]},
+            "Legs": {"label": "Legs Day", "exercises": [
+                {"name": "Squat", "sets": 3, "reps": "8", "rest_sec": 120}]},
+        },
+    }
+
+
+async def test_get_today_session_returns_rotation_day_and_done_state(monkeypatch):
+    fake = FakeStore(plan=rotation_plan())
+    monkeypatch.setattr(srv, "_client", fake)
+    handlers = srv._coach_tool_handlers()
+
+    # No workout history and no day-state: the rotation starts at Push.
+    session = await handlers["get_today_session"]({})
+    assert session == {
+        "today_type": "Push",
+        "exercises": [{"name": "Bench Press", "sets": 3, "reps": "8-10", "rest_sec": 90}],
+        "done": False,
+        "has_plan": True,
+    }
+
+    # A completion recorded today pins today's type and flips done.
+    await handlers["complete_today_session"]({})
+    session = await handlers["get_today_session"]({})
+    assert session["today_type"] == "Push"
+    assert session["done"] is True
+
+    # A completion from yesterday advances the rotation to Pull.
+    fake.session_state = {"rotation_index": 0,
+                          "done_date": domain.effective_date() - timedelta(days=1)}
+    session = await handlers["get_today_session"]({})
+    assert session["today_type"] == "Pull"
+    assert session["done"] is False
+
+
+async def test_today_session_advances_past_last_logged_workout(monkeypatch):
+    fake = FakeStore(plan=rotation_plan())
+    fake.workouts = [{
+        "id": "w1", "exercise": "Bench Press", "workout_type": ["Push"],
+        "muscle_group": ["Chest"], "sets": [{"weight": 60, "reps": 8}],
+        "date": (domain.effective_date() - timedelta(days=1)).isoformat(),
+    }]
+    monkeypatch.setattr(srv, "_client", fake)
+
+    session = await srv._coach_tool_handlers()["get_today_session"]({})
+    assert session["today_type"] == "Pull"  # after Push, Pull is next
+    assert session["done"] is False
+
+
+async def test_get_today_session_without_plan_is_onboarding_state(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    handlers = srv._coach_tool_handlers()
+
+    session = await handlers["get_today_session"]({})
+    assert session == {"today_type": None, "exercises": [], "done": False, "has_plan": False}
+
+    with pytest.raises(MacroError, match="plan"):
+        await handlers["complete_today_session"]({})
+
+
+async def test_complete_today_session_marks_today_payload_done(monkeypatch):
+    fake = FakeStore(plan=rotation_plan())
+    monkeypatch.setattr(srv, "_client", fake)
+    handlers = srv._coach_tool_handlers()
+
+    result = await handlers["complete_today_session"]({})
+    assert result["today_type"] == "Push"
+    assert result["done"] is True
+    assert result["already_done"] is False
+    assert result["completed_on"] == domain.effective_date().isoformat()
+    assert fake.session_state == {"rotation_index": 0, "done_date": domain.effective_date()}
+
+    # Idempotent: completing twice reports already_done and stays pinned.
+    again = await handlers["complete_today_session"]({})
+    assert again["already_done"] is True
+    assert again["done"] is True
+
+    # The app's Today view reads the same per-user day-state.
+    payload = await srv.workout_plan_payload()
+    assert payload["upcoming"][0]["type"] == "Push"
+    assert payload["upcoming"][0]["done"] is True
+
+    stats = await srv.workout_stats_payload()
+    assert stats["plan"]["today"]["done"] is True
 
 
 async def test_set_display_name_validates_and_updates_current_store(monkeypatch):

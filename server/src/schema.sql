@@ -39,6 +39,13 @@ CREATE TABLE IF NOT EXISTS workout_plans (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS session_day_state (
+  user_id UUID PRIMARY KEY REFERENCES users(id),
+  rotation_index INTEGER NOT NULL DEFAULT 0,
+  done_date DATE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS user_metrics (
   user_id UUID PRIMARY KEY REFERENCES users(id),
   height_cm NUMERIC NOT NULL,

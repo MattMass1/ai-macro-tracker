@@ -181,6 +181,28 @@ class Store:
         )
         return json.loads(stored) if isinstance(stored, str) else dict(stored)
 
+    async def fetch_session_day_state(self) -> dict[str, Any] | None:
+        """The authenticated user's rotation day-state (which rotation day is
+        current and the date it was marked done), or None when never set."""
+        pool = await self.connect()
+        return _dict(await pool.fetchrow(
+            "SELECT rotation_index, done_date, updated_at FROM session_day_state "
+            "WHERE user_id=$1",
+            current_user_id(),
+        ))
+
+    async def put_session_day_state(self, rotation_index: int, done_date) -> dict[str, Any]:
+        """Upsert the authenticated user's rotation day-state."""
+        pool = await self.connect()
+        row = await pool.fetchrow(
+            "INSERT INTO session_day_state(user_id,rotation_index,done_date) "
+            "VALUES($1,$2,$3) ON CONFLICT(user_id) DO UPDATE SET "
+            "rotation_index=EXCLUDED.rotation_index,done_date=EXCLUDED.done_date,"
+            "updated_at=now() RETURNING rotation_index,done_date,updated_at",
+            current_user_id(), rotation_index, done_date,
+        )
+        return _dict(row) or {}
+
     async def put_display_name(self, name: str) -> dict[str, str]:
         """Update the authenticated user's display name."""
         pool = await self.connect()

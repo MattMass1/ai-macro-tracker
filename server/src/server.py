@@ -203,6 +203,57 @@ async def last_workout_type(before: str | None = None) -> str | None:
     return None
 
 
+def _as_day(value: Any) -> _date | None:
+    """Coerce a stored timestamp/date into a plain date (None-safe)."""
+    if value is None:
+        return None
+    return value.date() if hasattr(value, "date") else value
+
+
+async def _resolve_today_session() -> tuple[int, str, list[dict[str, Any]], bool]:
+    """Resolve today's scheduled rotation session without writing.
+
+    Returns (rotation_index, today_type, exercises, done). The index walks the
+    plan rotation past the last logged split-advancing workout, overlaid by the
+    per-user day-state: a completion recorded today pins today's type and marks
+    it done; a completion from an earlier day advances the rotation. Raises
+    MacroError when no plan exists yet (the coach should onboard first).
+    """
+    today = domain.effective_date()
+    plan = await store_client().fetch_workout_plan()
+    if not plan:
+        raise MacroError("No workout plan yet — build one first.")
+    rotation = [str(t) for t in (plan.get("rotation") or []) if str(t).strip()]
+    if not rotation:
+        rotation = list(domain.WORKOUT_ROTATION)
+    days = plan.get("days") if isinstance(plan.get("days"), dict) else {}
+    state = await store_client().fetch_session_day_state()
+    index: int | None = None
+    done = False
+    if state is not None:
+        stored_index = state.get("rotation_index")
+        done_date = _as_day(state.get("done_date"))
+        if stored_index is not None:
+            if done_date == today:
+                index, done = int(stored_index), True
+            elif done_date is not None and done_date < today:
+                index = (int(stored_index) + 1) % len(rotation)
+            else:
+                index = int(stored_index)
+    if index is None:
+        last = await last_workout_type(before=today.isoformat())
+        if last is not None:
+            match = next((t for t in rotation if t.casefold() == last.casefold()), None)
+            index = (rotation.index(match) + 1) % len(rotation) if match is not None else 0
+        else:
+            index = 0
+    index = min(index, len(rotation) - 1)
+    today_type = rotation[index]
+    day = days.get(today_type) if isinstance(days.get(today_type), dict) else {}
+    exercises = [ex for ex in day.get("exercises", []) if isinstance(ex, dict)]
+    return index, today_type, exercises, done
+
+
 async def workout_plan_payload() -> dict[str, Any]:
     """The upcoming Push → Pull → Legs rotation with exercises per day.
 
@@ -220,11 +271,12 @@ async def workout_plan_payload() -> dict[str, Any]:
     """
     today_date = domain.effective_date()
     today = today_date.isoformat()
-    todays_workouts, rotation_anchor, known, stored_plan = await asyncio.gather(
+    todays_workouts, rotation_anchor, known, stored_plan, day_state = await asyncio.gather(
         fetch_workouts(today_date),
         last_workout_type(before=today),
         fetch_known_exercises(),
         store_client().fetch_workout_plan(),
+        store_client().fetch_session_day_state(),
     )
 
     planned_exercises = {
@@ -325,6 +377,11 @@ async def workout_plan_payload() -> dict[str, Any]:
             )
             day_type = domain.next_workout_type(day_type)
 
+    # The app's Today view reads this payload: expose the per-user day-state
+    # completion flag so a session the coach marked done shows as done here.
+    if upcoming:
+        upcoming[0]["done"] = _as_day((day_state or {}).get("done_date")) == today_date
+
     return {
         "rotation": list(domain.WORKOUT_ROTATION),
         "last_workout": todays_last,
@@ -362,6 +419,9 @@ async def workout_stats_payload() -> dict[str, Any]:
         {"type": item["type"], "exercises": [ex["name"] for ex in item["exercises"]]}
         for item in upcoming
     ]
+    plan_today = compact_plan[0] if compact_plan else {"type": "Push", "exercises": []}
+    if compact_plan and upcoming[0].get("done") is not None:
+        plan_today["done"] = upcoming[0]["done"]
     return {
         "today": {
             "date": today.isoformat(),
@@ -371,7 +431,7 @@ async def workout_stats_payload() -> dict[str, Any]:
         **aggregates,
         "prs": prs,
         "plan": {
-            "today": compact_plan[0] if compact_plan else {"type": "Push", "exercises": []},
+            "today": plan_today,
             "next": compact_plan[1:],
         },
     }
@@ -1806,6 +1866,18 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
     async def recent_workouts_tool(args):
         return {"workouts": (await store_client().fetch_workouts())[:int(args["n"])]}
     async def get_plan_tool(_args): return {"plan": await store_client().fetch_workout_plan()}
+    async def get_today_session_tool(_args):
+        try:
+            index, today_type, exercises, done = await _resolve_today_session()
+        except MacroError:
+            return {"today_type": None, "exercises": [], "done": False, "has_plan": False}
+        return {"today_type": today_type, "exercises": exercises, "done": done, "has_plan": True}
+    async def complete_today_session_tool(_args):
+        index, today_type, exercises, already_done = await _resolve_today_session()
+        await store_client().put_session_day_state(index, domain.effective_date())
+        return {"today_type": today_type, "exercises": exercises, "done": True,
+                "already_done": bool(already_done),
+                "completed_on": domain.effective_date().isoformat()}
     async def set_plan_tool(args):
         raw_plan = args["plan"]
         if not isinstance(raw_plan, dict):
@@ -1959,6 +2031,8 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
             "undo_last_meal": undo_tool, "get_targets": get_targets_tool,
             "set_targets": set_targets_tool, "log_workout": log_workout_tool,
             "get_recent_workouts": recent_workouts_tool, "get_workout_plan": get_plan_tool,
+            "get_today_session": get_today_session_tool,
+            "complete_today_session": complete_today_session_tool,
             "set_workout_plan": set_plan_tool, "get_library": library_tool,
             "get_readiness": readiness_tool}
 
@@ -1975,7 +2049,7 @@ async def api_chat(request: Request) -> Any:
     client = store_client()
     day_start, _ = domain.effective_day_window()
     history = await client.fetch_chat_messages_since(day_start, 20)
-    # Persist the user turn before either model call so in-flight requests already
+    # Persist the user turn before the coach call so in-flight requests already
     # count toward the daily cap and a failed loop still consumes quota. The
     # store enforces the cap atomically (per-user advisory lock around
     # count+insert), so concurrent turns at 49 cannot both land. On failure we
@@ -2000,124 +2074,6 @@ async def api_chat(request: Request) -> Any:
 
     if validated_metrics is not None:
         await client.put_metrics(validated_metrics)
-
-    if structured_metrics is not None:
-        raw_items = []
-    else:
-        try:
-            parsed_food = await parse_chat_message(text)
-            raw_items, _ = parsed_food[:2]
-            presets = parsed_food[2] if len(parsed_food) > 2 else await fetch_presets()
-        except Exception:
-            logger.exception("Food parser failed; falling back to coach")
-            raw_items = []
-    if raw_items:
-        try:
-            requested_day = body.get("date")
-            day = domain.parse_date(requested_day) if requested_day is not None else domain.effective_date()
-            validated: list[tuple[str, dict[str, float], str, Any, Any, str, str, str]] = []
-            for raw in raw_items[:10]:
-                if not isinstance(raw, dict):
-                    raise MacroError("I couldn't understand one of those food items. Please rephrase it.")
-                clean_name = domain.validate_name(str(raw.get("name", "")))
-                macros = domain.validate_macros(
-                    raw.get("calories"), raw.get("protein"), raw.get("carbs"),
-                    raw.get("fat"), raw.get("fiber", 0)
-                )
-                meal_name = domain.normalize_meal(raw.get("meal"))
-                basis = str(raw.get("basis") or "").strip().casefold()
-                sourced_from = str(raw.get("sourced_from") or "estimate").strip().casefold()
-                note = str(raw.get("note") or "ESTIMATE").strip()
-                validated.append(
-                    (clean_name, macros, meal_name, raw.get("grams"), raw.get("quantity"),
-                     basis, sourced_from, note)
-                )
-
-            logged: list[dict[str, Any]] = []
-            preset_by_name = {
-                _normalized_food_name(str(preset["name"])): preset
-                for preset in presets
-            }
-            known_by_name = {
-                _normalized_food_name(name): name for name in KNOWN_CHAT_FOOD_NAMES
-            }
-            # The parser chooses a route, but only a real exact preset/known
-            # record can mint one of those source labels.
-            preset_gram_lookups_left = 3
-            for clean_name, macros, meal_name, grams, quantity, basis, sourced_from, note in validated:
-                normalized_name = _normalized_food_name(clean_name)
-                preset = preset_by_name.get(normalized_name)
-                known_name = known_by_name.get(normalized_name)
-                if preset is not None:
-                    preset_macros = domain.validate_macros(
-                        *(preset.get(key) for key in domain.MACRO_KEYS)
-                    )
-                    try:
-                        stated_grams = float(grams)
-                    except (TypeError, ValueError):
-                        stated_grams = None
-                    if stated_grams is not None and stated_grams > 0:
-                        try:
-                            serving_weight = float(preset.get("serving_weight_g"))
-                        except (TypeError, ValueError):
-                            serving_weight = None
-                        if serving_weight is not None and serving_weight > 0:
-                            servings = stated_grams / serving_weight
-                            macros = domain.validate_macros(
-                                *(round(preset_macros[key] * servings, 2)
-                                  for key in domain.MACRO_KEYS)
-                            )
-                            source = f'Meal Preset: {preset["name"]}'
-                        else:
-                            upgraded = None
-                            if preset_gram_lookups_left > 0:
-                                preset_gram_lookups_left -= 1
-                                upgraded = await _upgrade_estimate(clean_name, stated_grams)
-                            if upgraded is not None:
-                                macros, source = upgraded
-                            else:
-                                source = "ESTIMATE"
-                    else:
-                        try:
-                            servings = float(quantity)
-                        except (TypeError, ValueError):
-                            servings = 1
-                        if servings <= 0:
-                            servings = 1
-                        macros = domain.validate_macros(
-                            *(round(preset_macros[key] * servings, 2)
-                              for key in domain.MACRO_KEYS)
-                        )
-                        source = f'Meal Preset: {preset["name"]}'
-                elif known_name is not None:
-                    # The parser already returned the known food's final macros
-                    # for the user's exact portion. The registry only proves the
-                    # source label; it does not redo language/portion math.
-                    source = f"Known food: {known_name}"
-                else:
-                    source = note if sourced_from == "lookup" else "ESTIMATE"
-                result = await write_meal(
-                    clean_name, macros["calories"], macros["protein"], macros["carbs"],
-                    macros["fat"], source, meal_name, day.isoformat(), allow_estimate=True,
-                    fiber=macros["fiber"],
-                )
-                logged.append(result["logged"])
-
-            current = await day_payload(day, ensure=logged)
-            names = ", ".join(f'{item["name"]} {item["calories"]:g} kcal ✓' for item in logged)
-            totals = current["totals"]
-            targets = current["targets"]
-            reply = f'Logged {len(logged)} item{"s" if len(logged) != 1 else ""} — {names}. Total now {totals["calories"]:g}/{targets["calories"]:g} kcal.'
-            await client.insert_chat_message("assistant", reply)
-            return {"reply": reply, "logged": logged, "totals": totals, "widget": None}
-        except Exception:
-            try:
-                await client.insert_chat_message(
-                    "assistant", "Sorry, I couldn't log that. Try again."
-                )
-            except Exception:
-                pass  # The food-path error is the one worth surfacing.
-            raise
 
     plan, has_targets = await asyncio.gather(
         client.fetch_workout_plan(), client.has_macro_targets()

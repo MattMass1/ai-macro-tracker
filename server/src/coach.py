@@ -52,6 +52,8 @@ TOOLS = [
     _schema("log_workout", "Log one exercise and its sets.", {"exercise": S, "workout_type": S, "muscle_group": S, "sets": {"type": "array", "items": {"type": "object", "properties": {"weight": N, "reps": N}, "required": ["weight", "reps"]}}}, ("exercise", "workout_type", "muscle_group", "sets")),
     _schema("get_recent_workouts", "Read recent workout history.", {"n": {"type": "integer", "minimum": 1, "maximum": 30}}, ("n",)),
     _schema("get_workout_plan", "Read the current workout plan.", {}),
+    _schema("get_today_session", "Read today's scheduled workout session from the plan rotation: the rotation day type, its exercises, and whether it is already marked done. Use this to tell the user what today is and when the session is complete.", {}),
+    _schema("complete_today_session", "Mark today's scheduled workout session as done in the rotation day-state. Call it when the user finishes today's workout so the app's Today view shows the session complete. Idempotent: completing twice just reports already done.", {}),
     _schema("set_workout_plan", """Write a workout plan built from library exercises. The server adds the version automatically. Use EXACTLY this shape:
 {"plan": {"rotation": ["Push", "Pull", "Legs"], "days": {"Push": {"label": "Push Day", "exercises": [{"name": "Bench Press", "sets": 3, "reps": "8-10", "rest_sec": 90}]}, "Pull": {"label": "Pull Day", "exercises": [{"name": "Lat Pulldown", "sets": 3, "reps": "10", "rest_sec": 90}]}, "Legs": {"label": "Legs Day", "exercises": [{"name": "Squat", "sets": 3, "reps": "8", "rest_sec": 120}]}}}}
 rules: rotation is an array of workout-type strings (Push/Pull/Legs/Abs/Cardio/Full Body) — one per day; days has one key per rotation entry, each with a label and exercises array; each exercise has name (from the library), sets (int 1-10), reps (string like "8-10"), rest_sec (int seconds).
@@ -82,7 +84,9 @@ RULES (non-negotiable):
 - HARD COMPLETION RULE: Once you have display name, goal, experience level, days per week + equipment, and metrics (from get_metrics or set_metrics), you have ENOUGH. Do not ask anything more. Immediately search the library, then call set_targets + set_workout_plan. The plan does not need training days of the week, injuries, or additional detail.
 - CRITICAL: read the conversation history. Never ask for something the user already provided in this conversation or that exists in data from get_metrics or get_workout_plan. Re-asking is a failure. If the user answers a question already asked, acknowledge it in one line and move FORWARD.
 
-For training recommendations use get_readiness. Users without WHOOP still receive rotation-based recommendations. Dates use YYYY-MM-DD."""
+For training recommendations use get_readiness. Users without WHOOP still receive rotation-based recommendations. Dates use YYYY-MM-DD.
+
+You are the ONLY agent. Every message is yours. Log food with lookup_food + log_meal, log workouts with log_workout, keep the rotation correct with get_today_session/complete_today_session. Never say you can't do something another system does — you ARE the system."""
 
 
 def system_prompt(onboarding: bool) -> str:

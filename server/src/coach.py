@@ -30,7 +30,7 @@ S = {"type": "string"}
 MACROS = {key: N for key in ("calories", "protein", "carbs", "fat", "fiber")}
 TOOLS = [
     _schema("set_display_name", "Save what the user wants the coach to call them.", {"name": S}, ("name",)),
-    _schema("set_metrics", "Save the user's structured body measurements.", {
+    _schema("set_metrics", """Save the user's structured body measurements. ALWAYS echo back in the USER's units: if they gave feet/inches or pounds, store as cm/kg (convert) but CONFIRM in their units ("5'10\", 300 lb, goal 250 lb"). Never reply in metric when the user speaks imperial. Never misread the goal: if the stated goal contradicts the direction (e.g. goal higher than current weight while they said lose fat), ASK to confirm before storing.""", {
         "height_cm": {"type": "number", "minimum": 100, "maximum": 250},
         "weight_kg": {"type": "number", "minimum": 30, "maximum": 300},
         "goal_weight_kg": {"type": "number", "minimum": 30, "maximum": 300},

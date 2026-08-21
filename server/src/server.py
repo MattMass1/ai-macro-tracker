@@ -1838,10 +1838,9 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
             raw_exercises = raw_days.get(day_name, {}).get("exercises", [])
             for index, exercise in enumerate(day["exercises"]):
                 raw = raw_exercises[index] if index < len(raw_exercises) else {}
-                exercise_id = raw.get("library_id", raw.get("id"))
-                match = by_id.get(str(exercise_id)) if exercise_id is not None else None
-                if match is None:
-                    match = match_library_name(exercise["name"])
+                # Prefer the library name match; the id path was a failure mode
+                # (the coach often omits ids). Name matching is exact → longest → ambiguous-reject.
+                match = match_library_name(exercise["name"])
                 if match is None:
                     unknown.append(exercise["name"])
                 else:

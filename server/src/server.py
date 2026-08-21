@@ -1799,8 +1799,8 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
         if not isinstance(raw_plan, dict):
             raise MacroError("plan must be a JSON object")
         # --- Adapter: translate the coach's emitted plan shape to the canonical schema ---
-        # The coach may emit rotation as [{name, exercises}] or ["Push",...]; days may be
-        # missing (derived from rotation); field names may vary (rest_seconds vs rest_sec).
+        # The coach varies: rotation as [{name|day, exercises}] or ["Push",...]; the day
+        # container may be days / workouts / sessions; labels under name or day.
         rotation_raw = raw_plan.get("rotation", raw_plan.get("sessions", []))
         canonical_rotation: list[str] = []
         sessions_by_name: dict[str, dict] = {}
@@ -1808,17 +1808,29 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
             if isinstance(entry, str):
                 canonical_rotation.append(entry)
             elif isinstance(entry, dict):
-                name = entry.get("name")
-                if name:
-                    canonical_rotation.append(str(name))
-                    sessions_by_name[str(name)] = entry
+                label = entry.get("name", entry.get("day"))
+                if label:
+                    canonical_rotation.append(str(label))
+                    sessions_by_name[str(label)] = entry
         if not canonical_rotation:
-            days_src = raw_plan.get("days") or raw_plan.get("workouts")
+            days_src = raw_plan.get("days") or raw_plan.get("workouts") or raw_plan.get("sessions")
             if isinstance(days_src, dict):
                 canonical_rotation = list(days_src.keys())
+            elif isinstance(days_src, list):
+                for entry in days_src:
+                    if isinstance(entry, dict) and entry.get("name", entry.get("day")):
+                        canonical_rotation.append(str(entry.get("name", entry.get("day"))))
         days_raw = raw_plan.get("days", raw_plan.get("workouts"))
         if not isinstance(days_raw, dict):
             days_raw = {}
+        # sessions as the day container: keyed by day/name
+        sessions_raw = raw_plan.get("sessions", [])
+        if isinstance(sessions_raw, list):
+            for entry in sessions_raw:
+                if isinstance(entry, dict):
+                    label = entry.get("name", entry.get("day"))
+                    if label and str(label) not in days_raw:
+                        days_raw[str(label)] = entry
         for name, session in sessions_by_name.items():
             if name not in days_raw:
                 days_raw[name] = session

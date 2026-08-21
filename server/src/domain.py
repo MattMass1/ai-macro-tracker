@@ -315,15 +315,15 @@ def validate_workout_plan(plan: Any) -> dict[str, Any]:
     rotation = plan.get("rotation")
     if not isinstance(rotation, list) or not rotation:
         raise ValueError("plan.rotation must be a non-empty array")
-    # Normalize workout types case-insensitively to the canonical set
+    # Normalize workout types case-insensitively to the canonical set WHEN they match;
+    # otherwise accept the coach's session label as-is (the app renders labels).
     type_lookup = {t.casefold(): t for t in WORKOUT_TYPES}
     for index, workout_type in enumerate(rotation):
-        canonical = type_lookup.get(str(workout_type).casefold())
-        if canonical is None:
-            raise ValueError(
-                f"plan.rotation[{index}] must be one of {', '.join(WORKOUT_TYPES)}"
-            )
-        rotation[index] = canonical
+        if not isinstance(workout_type, str) or not workout_type.strip():
+            raise ValueError(f"plan.rotation[{index}] must be a non-empty string")
+        canonical = type_lookup.get(workout_type.casefold())
+        if canonical is not None:
+            rotation[index] = canonical
     if len(set(rotation)) != len(rotation):
         raise ValueError("plan.rotation must not contain duplicate workout types")
     clean_plan: dict[str, Any] = {
@@ -349,10 +349,11 @@ def validate_workout_plan(plan: Any) -> dict[str, Any]:
     clean_days: dict[str, Any] = {}
     for day_name, day in days.items():
         prefix = f"plan.days[{day_name!r}]"
+        if not isinstance(day_name, str) or not day_name.strip():
+            raise ValueError(f"{prefix} uses an invalid workout type")
         canonical_day = type_lookup.get(str(day_name).casefold())
-        if canonical_day is None:
-            raise ValueError(f"{prefix} uses an unknown workout type")
-        day_name = canonical_day
+        if canonical_day is not None:
+            day_name = canonical_day
         if not isinstance(day, dict):
             raise ValueError(f"{prefix} must be an object")
         if not isinstance(day.get("label"), str) or not day["label"].strip():

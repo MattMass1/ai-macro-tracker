@@ -1236,6 +1236,24 @@ async def test_set_workout_plan_exact_name_wins_over_substring_matches(monkeypat
     assert result["plan"]["days"]["Legs"]["exercises"][0]["name"] == "Squat"
 
 
+async def test_set_workout_plan_validates_against_large_library(monkeypatch):
+    library = [
+        {"id": f"exercise-{index}", "name": f"Exercise {index}"}
+        for index in range(900)
+    ]
+    library.append({"id": "db-bench", "name": "Dumbbell Bench Press"})
+    fake = FakeStore(library=library)
+    monkeypatch.setattr(srv, "_client", fake)
+
+    result = await srv._coach_tool_handlers()["set_workout_plan"]({
+        "plan": workout_plan({"name": "dumbbell bench press"})
+    })
+
+    assert result["plan"]["days"]["Legs"]["exercises"][0]["name"] == (
+        "Dumbbell Bench Press"
+    )
+
+
 async def test_set_workout_plan_casefold_name_collision_is_tool_error(monkeypatch):
     monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
     fake = FakeStore(library=[

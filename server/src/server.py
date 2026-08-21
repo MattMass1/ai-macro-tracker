@@ -1696,6 +1696,7 @@ def search_workout_library(
     ]
     for row in eligible_rows:
         name = str(row.get("name", ""))
+        normalized_name = " ".join(re.findall(r"[a-z0-9]+", name.casefold()))
         reasons: list[str] = []
         score = 0
         matched_fields = 0
@@ -1703,6 +1704,9 @@ def search_workout_library(
         row_muscles = {str(value).casefold() for value in row.get("muscle_group", [])}
         row_type = str(row.get("workout_type", "")).casefold()
         row_difficulty = str(row.get("difficulty", "")).casefold()
+        if normalized and normalized in normalized_name:
+            score += 20 if normalized == normalized_name else 10
+            reasons.append("name match")
         if equipment and row_equipment in equipment:
             score += 2
             matched_fields += 1

@@ -237,6 +237,36 @@ def test_library_search_combines_equipment_and_workout_type():
     assert all("matched" in row for row in commercial["exercises"] + cardio["exercises"])
 
 
+def test_library_search_finds_dumbbell_bench_press_in_large_library():
+    rows = [
+        {"name": f"Dumbbell Exercise {index}", "muscle_group": ["Push"],
+         "workout_type": "Push", "equipment": "dumbbell",
+         "difficulty": "intermediate", "swaps": []}
+        for index in range(900)
+    ]
+    rows.append({"name": "Dumbbell Bench Press", "muscle_group": ["Push"],
+                 "workout_type": "Push", "equipment": "dumbbell",
+                 "difficulty": "intermediate", "swaps": []})
+
+    result = srv.search_workout_library(rows, "dumbbell bench press")
+
+    assert result["exercises"][0]["name"] == "Dumbbell Bench Press"
+
+
+async def test_api_library_returns_full_catalog(monkeypatch):
+    rows = [{"id": str(index), "name": f"Exercise {index}"} for index in range(901)]
+
+    class LibraryStore:
+        async def fetch_workout_library(self):
+            return rows
+
+    monkeypatch.setattr(srv, "_client", LibraryStore())
+
+    result = await srv.api_library.__wrapped__(None)
+
+    assert len(result["exercises"]) > 500
+
+
 def test_library_search_unknown_query_returns_full_library():
     rows = [
         {"name": f"Exercise {index}", "muscle_group": ["Chest"], "workout_type": "Push", "equipment": "machine", "difficulty": "beginner", "swaps": []}

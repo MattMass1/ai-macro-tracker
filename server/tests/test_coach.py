@@ -498,7 +498,7 @@ async def test_food_chat_uses_light_parser_without_coach(monkeypatch):
     async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
                               meal, day_value, allow_estimate=False, fiber=0):
         assert (name, macro_source, meal, allow_estimate) == (
-            "2 eggs", "USDA", "Breakfast", True
+            "2 eggs", "ESTIMATE", "Breakfast", True
         )
         return {"logged": {"name": name, "calories": calories, "protein": protein,
                             "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}

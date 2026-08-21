@@ -22,7 +22,9 @@ USDA_SEARCH_URL = "https://api.nal.usda.gov/fdc/v1/foods/search"
 OFF_SEARCH_URL = "https://world.openfoodfacts.org/cgi/search.pl"
 OFF_PRODUCT_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
+OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 MACRO_KEYS = ("calories", "protein", "carbs", "fat", "fiber")
+FOOD_CLASSES = {"whole", "branded", "restaurant", "unknown"}
 
 # FDC nutrient numbers -> macro keys. Foundation and SR Legacy report per 100 g.
 _FDC_NUTRIENTS = {1008: "calories", 1003: "protein", 1005: "carbs", 1004: "fat", 1079: "fiber"}
@@ -53,6 +55,45 @@ async def _post_json(url: str, payload: dict[str, Any]) -> Any:
         response = await client.post(url, json=payload)
         response.raise_for_status()
         return response.json()
+
+
+async def classify_food(name: str) -> str:
+    """Classify a food for cascade ordering, degrading safely to unknown."""
+    token = os.environ.get("OPENAI_ACCESS_TOKEN", "").strip()
+    text = str(name or "").strip()
+    if not token or not text:
+        return "unknown"
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Classify the food submission by its best nutrition source. "
+                    "Reply with exactly one word: whole, branded, restaurant, "
+                    "or unknown. Whole means an unbranded basic food; branded "
+                    "means a packaged grocery product; restaurant means a menu "
+                    "item or restaurant chain."
+                ),
+            },
+            {"role": "user", "content": text},
+        ],
+        "max_tokens": 10,
+        "temperature": 0,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.post(
+                OPENAI_CHAT_URL,
+                json=payload,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+        classification = str(content).strip().casefold()
+        return classification if classification in FOOD_CLASSES else "unknown"
+    except Exception:
+        return "unknown"
 
 
 def _macros(values: Mapping[str, Any]) -> dict[str, float] | None:
@@ -129,8 +170,21 @@ async def search_openfoodfacts(query: str) -> dict[str, Any] | None:
             name = str(product.get("product_name") or "").strip()
             code = str(product.get("code") or "").strip()
             if macros and name and code:
-                return {"name": name, "macros_per_100g": macros,
-                        "source": f"OpenFoodFacts: {code}"}
+                result: dict[str, Any] = {
+                    "name": name,
+                    "macros_per_100g": macros,
+                    "source": f"OpenFoodFacts: {code}",
+                }
+                serving_size = str(product.get("serving_size") or "").strip()
+                serving_macros = _macros({
+                    key: nutriments.get(field)
+                    for field, key in _OFF_SERVING_NUTRIMENTS.items()
+                })
+                if serving_size:
+                    result["serving_size"] = serving_size
+                if serving_macros is not None:
+                    result["macros_per_serving"] = serving_macros
+                return result
     except Exception:
         return None
     return None
@@ -218,6 +272,11 @@ _WHOLE_SERVING_QUERY = re.compile(
     r"\b(?:one|a|an)\b|\b1(?![0-9]|[/.,])",
     re.IGNORECASE,
 )
+
+
+def is_whole_serving_query(query: str) -> bool:
+    """Whether the user explicitly requested one whole item or serving."""
+    return _WHOLE_SERVING_QUERY.search(str(query or "")) is not None
 
 
 def _tavily_panels(text: str) -> list[tuple[float, dict[str, float]]] | None:
@@ -349,11 +408,18 @@ def _tavily_result(query: str, result: Mapping[str, Any]) -> dict[str, Any] | No
     # Prefer the explicitly labelled item column when both representations agree.
     macros = (item_panels or hundred_panels)[0][1]
 
-    return {
+    parsed: dict[str, Any] = {
         "name": title or query,
         "macros_per_100g": macros,
         "source": f"Tavily: {source_ref}",
     }
+    if serving_panel is not None:
+        serving, _serving_weight, serving_values = serving_panel
+        serving_macros = _macros(serving_values)
+        if serving_macros is not None:
+            parsed["serving_size"] = serving
+            parsed["macros_per_serving"] = serving_macros
+    return parsed
 
 
 async def search_tavily(query: str) -> dict[str, Any] | None:
@@ -380,13 +446,33 @@ async def search_tavily(query: str) -> dict[str, Any] | None:
     return None
 
 
-async def resolve_food(query: str) -> dict[str, Any] | None:
-    """The cascade: USDA FDC, OpenFoodFacts, then Tavily. None on a total miss."""
-    return (
-        await search_usda(query)
-        or await search_openfoodfacts(query)
-        or await search_tavily(query)
-    )
+async def resolve_food(
+    query: str, classify: bool = True, *, whole_item: bool = False
+) -> dict[str, Any] | None:
+    """Resolve food with a classified first tier and a complete fallback cascade."""
+    searches = [search_usda, search_openfoodfacts, search_tavily]
+    if classify:
+        try:
+            classification = await classify_food(query)
+        except Exception:
+            classification = "unknown"
+        preferred = {
+            "whole": search_usda,
+            "branded": search_openfoodfacts,
+            "restaurant": search_tavily,
+        }.get(classification)
+        if preferred is not None:
+            searches = [preferred] + [search for search in searches if search is not preferred]
+    for search in searches:
+        search_query = f"1 {query}" if whole_item and search is search_tavily else query
+        found = await search(search_query)
+        if found:
+            if whole_item:
+                serving = found.get("macros_per_serving")
+                if not isinstance(serving, Mapping) or _macros(serving) is None:
+                    continue
+            return found
+    return None
 
 
 def portion_from_grams(
@@ -412,4 +498,20 @@ def portion_from_grams(
     if macros["calories"] <= 0:
         return None
     source = f"{found['source']} — {found['name']}, {round(weight)} g"
+    return macros, source
+
+
+def portion_from_serving(
+    found: Mapping[str, Any],
+) -> tuple[dict[str, float], str] | None:
+    """Return an explicitly sourced one-serving panel without inferring weight."""
+    values = found.get("macros_per_serving") if isinstance(found, Mapping) else None
+    if not isinstance(values, Mapping):
+        return None
+    macros = _macros(values)
+    if macros is None:
+        return None
+    source = str(found.get("source") or "").strip()
+    if not source:
+        return None
     return macros, source

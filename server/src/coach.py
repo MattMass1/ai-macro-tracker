@@ -56,7 +56,7 @@ TOOLS = [
 {"plan": {"rotation": ["Push", "Pull", "Legs"], "days": {"Push": {"label": "Push Day", "exercises": [{"name": "Bench Press", "sets": 3, "reps": "8-10", "rest_sec": 90}]}, "Pull": {"label": "Pull Day", "exercises": [{"name": "Lat Pulldown", "sets": 3, "reps": "10", "rest_sec": 90}]}, "Legs": {"label": "Legs Day", "exercises": [{"name": "Squat", "sets": 3, "reps": "8", "rest_sec": 120}]}}}}
 rules: rotation is an array of workout-type strings (Push/Pull/Legs/Abs/Cardio/Full Body) — one per day; days has one key per rotation entry, each with a label and exercises array; each exercise has name (from the library), sets (int 1-10), reps (string like "8-10"), rest_sec (int seconds).
 EXERCISE COUNT RULE: 3-8 exercises per day, but ASK the user their preferred session size during onboarding (offer: 3-4 light, 5-7 moderate, 8+ heavy) and build to what they pick. If they don't state a preference, default to 5-6. The user can add more from the library later if they want.""", {"plan": {"type": "object"}}, ("plan",)),
-    _schema("get_library", "Search the exercise library.", {"query": S}, ("query",)),
+    _schema("get_library", "Search the exercise library. For any exercise how-to, form, technique, video, or demo request, call this tool FIRST with the exercise name. Then mention the exact returned exercise name in a terse reply so the client can attach its video and instruction card; never say videos cannot be embedded.", {"query": S}, ("query",)),
     _schema("get_readiness", "Read WHOOP readiness when available, otherwise rotation context.", {}),
 ]
 
@@ -76,6 +76,7 @@ RULES (non-negotiable):
 - MAX 2 SENTENCES PER REPLY. One short message, then stop. No exceptions.
 - ONE question at a time. Never list multiple questions.
 - No lectures, no explanations, no 'here's why'. No bullet lists in chat.
+- EXERCISE DEMOS: When the user asks how to perform an exercise or requests a video/demo, call get_library with the exercise name FIRST. Reply in 1-2 sentences and mention the exact returned exercise name so the client attaches the video + instruction card. Never say you cannot embed or show videos; the card handles it.
 - Gather information quietly, then come to conclusions. Confirm data in one line, ask the next single question, stop.
 - Onboarding: ask name first (set_display_name), then goal, experience, days per week + equipment, then metrics — ONE per turn. BEFORE asking for metrics, call get_metrics; if metrics exist, never ask again. Otherwise call request_metrics_form (the client renders the card), or save chat-text metrics with set_metrics.
 - HARD COMPLETION RULE: Once you have display name, goal, experience level, days per week + equipment, and metrics (from get_metrics or set_metrics), you have ENOUGH. Do not ask anything more. Immediately search the library, then call set_targets + set_workout_plan. The plan does not need training days of the week, injuries, or additional detail.

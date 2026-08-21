@@ -1689,7 +1689,7 @@ def exercise_card_widget(
     all_exercises: list[Mapping[str, Any]] = []
     newest_exercises: list[Mapping[str, Any]] | None = None
     for tool_result in reversed(tool_results):
-        if tool_result.get("tool") != "get_library" or not tool_result.get("ok"):
+        if tool_result.get("tool") not in {"get_library", "library_tool"} or not tool_result.get("ok"):
             continue
         result = tool_result.get("result")
         exercises = result.get("exercises") if isinstance(result, Mapping) else None

@@ -18,7 +18,7 @@ from starlette.requests import Request  # noqa: E402
 
 import domain  # noqa: E402
 from auth import bind_user, current_user_id, reset_user  # noqa: E402
-from coach import CoachProviderError, TOOLS, run_agent  # noqa: E402
+from coach import CoachProviderError, SYSTEM_PROMPT, TOOLS, run_agent, system_prompt  # noqa: E402
 from domain import MacroError  # noqa: E402
 from store import ChatQuotaExceeded, Store  # noqa: E402
 import server as srv  # noqa: E402
@@ -1100,6 +1100,75 @@ async def test_library_call_emits_exercise_card_widget(monkeypatch):
     }
 
 
+def test_exercise_demo_guidance_requires_library_first_and_forbids_video_refusal():
+    library_tool = next(tool for tool in TOOLS if tool["name"] == "get_library")
+    description = library_tool["description"]
+    assert "call this tool FIRST" in description
+    assert "exact returned exercise name" in description
+    assert "never say videos cannot be embedded" in description
+
+    for prompt in (SYSTEM_PROMPT, system_prompt(onboarding=False)):
+        normalized = " ".join(prompt.replace("`", "").split())
+        assert "call get_library with the exercise name FIRST" in normalized
+        assert "exact returned exercise name" in normalized
+        assert "Never say you cannot embed or show videos" in normalized
+
+
+async def test_exercise_demo_turn_emits_video_card(monkeypatch):
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
+    exercise = {
+        "name": "Dumbbell Bench Press",
+        "muscle_group": ["Chest", "Triceps"],
+        "workout_type": "Push",
+        "equipment": "dumbbell",
+        "video_url": "https://media.example/dumbbell-bench-press.gif",
+        "instructions": "Lower the dumbbells with control, then press them up.",
+    }
+    calls = 0
+
+    async def fake_post(_token, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            assert payload["messages"][-1]["content"] == "show me how to do dumbbell press"
+            prompt = " ".join(payload["messages"][0]["content"].replace("`", "").split())
+            assert "call get_library with the exercise name FIRST" in prompt
+            return tool_response(tool_call(
+                "demo-library", "get_library", {"query": "dumbbell press"},
+            ))
+        result = json.loads(payload["messages"][-1]["content"])["result"]
+        assert result["exercises"][0]["video_url"] == exercise["video_url"]
+        assert result["exercises"][0]["instructions"] == exercise["instructions"]
+        return text_response("Use Dumbbell Bench Press with a controlled range of motion.")
+
+    async def get_library(arguments):
+        assert arguments == {"query": "dumbbell press"}
+        return {"exercises": [exercise]}
+
+    reply, audit = await run_agent(
+        history=[], message="show me how to do dumbbell press", onboarding=False,
+        handlers={"get_library": get_library}, post=fake_post,
+    )
+    widget = srv.exercise_card_widget(reply, audit)
+
+    assert calls == 2
+    assert [entry["tool"] for entry in audit] == ["get_library"]
+    assert "can't embed" not in reply.casefold()
+    assert widget == {
+        "type": "exercise_card",
+        "exercise": {
+            "exercise_name": "Dumbbell Bench Press",
+            "muscle_group": ["Chest", "Triceps"],
+            "equipment": "dumbbell",
+            "sets": None,
+            "reps": None,
+            "video_url": "https://media.example/dumbbell-bench-press.gif",
+            "instructions": "Lower the dumbbells with control, then press them up.",
+            "workout_type": "Push",
+        },
+    }
+
+
 async def test_run_agent_library_audit_keeps_exercise_card_fields(monkeypatch):
     monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
     exercise = {
@@ -1156,6 +1225,19 @@ def test_library_widget_selects_exercise_mentioned_in_reply():
 
     assert widget["exercise"]["exercise_name"] == "Deadlift"
     assert widget["exercise"]["video_url"] == "https://media.example/deadlift.gif"
+
+
+def test_library_tool_alias_emits_exercise_card_widget():
+    result = {"tool": "library_tool", "input": {"query": "dumbbell press"}, "ok": True,
+              "result": {"exercises": [{
+                  "name": "Dumbbell Bench Press",
+                  "video_url": "https://media.example/dumbbell-bench-press.gif",
+              }]}}
+
+    widget = srv.exercise_card_widget("Try Dumbbell Bench Press.", [result])
+
+    assert widget["exercise"]["exercise_name"] == "Dumbbell Bench Press"
+    assert widget["exercise"]["video_url"] == "https://media.example/dumbbell-bench-press.gif"
 
 
 def test_library_widget_prefers_longest_overlapping_exercise_name():

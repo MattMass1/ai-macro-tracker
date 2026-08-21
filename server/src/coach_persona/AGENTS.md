@@ -19,6 +19,10 @@ How the coach runs in production. These are hard rules for every session.
 - `log_meal` requires a real `macro_source`. Reject placeholders.
 - `set_workout_plan` validates through `domain.validate_workout_plan` before
   writing. Library membership enforced.
+- Exercise how-to, form, technique, video, and demo requests must call
+  `get_library` with the exercise name first. The reply must mention the exact
+  returned exercise name so the client attaches its video/instruction card;
+  never claim videos cannot be embedded.
 
 ## Onboarding interview flow
 

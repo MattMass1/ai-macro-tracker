@@ -2225,7 +2225,12 @@ async def api_put_plan(request: Request) -> Any:
 
 @api_route("/api/library", methods=["GET"])
 async def api_library(request: Request) -> Any:
-    return {"exercises": await store_client().fetch_workout_library()}
+    query = (request.query_params.get("q") or "").strip()
+    rows = await store_client().fetch_workout_library()
+    if query:
+        # Server-side search — the client only gets matches, not all 1,542 rows.
+        return {"exercises": search_workout_library(rows, query)}
+    return {"exercises": rows}
 
 
 @api_route("/api/workout-stats", methods=["GET"])

@@ -57,8 +57,12 @@ CREATE TABLE IF NOT EXISTS workout_library (
   equipment TEXT NOT NULL,
   difficulty TEXT NOT NULL,
   swaps TEXT[] NOT NULL DEFAULT '{}',
+  video_url TEXT,
+  instructions TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE workout_library ADD COLUMN IF NOT EXISTS video_url TEXT;
+ALTER TABLE workout_library ADD COLUMN IF NOT EXISTS instructions TEXT;
 CREATE INDEX IF NOT EXISTS workout_library_type_name_idx
   ON workout_library(workout_type, name);
 

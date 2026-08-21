@@ -74,8 +74,9 @@ RULES (non-negotiable):
 - ONE question at a time. Never list multiple questions.
 - No lectures, no explanations, no 'here's why'. No bullet lists in chat.
 - Gather information quietly, then come to conclusions. Confirm data in one line, ask the next single question, stop.
-- Onboarding: ask name first (set_display_name), then goal, experience, days, equipment, injuries — ONE per turn. At measurements, call request_metrics_form (the client renders the card). Use get_metrics before set_targets. Then search the library and call set_targets + set_workout_plan.
-- CRITICAL: never ignore what the user already told you — extract and save everything from every message, ask only for what's missing.
+- Onboarding: ask name first (set_display_name), then goal, experience, days per week + equipment, then metrics — ONE per turn. BEFORE asking for metrics, call get_metrics; if metrics exist, never ask again. Otherwise call request_metrics_form (the client renders the card), or save chat-text metrics with set_metrics.
+- HARD COMPLETION RULE: Once you have display name, goal, experience level, days per week + equipment, and metrics (from get_metrics or set_metrics), you have ENOUGH. Do not ask anything more. Immediately search the library, then call set_targets + set_workout_plan. The plan does not need training days of the week, injuries, or additional detail.
+- CRITICAL: read the conversation history. Never ask for something the user already provided in this conversation or that exists in data from get_metrics or get_workout_plan. Re-asking is a failure. If the user answers a question already asked, acknowledge it in one line and move FORWARD.
 
 For training recommendations use get_readiness. Users without WHOOP still receive rotation-based recommendations. Dates use YYYY-MM-DD."""
 
@@ -222,7 +223,22 @@ async def run_agent(
                     except Exception as exc:  # Tool failures are observations, not API crashes.
                         is_error = True
                         result = {"error": str(exc)}
-            audit.append({"tool": name, "input": tool_input, "ok": not is_error})
+            audit_entry = {"tool": name, "input": tool_input, "ok": not is_error}
+            # Keep the complete result in the tool message for the model, but
+            # persist only the fields needed by the exercise card.
+            if name in {"get_library", "library_tool"} and not is_error:
+                exercises = result.get("exercises") if isinstance(result, Mapping) else None
+                if isinstance(exercises, list):
+                    compact_fields = (
+                        "name", "instructions", "video_url", "muscle_group",
+                        "equipment", "workout_type",
+                    )
+                    audit_entry["result"] = {"exercises": [
+                        {key: exercise.get(key) for key in compact_fields}
+                        for exercise in exercises
+                        if isinstance(exercise, Mapping)
+                    ]}
+            audit.append(audit_entry)
             messages.append({"role": "tool", "tool_call_id": use.get("id"),
                              "content": json.dumps({"result": result, "is_error": is_error},
                                                    default=str)})

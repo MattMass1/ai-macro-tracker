@@ -1682,6 +1682,63 @@ def search_workout_library(
     }
 
 
+def exercise_card_widget(
+    reply: str, tool_results: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Build one exercise card from successful library lookups in this turn."""
+    all_exercises: list[Mapping[str, Any]] = []
+    newest_exercises: list[Mapping[str, Any]] | None = None
+    for tool_result in reversed(tool_results):
+        if tool_result.get("tool") != "get_library" or not tool_result.get("ok"):
+            continue
+        result = tool_result.get("result")
+        exercises = result.get("exercises") if isinstance(result, Mapping) else None
+        if not isinstance(exercises, list) or not exercises:
+            continue
+        valid_exercises = [
+            exercise for exercise in exercises if isinstance(exercise, Mapping)
+        ]
+        if newest_exercises is None:
+            newest_exercises = valid_exercises
+        all_exercises.extend(valid_exercises)
+
+    reply_text = reply.strip().casefold()
+    mentioned = [
+        exercise for exercise in all_exercises
+        if str(exercise.get("name") or "").strip()
+        and str(exercise.get("name") or "").strip().casefold() in reply_text
+    ]
+    exact = [
+        exercise for exercise in mentioned
+        if str(exercise.get("name") or "").strip().casefold() == reply_text
+    ]
+    if exact:
+        exercise = exact[0]
+    elif mentioned:
+        exercise = max(
+            mentioned,
+            key=lambda item: len(str(item.get("name") or "").strip()),
+        )
+    else:
+        exercise = newest_exercises[0] if newest_exercises else None
+        if exercise is None or str(exercise.get("name") or "").strip().casefold() not in reply_text:
+            return None
+
+    name = str(exercise.get("name") or "").strip()
+    if not name:
+        return None
+    return {"type": "exercise_card", "exercise": {
+            "exercise_name": name,
+            "muscle_group": exercise.get("muscle_group"),
+            "equipment": exercise.get("equipment"),
+            "sets": exercise.get("sets"),
+            "reps": exercise.get("reps"),
+            "video_url": exercise.get("video_url"),
+            "instructions": exercise.get("instructions"),
+            "workout_type": exercise.get("workout_type"),
+        }}
+
+
 def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[Any]]]:
     """Build tenant-bound coach tools; none accepts a user identifier."""
     async def set_display_name_tool(args):
@@ -1979,6 +2036,8 @@ async def api_chat(request: Request) -> Any:
         "height_cm", "weight_kg", "goal_weight_kg", "age", "activity_level"
     ]} if any(result.get("tool") == "request_metrics_form" and result.get("ok")
               for result in tool_results) else None)
+    if widget is None:
+        widget = exercise_card_widget(reply, tool_results)
     return {"reply": reply, "logged": [], "totals": current["totals"],
             "has_plan": plan is not None or await client.fetch_workout_plan() is not None,
             "has_targets": has_targets or await client.has_macro_targets(),

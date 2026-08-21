@@ -363,6 +363,8 @@ def validate_workout_plan(plan: Any) -> dict[str, Any]:
             raise ValueError(f"{prefix}.exercises must be an array")
         if len(exercises) > 30:
             raise ValueError(f"{prefix}.exercises must contain at most 30 exercises")
+        if len(exercises) > 8:
+            raise ValueError(f"{prefix}.exercises must contain at most 8 exercises (keep sessions focused — the user can add more from the library)")
         clean_exercises: list[dict[str, Any]] = []
         for index, exercise in enumerate(exercises):
             exercise_prefix = f"{prefix}.exercises[{index}]"

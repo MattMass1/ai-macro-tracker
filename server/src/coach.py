@@ -54,7 +54,8 @@ TOOLS = [
     _schema("get_workout_plan", "Read the current workout plan.", {}),
     _schema("set_workout_plan", """Write a workout plan built from library exercises. The server adds the version automatically. Use EXACTLY this shape:
 {"plan": {"rotation": ["Push", "Pull", "Legs"], "days": {"Push": {"label": "Push Day", "exercises": [{"name": "Bench Press", "sets": 3, "reps": "8-10", "rest_sec": 90}]}, "Pull": {"label": "Pull Day", "exercises": [{"name": "Lat Pulldown", "sets": 3, "reps": "10", "rest_sec": 90}]}, "Legs": {"label": "Legs Day", "exercises": [{"name": "Squat", "sets": 3, "reps": "8", "rest_sec": 120}]}}}}
-rules: rotation is an array of workout-type strings (Push/Pull/Legs/Abs/Cardio/Full Body) — one per day; days has one key per rotation entry, each with a label and exercises array; each exercise has name (from the library), sets (int 1-10), reps (string like "8-10"), rest_sec (int seconds).""", {"plan": {"type": "object"}}, ("plan",)),
+rules: rotation is an array of workout-type strings (Push/Pull/Legs/Abs/Cardio/Full Body) — one per day; days has one key per rotation entry, each with a label and exercises array; each exercise has name (from the library), sets (int 1-10), reps (string like "8-10"), rest_sec (int seconds).
+EXERCISE COUNT RULE: 3-8 exercises per day. Scale by activity level: 3-5 for low activity / beginners, 5-6 for moderate, 6-8 for high activity / advanced. Fewer, well-chosen exercises beat a long list. The user can add more from the library later if they want.""", {"plan": {"type": "object"}}, ("plan",)),
     _schema("get_library", "Search the exercise library.", {"query": S}, ("query",)),
     _schema("get_readiness", "Read WHOOP readiness when available, otherwise rotation context.", {}),
 ]

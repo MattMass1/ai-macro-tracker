@@ -67,6 +67,36 @@ mcp = FastMCP("macro-tracker", lifespan=lifespan)
 
 
 # --------------------------------------------------------------------------- #
+# Security: gate the raw MCP protocol endpoint behind the same device-token
+# auth as /api/*. The MCP tools duplicate the REST API and must NOT be
+# reachable anonymously (Fable security sweep, C1).
+# --------------------------------------------------------------------------- #
+from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
+from starlette.requests import Request as _Request  # noqa: E402
+from starlette.responses import JSONResponse as _JSONResponse  # noqa: E402
+
+
+class MCPAuthMiddleware(BaseHTTPMiddleware):
+    """Reject unauthenticated requests to the MCP protocol endpoint.
+
+    /health stays public; /api/* routes do their own auth (they resolve the
+    user from the bearer token). Only the raw MCP tool protocol needs the
+    blanket guard, because FastMCP's HTTP transport has no per-request auth.
+    """
+
+    async def dispatch(self, request: _Request, call_next):  # type: ignore[no-untyped-def]
+        path = request.url.path
+        if path == "/health":
+            return await call_next(request)
+        if path.startswith("/mcp"):
+            user_id = await _authenticated_user(request)
+            if user_id is None:
+                return _JSONResponse({"error": "Missing or invalid bearer token"}, status_code=401)
+            request.state.mcp_user_id = user_id
+        return await call_next(request)
+
+
+# --------------------------------------------------------------------------- #
 # Shared business helpers — used by both the MCP tools and the REST routes
 # --------------------------------------------------------------------------- #
 
@@ -2298,7 +2328,17 @@ async def health(request: Request) -> Response:
 
 
 def main() -> None:
-    mcp.run(transport="http", host="0.0.0.0", port=CONFIG.port)
+    # Build the Starlette app with the MCP auth gate (C1 security fix) and
+    # serve via uvicorn — the raw /mcp protocol requires a bearer token.
+    import uvicorn
+
+    from starlette.middleware import Middleware as _Middleware
+
+    app = mcp.http_app(
+        middleware=[_Middleware(MCPAuthMiddleware)],
+        transport="http",
+    )
+    uvicorn.run(app, host="0.0.0.0", port=CONFIG.port)
 
 
 if __name__ == "__main__":

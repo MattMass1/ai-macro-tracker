@@ -330,10 +330,22 @@ struct ExerciseLibraryView: View {
             }
         }
         .task {
-            if let payload = try? await APIClient.shared.library() {
+            // Load the full library once (lazy — only when the picker opens).
+            if exercises.isEmpty, let payload = try? await APIClient.shared.library() {
                 exercises = payload.exercises
             }
             isLoading = false
+        }
+        .searchable(text: $search, prompt: "Search exercises")
+        .onChange(of: search) { _, query in
+            // Server-side search: fetch matches instead of filtering 1,542 rows locally.
+            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.count >= 2 else { return }
+            Task {
+                if let payload = try? await APIClient.shared.library(query: trimmed) {
+                    exercises = payload.exercises
+                }
+            }
         }
     }
 

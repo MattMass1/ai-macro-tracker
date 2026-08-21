@@ -56,7 +56,10 @@ final class APIClient {
     }
     func deleteMeal(_ id: String) async throws -> DayPayload { try await delete("api/meal/\(encoded(id))") }
     func exercises() async throws -> ExercisesPayload { try await get("api/exercises") }
-    func library() async throws -> LibraryPayload { try await get("api/library") }
+    func library(query: String? = nil) async throws -> LibraryPayload {
+        let path = query.map { "api/library?q=\(encoded($0))" } ?? "api/library"
+        return try await get(path)
+    }
     func plan() async throws -> WorkoutPlanPayload { try await get("api/plan") }
     func savePlan(_ body: WorkoutPlanWrite) async throws -> SavePlanPayload { try await send("api/plan", body: body) }
     func workoutStats() async throws -> WorkoutStatsPayload { try await get("api/workout-stats") }

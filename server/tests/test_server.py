@@ -197,6 +197,81 @@ async def test_barcode_route_rejects_invalid_code(monkeypatch, lagging):
     assert json.loads(response.body) == {"error": "code must contain 8 to 14 digits"}
 
 
+def test_library_search_uses_structured_fields_and_knee_preference():
+    rows = [
+        {"name": "Barbell Squat", "muscle_group": ["Quads", "Glutes"], "workout_type": "Legs", "equipment": "barbell", "difficulty": "intermediate", "swaps": []},
+        {"name": "Romanian Deadlift", "muscle_group": ["Hams", "Glutes"], "workout_type": "Legs", "equipment": "barbell", "difficulty": "intermediate", "swaps": []},
+        {"name": "Leg Curls", "muscle_group": ["Hams"], "workout_type": "Legs", "equipment": "machine", "difficulty": "beginner", "swaps": []},
+        {"name": "Lat Pulldown", "muscle_group": ["Back"], "workout_type": "Pull", "equipment": "cable", "difficulty": "beginner", "swaps": []},
+        {"name": "Reverse Fly", "muscle_group": ["Shoulders"], "workout_type": "Pull", "equipment": "dumbbell", "difficulty": "beginner", "swaps": []},
+    ]
+
+    result = srv.search_workout_library(rows, "knee friendly leg exercises")
+    hams = srv.search_workout_library(rows, "hams")
+    lats = srv.search_workout_library(rows, "lats")
+    rear_delts = srv.search_workout_library(rows, "rear delts")
+
+    assert {row["name"] for row in result["exercises"]} == {"Romanian Deadlift", "Leg Curls"}
+    assert all(row["workout_type"] == "Legs" for row in result["exercises"])
+    assert "knee-stress exercises excluded" in result["note"]
+    assert {row["name"] for row in hams["exercises"]} == {"Romanian Deadlift", "Leg Curls"}
+    assert [row["name"] for row in lats["exercises"]] == ["Lat Pulldown"]
+    assert [row["name"] for row in rear_delts["exercises"]] == ["Reverse Fly"]
+
+
+def test_library_search_combines_equipment_and_workout_type():
+    rows = [
+        {"name": "Bench Press", "muscle_group": ["Chest"], "workout_type": "Push", "equipment": "barbell", "difficulty": "intermediate", "swaps": []},
+        {"name": "Machine Press", "muscle_group": ["Chest"], "workout_type": "Push", "equipment": "machine", "difficulty": "beginner", "swaps": []},
+        {"name": "Cable Fly", "muscle_group": ["Chest"], "workout_type": "Push", "equipment": "cable", "difficulty": "beginner", "swaps": []},
+        {"name": "Hack Squat", "muscle_group": ["Quads"], "workout_type": "Legs", "equipment": "machine", "difficulty": "intermediate", "swaps": []},
+        {"name": "Mountain Climbers", "muscle_group": ["Cardio"], "workout_type": "Cardio", "equipment": "bodyweight", "difficulty": "beginner", "swaps": []},
+        {"name": "Treadmill", "muscle_group": ["Cardio"], "workout_type": "Cardio", "equipment": "machine", "difficulty": "beginner", "swaps": []},
+    ]
+
+    commercial = srv.search_workout_library(rows, "commercial gym push")
+    cardio = srv.search_workout_library(rows, "bodyweight cardio")
+
+    assert {row["name"] for row in commercial["exercises"]} == {"Bench Press", "Machine Press"}
+    assert [row["name"] for row in cardio["exercises"]] == ["Mountain Climbers"]
+    assert all("matched" in row for row in commercial["exercises"] + cardio["exercises"])
+
+
+def test_library_search_unknown_query_returns_full_library():
+    rows = [
+        {"name": f"Exercise {index}", "muscle_group": ["Chest"], "workout_type": "Push", "equipment": "machine", "difficulty": "beginner", "swaps": []}
+        for index in range(52)
+    ]
+    rows.extend([
+        {"name": "Barbell Squat", "muscle_group": ["Quads"], "workout_type": "Legs", "equipment": "barbell", "difficulty": "beginner", "swaps": []},
+        {"name": "Walking Lunges", "muscle_group": ["Quads"], "workout_type": "Legs", "equipment": "bodyweight", "difficulty": "beginner", "swaps": []},
+        {"name": "Stairmaster", "muscle_group": ["Cardio"], "workout_type": "Cardio", "equipment": "machine", "difficulty": "beginner", "swaps": []},
+        {"name": "Leg Press", "muscle_group": ["Quads"], "workout_type": "Legs", "equipment": "machine", "difficulty": "beginner", "swaps": []},
+        {"name": "Box Jump", "muscle_group": ["Quads"], "workout_type": "Cardio", "equipment": "bodyweight", "difficulty": "beginner", "swaps": []},
+        {"name": "Treadmill Incline Run", "muscle_group": ["Cardio"], "workout_type": "Cardio", "equipment": "machine", "difficulty": "beginner", "swaps": []},
+        {"name": "Bench Press", "muscle_group": ["Chest"], "workout_type": "Push", "equipment": "barbell", "difficulty": "beginner", "swaps": []},
+        {"name": "Biceps Curls", "muscle_group": ["Biceps"], "workout_type": "Pull", "equipment": "dumbbell", "difficulty": "beginner", "swaps": []},
+        {"name": "Triceps Curls", "muscle_group": ["Triceps"], "workout_type": "Push", "equipment": "dumbbell", "difficulty": "beginner", "swaps": []},
+    ])
+
+    result = srv.search_workout_library(rows, "xyzzy")
+    knee_friendly = srv.search_workout_library(rows, "knee friendly")
+
+    assert len(result["exercises"]) == 61
+    assert result["note"] == "no filter matched; full library returned"
+    assert len(knee_friendly["exercises"]) == 55
+    assert not {
+        "Barbell Squat", "Walking Lunges", "Stairmaster", "Leg Press",
+        "Box Jump", "Treadmill Incline Run",
+    } & {
+        row["name"] for row in knee_friendly["exercises"]
+    }
+    assert {"Bench Press", "Biceps Curls", "Triceps Curls"} <= {
+        row["name"] for row in knee_friendly["exercises"]
+    }
+    assert "knee-stress exercises excluded" in knee_friendly["note"]
+
+
 async def test_log_meal_does_not_double_count_once_the_query_catches_up(monkeypatch):
     fake = FakeStore(
         [meal_row("meal-1", "Eggs", "Breakfast", 280, 28, 2, 18, "2026-07-25T12:00:00+00:00")],

@@ -1550,6 +1550,138 @@ async def api_vision_log(request: Request) -> Any:
     return await analyze_food_image(image, meal_hint)
 
 
+_LIBRARY_STOPWORDS = {
+    "a", "an", "and", "day", "exercise", "exercises", "for", "friendly",
+    "gym", "routine", "the", "to", "workout", "workouts",
+}
+_EQUIPMENT_ALIASES = {
+    "barbell": "barbell", "barbells": "barbell", "bodyweight": "bodyweight",
+    "cable": "cable", "cables": "cable", "dumbbell": "dumbbell",
+    "dumbbells": "dumbbell", "db": "dumbbell", "kettlebell": "kettlebell",
+    "kettlebells": "kettlebell", "machine": "machine", "machines": "machine",
+    "treadmill": "treadmill",
+}
+_MUSCLE_ALIASES = {
+    "arm": {"biceps", "triceps", "forearms"}, "arms": {"biceps", "triceps", "forearms"},
+    "back": {"back", "lats", "upper back", "lower back"}, "biceps": {"biceps"},
+    "calf": {"calves"}, "calves": {"calves"}, "chest": {"chest"},
+    "core": {"core", "abs"}, "delt": {"shoulders", "rear delts"},
+    "delts": {"shoulders", "rear delts"}, "forearm": {"forearms"},
+    "forearms": {"forearms"}, "glute": {"glutes"}, "glutes": {"glutes"},
+    "ham": {"hams", "hamstrings"}, "hams": {"hams", "hamstrings"},
+    "hamstring": {"hams", "hamstrings"}, "hamstrings": {"hams", "hamstrings"},
+    "lat": {"back", "lats"}, "lats": {"back", "lats"},
+    "leg": {"quads", "glutes", "hams", "hamstrings", "calves"},
+    "legs": {"quads", "glutes", "hams", "hamstrings", "calves"},
+    "quad": {"quads"}, "quads": {"quads"},
+    "shoulder": {"shoulders", "rear delts"}, "shoulders": {"shoulders", "rear delts"},
+    "trap": {"back", "traps"}, "traps": {"back", "traps"}, "triceps": {"triceps"},
+}
+_WORKOUT_TYPES = {
+    "abs": "abs", "cardio": "cardio", "leg": "legs", "legs": "legs",
+    "pull": "pull", "push": "push",
+}
+_DIFFICULTIES = {"beginner", "intermediate", "advanced"}
+_KNEE_STRESS_NAME_TERMS = (
+    "squat", "lunge", "jump", "box jump", "burpee", "pistol squat",
+    "split squat", "bulgarian", "step-up", "step up", "wall sit",
+    "leg extension", "knee press", "kettlebell swing", "running", "sprint",
+)
+_KNEE_STRESS_MACHINE_NAMES = (
+    "stairmaster", "stair master", "stair climber", "leg press", "hack squat",
+    "sled push", "treadmill",
+)
+_KNEE_STRESS_EXCLUSIONS = (
+    *_KNEE_STRESS_NAME_TERMS,
+    *_KNEE_STRESS_MACHINE_NAMES,
+)
+
+
+def _is_knee_stress_exercise(row: Mapping[str, Any]) -> bool:
+    """Return whether an exercise name matches the curated knee-stress list."""
+    name = " ".join(re.findall(r"[a-z0-9]+", str(row.get("name", "")).casefold()))
+    return any(term.replace("-", " ") in name for term in _KNEE_STRESS_EXCLUSIONS)
+
+
+def search_workout_library(
+    rows: list[dict[str, Any]], query: str, limit: int = 30,
+) -> dict[str, Any]:
+    """Rank exercise rows using the library's structured metadata."""
+    normalized = " ".join(re.findall(r"[a-z0-9]+", query.casefold()))
+    tokens = {token for token in normalized.split() if token not in _LIBRARY_STOPWORDS}
+    equipment = {_EQUIPMENT_ALIASES[token] for token in tokens if token in _EQUIPMENT_ALIASES}
+    if "commercial" in tokens:
+        equipment.update({"barbell", "machine"})
+    muscle_terms = [_MUSCLE_ALIASES[token] for token in tokens if token in _MUSCLE_ALIASES]
+    muscles = set().union(*muscle_terms) if muscle_terms else set()
+    workout_types = {_WORKOUT_TYPES[token] for token in tokens if token in _WORKOUT_TYPES}
+    if "full body" in normalized:
+        workout_types.add("full body")
+    difficulties = tokens & _DIFFICULTIES
+    knee_friendly = any(
+        phrase in normalized
+        for phrase in ("knee friendly", "no knee", "low impact", "knee pain", "avoid knee")
+    )
+
+    requested_fields = sum(bool(values) for values in (equipment, muscles, workout_types, difficulties))
+    ranked: list[tuple[int, int, str, dict[str, Any], list[str]]] = []
+    eligible_rows = [
+        row for row in rows if not knee_friendly or not _is_knee_stress_exercise(row)
+    ]
+    for row in eligible_rows:
+        name = str(row.get("name", ""))
+        reasons: list[str] = []
+        score = 0
+        matched_fields = 0
+        row_equipment = str(row.get("equipment", "")).casefold()
+        row_muscles = {str(value).casefold() for value in row.get("muscle_group", [])}
+        row_type = str(row.get("workout_type", "")).casefold()
+        row_difficulty = str(row.get("difficulty", "")).casefold()
+        if equipment and row_equipment in equipment:
+            score += 2
+            matched_fields += 1
+            reasons.append(f"equipment: {row_equipment}")
+        if muscles and row_muscles & muscles:
+            score += 3
+            matched_fields += 1
+            reasons.append("muscle group: " + ", ".join(sorted(row_muscles & muscles)))
+        if workout_types and row_type in workout_types:
+            score += 4
+            matched_fields += 1
+            reasons.append(f"workout type: {row_type}")
+        if difficulties and row_difficulty in difficulties:
+            score += 1
+            matched_fields += 1
+            reasons.append(f"difficulty: {row_difficulty}")
+        if score:
+            if knee_friendly:
+                reasons.append("knee-friendly preference")
+            ranked.append((matched_fields, score, name.casefold(), row, reasons))
+
+    if not ranked:
+        note = "no filter matched; full library returned"
+        if knee_friendly:
+            note += "; obvious knee-stress exercises excluded"
+        return {
+            "exercises": [
+                {**row, "matched": "no structured filter matched"}
+                for row in eligible_rows
+                if not knee_friendly or not _is_knee_stress_exercise(row)
+            ],
+            "note": note,
+        }
+    if requested_fields and any(item[0] == requested_fields for item in ranked):
+        ranked = [item for item in ranked if item[0] == requested_fields]
+    ranked.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    note = "ranked by structured library fields"
+    if knee_friendly:
+        note += "; obvious knee-stress exercises excluded"
+    return {
+        "exercises": [{**row, "matched": "; ".join(reasons)} for _, _, _, row, reasons in ranked[:limit]],
+        "note": note,
+    }
+
+
 def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[Any]]]:
     """Build tenant-bound coach tools; none accepts a user identifier."""
     async def set_display_name_tool(args):
@@ -1615,8 +1747,8 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
         if unknown: raise MacroError("Plan exercises must come from workout_library: " + ", ".join(unknown))
         return {"plan": await store_client().put_workout_plan(plan)}
     async def library_tool(args):
-        query = str(args["query"]).strip().casefold(); rows = await store_client().fetch_workout_library()
-        return {"exercises": [row for row in rows if not query or query in json.dumps(row).casefold()][:50]}
+        rows = await store_client().fetch_workout_library()
+        return search_workout_library(rows, str(args["query"]))
     async def lookup_food_tool(args):
         current_user_id()  # fail closed: only run inside an authenticated tenant context
         found = await food_lookup.resolve_food(str(args["query"]))

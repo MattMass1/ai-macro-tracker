@@ -1812,9 +1812,11 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
                 if name:
                     canonical_rotation.append(str(name))
                     sessions_by_name[str(name)] = entry
-        if not canonical_rotation and isinstance(raw_plan.get("days"), dict):
-            canonical_rotation = list(raw_plan["days"].keys())
-        days_raw = raw_plan.get("days", {})
+        if not canonical_rotation:
+            days_src = raw_plan.get("days") or raw_plan.get("workouts")
+            if isinstance(days_src, dict):
+                canonical_rotation = list(days_src.keys())
+        days_raw = raw_plan.get("days", raw_plan.get("workouts"))
         if not isinstance(days_raw, dict):
             days_raw = {}
         for name, session in sessions_by_name.items():

@@ -133,26 +133,30 @@ private struct InlineExerciseVideo: View {
     let url: URL
     @State private var player: AVPlayer?
     @State private var isPlaying = false
+    @State private var gifImage: UIImage?
+    @State private var gifFailed = false
 
     private var isGif: Bool { url.pathExtension.lowercased() == "gif" }
 
     var body: some View {
         Group {
             if isGif {
-                // ExerciseDB "videos" are animated GIFs — render as an image,
-                // auto-playing. AVPlayer cannot play GIFs.
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().aspectRatio(contentMode: .fit)
-                    case .failure:
+                // ExerciseDB "videos" are animated GIFs — decode frames and
+                // build an animated UIImage (AsyncImage only shows frame 1).
+                Group {
+                    if let gifImage {
+                        Image(uiImage: gifImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                    } else if gifFailed {
                         playButtonPlaceholder
-                    default:
+                    } else {
                         ProgressView().tint(.white)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Theme.ink)
+                .task(id: url) { await loadGif() }
             } else {
                 ZStack {
                     Theme.ink
@@ -169,6 +173,21 @@ private struct InlineExerciseVideo: View {
         .onDisappear {
             player?.pause()
             isPlaying = false
+        }
+    }
+
+    private func loadGif() async {
+        // If the GIF already loaded, don't reload.
+        guard gifImage == nil, !gifFailed else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            if let animated = UIImage.gif(data: data) {
+                gifImage = animated
+            } else {
+                gifFailed = true
+            }
+        } catch {
+            gifFailed = true
         }
     }
 

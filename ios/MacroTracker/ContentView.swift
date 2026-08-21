@@ -5,9 +5,6 @@ struct ContentView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab = 1  // Coach home
-    @State private var showManualMeal = false
-    @State private var showWorkoutLogger = false
-    @State private var scanFoodTrigger = 0
 
     init(initialTab: Int = 1) {
         _selectedTab = State(initialValue: initialTab)
@@ -19,7 +16,7 @@ struct ContentView: View {
                 TabView(selection: $selectedTab) {
                     NavigationStack { WorkoutsView() }
                         .tag(0)
-                    NavigationStack { ChatLogView(scanFoodTrigger: scanFoodTrigger) }
+                    NavigationStack { ChatLogView() }
                         .tag(1)
                     NavigationStack { TodayView(selectedTab: $selectedTab) }
                         .tag(2)
@@ -27,23 +24,6 @@ struct ContentView: View {
                         .tag(3)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
-
-                if selectedTab != 1 {
-                    AddBarView(
-                        selectedTab: selectedTab,
-                        onLogMeal: { showManualMeal = true },
-                        onLogWorkout: { showWorkoutLogger = true },
-                        onScanFood: {
-                            selectedTab = 1
-                            scanFoodTrigger += 1
-                        },
-                        onAskCoach: { selectedTab = 1 }
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                    .padding(.bottom, geometry.safeAreaInsets.bottom + 16)
-                    .transition(.scale(scale: 0.9).combined(with: .opacity))
-                    .zIndex(1)
-                }
 
                 if let toast = store.toast {
                     Label(toast, systemImage: "checkmark.circle.fill")
@@ -61,8 +41,6 @@ struct ContentView: View {
         .animation(.spring(response: 0.38, dampingFraction: 0.82), value: selectedTab)
         .onChange(of: selectedTab) { _, _ in dismissKeyboard() }
         .task { await store.loadAll() }
-        .sheet(isPresented: $showManualMeal) { ManualFoodView() }
-        .sheet(isPresented: $showWorkoutLogger) { WorkoutLoggerView() }
         .onChange(of: scenePhase) { _, phase in
             // Reload when the app returns to foreground so the day rolls over
             // even if it was open across midnight (or slept for hours).

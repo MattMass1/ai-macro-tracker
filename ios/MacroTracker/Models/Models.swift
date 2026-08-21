@@ -134,6 +134,31 @@ struct LibraryExercise: Codable, Identifiable, Hashable {
 
 struct LibraryPayload: Codable { var exercises: [LibraryExercise] }
 
+/// Write payload for POST /api/plan. Matches `domain.validate_workout_plan`.
+struct WorkoutPlanWrite: Encodable, Equatable {
+    struct Day: Encodable, Equatable {
+        struct Exercise: Encodable, Equatable {
+            var name: String
+            var sets: Int
+            var reps: String
+            var restSec: Int
+            var swaps: [String]?
+        }
+        var label: String
+        var exercises: [Exercise]
+    }
+
+    var version: Int
+    var rotation: [String]
+    var daysPerWeek: Int
+    var days: [String: Day]
+    var notes: String?
+}
+
+struct SavePlanPayload: Decodable, Equatable {
+    var warnings: [String]?
+}
+
 struct WorkoutStatsPayload: Codable {
     struct Today: Codable { var date: String; var entries: Int; var exercises: [ExerciseSummary] }
     struct ExerciseSummary: Codable, Identifiable { var id: String { name }; var name: String; var sets: Int; var weight: String; var reps: String }

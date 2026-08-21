@@ -153,6 +153,18 @@ final class AppStore: ObservableObject {
     }
 
     func lastWorkout(_ exercise: String) async -> LastWorkoutPayload? { try? await api.lastWorkout(exercise) }
+    func savePlan(_ plan: WorkoutPlanWrite, reportError: Bool = true) async -> Bool {
+        let session = sessionGeneration
+        do {
+            _ = try await api.savePlan(plan)
+            guard session == sessionGeneration else { return true }
+            await loadWorkoutData()
+            return true
+        } catch {
+            if reportError { present(error, session: session) }
+            return false
+        }
+    }
     func chat(_ message: String, metrics: ChatMetrics? = nil) async throws -> ChatReply {
         try await api.chat(message, metrics: metrics)
     }

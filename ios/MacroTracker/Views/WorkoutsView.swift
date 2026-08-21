@@ -99,7 +99,7 @@ enum WorkoutSessionCompletions {
     }
 }
 
-private enum CanonicalWorkoutType {
+enum CanonicalWorkoutType {
     static let ordered = ["Push", "Pull", "Legs", "Abs", "Cardio", "Full Body"]
     static let all = ordered + ["Rest"]
 
@@ -125,7 +125,7 @@ private struct TodaysSessionCard: View {
     let onAddMore: () -> Void
     @State private var exercises: [String]
     @State private var completed: Set<String>
-    @State private var library: [LibraryExercise] = []
+    @State private var swapTarget: (index: Int, name: String)?
 
     init(
         session: WorkoutPlanPayload.PlannedDay,
@@ -176,16 +176,7 @@ private struct TodaysSessionCard: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        Menu {
-                            let swaps = swaps(for: name)
-                            if swaps.isEmpty {
-                                Text("No swaps available")
-                            } else {
-                                ForEach(swaps, id: \.self) { swap in
-                                    Button(swap) { swapExercise(at: index, from: name, to: swap) }
-                                }
-                            }
-                        } label: {
+                        Button { onSwap(name, index) } label: {
                             Text("SWAP").font(.caption2.weight(.bold)).tracking(0.8).foregroundStyle(Theme.accent)
                         }
                     }
@@ -201,14 +192,26 @@ private struct TodaysSessionCard: View {
         .appCard()
         .task {
             WorkoutSessionCompletions.pruneOld()
-            if let payload = try? await APIClient.shared.library() {
-                library = payload.exercises
+        }
+        .sheet(item: Binding(
+            get: { swapTarget.map { SwapTarget(index: $0.index, name: $0.name) } },
+            set: { swapTarget = $0.map { (index: $0.index, name: $0.name) } }
+        )) { target in
+            ExerciseLibraryView { selection in
+                swapExercise(at: target.index, from: target.name, to: selection.name)
+                swapTarget = nil
             }
         }
     }
 
-    private func swaps(for name: String) -> [String] {
-        library.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.swaps ?? []
+    private struct SwapTarget: Identifiable {
+        let index: Int
+        let name: String
+        var id: String { "\(index)|\(name)" }
+    }
+
+    private func onSwap(_ name: String, _ index: Int) {
+        swapTarget = (index: index, name: name)
     }
 
     private func toggle(_ name: String) {
@@ -237,10 +240,26 @@ struct ExerciseLibraryView: View {
     }
 
     @Environment(\.dismiss) private var dismiss
-    let onSelect: (WorkoutLoggerSelection) -> Void
+    private let allowsMultipleSelection: Bool
+    private let onSelect: ((WorkoutLoggerSelection) -> Void)?
+    private let onConfirmMultiple: (([LibraryExercise]) -> Void)?
     @State private var exercises: [LibraryExercise] = []
     @State private var search = ""
     @State private var isLoading = true
+    @State private var selectedIDs: Set<String> = []
+    @State private var selectedOrder: [LibraryExercise] = []
+
+    init(onSelect: @escaping (WorkoutLoggerSelection) -> Void) {
+        self.allowsMultipleSelection = false
+        self.onSelect = onSelect
+        self.onConfirmMultiple = nil
+    }
+
+    init(allowsMultipleSelection: Bool, onConfirm: @escaping ([LibraryExercise]) -> Void) {
+        self.allowsMultipleSelection = allowsMultipleSelection
+        self.onSelect = nil
+        self.onConfirmMultiple = onConfirm
+    }
 
     private var filtered: [LibraryExercise] {
         guard !search.isEmpty else { return exercises }
@@ -252,7 +271,8 @@ struct ExerciseLibraryView: View {
     }
 
     private var groupedExercises: [SectionGroup] {
-        let grouped = Dictionary(grouping: filtered) {
+        let visible = allowsMultipleSelection ? filtered.filter { !selectedIDs.contains($0.id) } : filtered
+        let grouped = Dictionary(grouping: visible) {
             CanonicalWorkoutType.value(for: $0.workoutType, muscleGroups: $0.muscleGroup)
         }
         return CanonicalWorkoutType.ordered.compactMap { type in
@@ -270,22 +290,20 @@ struct ExerciseLibraryView: View {
                     ContentUnavailableView("Exercise library unavailable", systemImage: "dumbbell")
                 } else {
                     List {
+                        if allowsMultipleSelection, !selectedOrder.isEmpty {
+                            Section("Selected") {
+                                ForEach(selectedOrder) { exercise in
+                                    exerciseRow(exercise, type: CanonicalWorkoutType.value(
+                                        for: exercise.workoutType,
+                                        muscleGroups: exercise.muscleGroup
+                                    ))
+                                }
+                            }
+                        }
                         ForEach(groupedExercises) { group in
                             Section(group.type) {
                                 ForEach(group.exercises) { exercise in
-                                    Button { onSelect(.init(
-                                        type: group.type,
-                                        exercise: exercise.name,
-                                        muscleGroup: exercise.muscleGroup.first,
-                                        equipment: exercise.equipment.isEmpty ? nil : exercise.equipment
-                                    )) } label: {
-                                        VStack(alignment: .leading, spacing: 3) {
-                                            Text(exercise.name).foregroundStyle(Theme.ink)
-                                            Text([exercise.muscleGroup.joined(separator: ", "), exercise.equipment]
-                                                .filter { !$0.isEmpty }.joined(separator: " · "))
-                                                .font(.caption).foregroundStyle(Theme.muted)
-                                        }
-                                    }
+                                    exerciseRow(exercise, type: group.type)
                                 }
                             }
                         }
@@ -295,9 +313,21 @@ struct ExerciseLibraryView: View {
                 }
             }
             .background(Theme.canvas)
-            .navigationTitle("Add exercise")
+            .navigationTitle(allowsMultipleSelection ? "Pick exercises" : "Add exercise")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                if allowsMultipleSelection {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button(selectedOrder.isEmpty ? "Use these" : "Use \(selectedOrder.count)") {
+                            onConfirmMultiple?(selectedOrder)
+                            dismiss()
+                        }
+                        .fontWeight(.semibold)
+                        .disabled(selectedOrder.isEmpty)
+                    }
+                }
+            }
         }
         .task {
             if let payload = try? await APIClient.shared.library() {
@@ -305,6 +335,84 @@ struct ExerciseLibraryView: View {
             }
             isLoading = false
         }
+    }
+
+    private func exerciseRow(_ exercise: LibraryExercise, type: String) -> some View {
+        Button { tap(exercise, type: type) } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(exercise.name).foregroundStyle(Theme.ink)
+                    Text([exercise.muscleGroup.joined(separator: ", "), exercise.equipment]
+                        .filter { !$0.isEmpty }.joined(separator: " · "))
+                        .font(.caption).foregroundStyle(Theme.muted)
+                }
+                Spacer(minLength: 0)
+                if allowsMultipleSelection {
+                    Image(systemName: selectedIDs.contains(exercise.id) ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .foregroundStyle(selectedIDs.contains(exercise.id) ? Theme.accent : Theme.muted)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func tap(_ exercise: LibraryExercise, type: String) {
+        if allowsMultipleSelection {
+            toggle(exercise)
+            return
+        }
+        onSelect?(.init(
+            type: type,
+            exercise: exercise.name,
+            muscleGroup: exercise.muscleGroup.first,
+            equipment: exercise.equipment.isEmpty ? nil : exercise.equipment
+        ))
+    }
+
+    private func toggle(_ exercise: LibraryExercise) {
+        if selectedIDs.contains(exercise.id) {
+            selectedIDs.remove(exercise.id)
+            selectedOrder.removeAll { $0.id == exercise.id }
+        } else {
+            selectedIDs.insert(exercise.id)
+            selectedOrder.append(exercise)
+        }
+    }
+}
+
+extension WorkoutPlanWrite {
+    static func fromPickedExercises(_ exercises: [LibraryExercise]) -> WorkoutPlanWrite? {
+        guard !exercises.isEmpty else { return nil }
+        let grouped = Dictionary(grouping: exercises) { exercise -> String in
+            let type = CanonicalWorkoutType.value(for: exercise.workoutType, muscleGroups: exercise.muscleGroup)
+            return type == "Rest" ? "Full Body" : type
+        }
+        let rotation = CanonicalWorkoutType.ordered.filter { grouped[$0] != nil }
+        guard !rotation.isEmpty else { return nil }
+        var days: [String: Day] = [:]
+        for type in rotation {
+            let items = Array((grouped[type] ?? []).prefix(30))
+            days[type] = Day(
+                label: type,
+                exercises: items.map { exercise in
+                    Day.Exercise(
+                        name: exercise.name,
+                        sets: 3,
+                        reps: "8-12",
+                        restSec: 90,
+                        swaps: exercise.swaps.isEmpty ? nil : exercise.swaps
+                    )
+                }
+            )
+        }
+        return WorkoutPlanWrite(
+            version: 1,
+            rotation: rotation,
+            daysPerWeek: min(7, max(1, rotation.count)),
+            days: days
+        )
     }
 }
 

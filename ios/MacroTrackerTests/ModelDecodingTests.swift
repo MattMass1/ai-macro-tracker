@@ -187,4 +187,58 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertEqual(reply.widget?.exercise?.displayName, "Exercise")
         XCTAssertNil(reply.widget?.exercise?.videoURL)
     }
+
+    func testWorkoutPlanWriteGroupsByTypeAndEncodesSnakeCase() throws {
+        let plan = try XCTUnwrap(WorkoutPlanWrite.fromPickedExercises([
+            LibraryExercise(
+                name: "Bench Press",
+                muscleGroup: ["Chest"],
+                workoutType: "Push",
+                equipment: "Barbell",
+                difficulty: "Intermediate",
+                swaps: ["Dumbbell Press"]
+            ),
+            LibraryExercise(
+                name: "Back Squat",
+                muscleGroup: ["Quads"],
+                workoutType: "Legs",
+                equipment: "Barbell",
+                difficulty: "Intermediate",
+                swaps: []
+            ),
+        ]))
+        XCTAssertEqual(plan.version, 1)
+        XCTAssertEqual(plan.rotation, ["Push", "Legs"])
+        XCTAssertEqual(plan.daysPerWeek, 2)
+        XCTAssertEqual(plan.days["Push"]?.exercises.first?.name, "Bench Press")
+        XCTAssertEqual(plan.days["Legs"]?.exercises.first?.name, "Back Squat")
+        XCTAssertEqual(plan.days["Push"]?.exercises.first?.sets, 3)
+        XCTAssertEqual(plan.days["Push"]?.exercises.first?.reps, "8-12")
+        XCTAssertEqual(plan.days["Push"]?.exercises.first?.restSec, 90)
+        XCTAssertEqual(plan.days["Push"]?.exercises.first?.swaps, ["Dumbbell Press"])
+        XCTAssertNil(plan.days["Legs"]?.exercises.first?.swaps)
+
+        let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
+        let json = try JSONSerialization.jsonObject(with: encoder.encode(plan)) as! [String: Any]
+        XCTAssertEqual(json["version"] as? Int, 1)
+        XCTAssertEqual(json["days_per_week"] as? Int, 2)
+        XCTAssertEqual(json["rotation"] as? [String], ["Push", "Legs"])
+        let push = try XCTUnwrap((json["days"] as? [String: Any])?["Push"] as? [String: Any])
+        let exercise = try XCTUnwrap((push["exercises"] as? [[String: Any]])?.first)
+        XCTAssertEqual(exercise["name"] as? String, "Bench Press")
+        XCTAssertEqual(exercise["rest_sec"] as? Int, 90)
+        XCTAssertEqual(exercise["sets"] as? Int, 3)
+        XCTAssertEqual(exercise["reps"] as? String, "8-12")
+    }
+
+    func testWorkoutPlanWriteReturnsNilForEmptySelection() {
+        XCTAssertNil(WorkoutPlanWrite.fromPickedExercises([]))
+    }
+
+    func testSavePlanPayloadDecodesWarnings() throws {
+        let json = #"{"plan":{"version":1},"warnings":["Exercise is not in workout_library: Foo"]}"#.data(using: .utf8)!
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let payload = try decoder.decode(SavePlanPayload.self, from: json)
+        XCTAssertEqual(payload.warnings, ["Exercise is not in workout_library: Foo"])
+    }
 }

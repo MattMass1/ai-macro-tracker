@@ -7,6 +7,7 @@ struct ChatMessage: Identifiable {
     let role: Role
     let text: String
     var widget: ChatWidget? = nil
+    var showsExercisePicker = false
 
     enum Role { case user, assistant }
 }
@@ -37,8 +38,18 @@ struct ChatLogView: View {
     @State private var showExerciseLibrary = false
     @State private var swapTargetMessageId: UUID?
     @State private var pendingSwap: WorkoutLoggerSelection?
+    @State private var showOnboardingPickerSheet = false
+    @State private var pendingOnboardingMetrics: PendingOnboardingMetrics?
+    @State private var didSubmitOnboardingMetrics = false
+    @State private var didOfferExercisePicker = false
+    @State private var didCompleteExercisePicker = false
     @State private var handledScanFoodTrigger = 0
     @FocusState private var inputFocused: Bool
+
+    private struct PendingOnboardingMetrics {
+        let summary: String
+        let metrics: ChatMetrics
+    }
 
     var body: some View {
         ZStack { Theme.canvas.ignoresSafeArea()
@@ -73,6 +84,13 @@ struct ChatLogView: View {
                                                 swapTargetMessageId = message.id
                                                 showExerciseLibrary = true
                                             }
+                                        )
+                                    }
+                                    if message.role == .assistant, message.showsExercisePicker {
+                                        ExercisePickerPromptCard(
+                                            isSaving: isSending,
+                                            onChoose: { showOnboardingPickerSheet = true },
+                                            onSkip: { Task { await skipExercisePicker() } }
                                         )
                                     }
                                 }
@@ -111,6 +129,12 @@ struct ChatLogView: View {
             ExerciseLibraryView { selection in
                 pendingSwap = selection
                 showExerciseLibrary = false
+            }
+        }
+        .sheet(isPresented: $showOnboardingPickerSheet) {
+            ExerciseLibraryView(allowsMultipleSelection: true) { exercises in
+                showOnboardingPickerSheet = false
+                Task { await confirmOnboardingExercises(exercises) }
             }
         }
         .sheet(isPresented: $showCamera) { CameraPicker(image: $image) }
@@ -222,6 +246,7 @@ struct ChatLogView: View {
                 // The coach can log food or write targets/plan on any turn.
                 await store.loadDay()
                 if response.hasPlan == true || response.hasTargets == true { await store.loadWorkoutData() }
+                maybeOfferExercisePicker(after: message, reply: response)
                 return true
             } catch let error as APIError where error.status == 429 {
                 messages.append(ChatMessage(role: .assistant, text: "You're at today's limit, ask Matt to raise it."))
@@ -242,18 +267,115 @@ struct ChatLogView: View {
 
     private func submitMetrics(fields: [MetricsField], values: MetricsFieldValues) async -> Bool {
         let summary = metricsSummary(fields: fields, values: values)
-        return await sendChat(summary, metrics: ChatMetrics(
-            heightCm: values.numbers["height_cm"],
-            weightKg: values.numbers["weight_kg"],
-            goalWeightKg: values.numbers["goal_weight_kg"],
-            age: values.numbers["age"].map { Int($0.rounded()) },
-            activityLevel: values.texts["activity_level"]
-        ))
+        pendingOnboardingMetrics = PendingOnboardingMetrics(
+            summary: summary,
+            metrics: ChatMetrics(
+                heightCm: values.numbers["height_cm"],
+                weightKg: values.numbers["weight_kg"],
+                goalWeightKg: values.numbers["goal_weight_kg"],
+                age: values.numbers["age"].map { Int($0.rounded()) },
+                activityLevel: values.texts["activity_level"]
+            )
+        )
+        didSubmitOnboardingMetrics = true
+        offerExercisePicker(
+            prompt: "Got your numbers. Pick the exercises you want in the plan.",
+            presentSheet: true
+        )
+        return true
     }
 
     private func dismissWidget(_ id: UUID) {
         guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
         messages[index].widget = nil
+    }
+
+    private func maybeOfferExercisePicker(after userMessage: String, reply: ChatReply) {
+        guard !didCompleteExercisePicker, !didOfferExercisePicker else { return }
+        if userMessage.localizedCaseInsensitiveContains("these are my exercises:") { return }
+        if looksLikeMetricsMessage(userMessage) { didSubmitOnboardingMetrics = true }
+        // `loadDay()` may have just written targets, which flips `needsOnboarding` off.
+        let stillOnboarding = needsOnboarding || auth.freshClaim || didSubmitOnboardingMetrics
+        guard stillOnboarding else { return }
+        let basicsReady = didSubmitOnboardingMetrics || reply.hasTargets == true
+        guard basicsReady else { return }
+        offerExercisePicker(
+            prompt: "Pick the exercises you want in the plan.",
+            presentSheet: true
+        )
+    }
+
+    private func offerExercisePicker(prompt: String, presentSheet: Bool) {
+        guard !didCompleteExercisePicker else { return }
+        didOfferExercisePicker = true
+        if !messages.contains(where: { $0.showsExercisePicker }) {
+            messages.append(ChatMessage(role: .assistant, text: prompt, showsExercisePicker: true))
+        }
+        if presentSheet { showOnboardingPickerSheet = true }
+    }
+
+    private func dismissExercisePickerCard() {
+        if let index = messages.firstIndex(where: { $0.showsExercisePicker }) {
+            messages[index].showsExercisePicker = false
+        }
+    }
+
+    private func skipExercisePicker() async {
+        didCompleteExercisePicker = true
+        showOnboardingPickerSheet = false
+        dismissExercisePickerCard()
+        if let pending = pendingOnboardingMetrics {
+            pendingOnboardingMetrics = nil
+            await sendChat(pending.summary, metrics: pending.metrics)
+        }
+    }
+
+    private func confirmOnboardingExercises(_ exercises: [LibraryExercise]) async {
+        guard !exercises.isEmpty else { return }
+        didCompleteExercisePicker = true
+        dismissExercisePickerCard()
+        let plan = WorkoutPlanWrite.fromPickedExercises(exercises)
+        var savedOnServer = false
+        if let plan {
+            savedOnServer = await store.savePlan(plan, reportError: false)
+        }
+        let exerciseLine = onboardingExerciseMessage(exercises: exercises, savedOnServer: savedOnServer)
+        var message = exerciseLine
+        var metrics: ChatMetrics?
+        if let pending = pendingOnboardingMetrics {
+            let combined = pending.summary + ". " + exerciseLine
+            message = combined.count <= 1000
+                ? combined
+                : pending.summary + ". I picked my exercises in the library picker. Keep that plan."
+            metrics = pending.metrics
+            pendingOnboardingMetrics = nil
+        }
+        await sendChat(message, metrics: metrics)
+        // Coach may auto-assign on this turn; write the user's picks last so they win.
+        if savedOnServer, let plan {
+            _ = await store.savePlan(plan, reportError: false)
+        }
+    }
+
+    private func onboardingExerciseMessage(exercises: [LibraryExercise], savedOnServer: Bool) -> String {
+        let names = exercises.map(\.name)
+        let preview = names.prefix(8).joined(separator: ", ")
+        if savedOnServer {
+            if names.count <= 8 {
+                return "These are my exercises: \(preview). Keep this plan."
+            }
+            return "These are my \(names.count) exercises, including \(preview). Keep the plan I saved."
+        }
+        if names.count <= 8 {
+            return "These are my exercises: \(preview). Use these for my workout plan."
+        }
+        return "These are my exercises: \(preview), and \(names.count - 8) more. Use these for my workout plan."
+    }
+
+    private func looksLikeMetricsMessage(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        if lower.hasPrefix("my metrics:") { return true }
+        return lower.contains("height") && lower.contains("weight")
     }
 
     private func applyExerciseSwap(messageId: UUID, selection: WorkoutLoggerSelection) {

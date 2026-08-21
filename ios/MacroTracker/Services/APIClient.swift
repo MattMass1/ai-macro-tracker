@@ -58,6 +58,7 @@ final class APIClient {
     func exercises() async throws -> ExercisesPayload { try await get("api/exercises") }
     func library() async throws -> LibraryPayload { try await get("api/library") }
     func plan() async throws -> WorkoutPlanPayload { try await get("api/plan") }
+    func savePlan(_ body: WorkoutPlanWrite) async throws -> SavePlanPayload { try await send("api/plan", body: body) }
     func workoutStats() async throws -> WorkoutStatsPayload { try await get("api/workout-stats") }
     func workouts(_ date: String) async throws -> WorkoutsPayload { try await get("api/workouts/\(encoded(date))") }
     func lastWorkout(_ exercise: String) async throws -> LastWorkoutPayload { try await get("api/workouts/last?exercise=\(encoded(exercise))") }

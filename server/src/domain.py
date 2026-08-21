@@ -426,6 +426,11 @@ def validate_workout_plan(plan: Any) -> dict[str, Any]:
         raise ValueError("plan.notes must be a string")
     if notes is not None:
         clean_plan["notes"] = notes
+    session_size = plan.get("session_size")
+    if session_size is not None and not isinstance(session_size, str):
+        raise ValueError("plan.session_size must be a string")
+    if session_size is not None:
+        clean_plan["session_size"] = session_size
     return clean_plan
 
 

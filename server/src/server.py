@@ -1869,9 +1869,12 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
     async def get_today_session_tool(_args):
         try:
             index, today_type, exercises, done = await _resolve_today_session()
+            plan = await store_client().fetch_workout_plan()
+            session_size = str(plan.get("session_size") or "") if isinstance(plan, dict) else ""
         except MacroError:
             return {"today_type": None, "exercises": [], "done": False, "has_plan": False}
-        return {"today_type": today_type, "exercises": exercises, "done": done, "has_plan": True}
+        return {"today_type": today_type, "exercises": exercises, "done": done,
+                "has_plan": True, "session_size": session_size or None}
     async def complete_today_session_tool(_args):
         index, today_type, exercises, already_done = await _resolve_today_session()
         await store_client().put_session_day_state(index, domain.effective_date())

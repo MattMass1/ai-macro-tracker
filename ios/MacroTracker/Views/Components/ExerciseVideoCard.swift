@@ -134,28 +134,34 @@ private struct InlineExerciseVideo: View {
     @State private var player: AVPlayer?
     @State private var isPlaying = false
 
+    private var isGif: Bool { url.pathExtension.lowercased() == "gif" }
+
     var body: some View {
-        ZStack {
-            Theme.ink
-            if isPlaying, let player {
-                VideoPlayer(player: player)
-            } else {
-                Button(action: startPlayback) {
-                    ZStack {
-                        Circle()
-                            .fill(Color.white.opacity(0.92))
-                            .frame(width: 48, height: 48)
-                            .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 18, weight: .bold))
-                            .foregroundStyle(Theme.accent)
-                            .offset(x: 2)
+        Group {
+            if isGif {
+                // ExerciseDB "videos" are animated GIFs — render as an image,
+                // auto-playing. AVPlayer cannot play GIFs.
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image.resizable().aspectRatio(contentMode: .fit)
+                    case .failure:
+                        playButtonPlaceholder
+                    default:
+                        ProgressView().tint(.white)
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Play video")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Theme.ink)
+            } else {
+                ZStack {
+                    Theme.ink
+                    if isPlaying, let player {
+                        VideoPlayer(player: player)
+                    } else {
+                        playButtonPlaceholder
+                    }
+                }
             }
         }
         .aspectRatio(16 / 9, contentMode: .fit)
@@ -164,6 +170,25 @@ private struct InlineExerciseVideo: View {
             player?.pause()
             isPlaying = false
         }
+    }
+
+    private var playButtonPlaceholder: some View {
+        Button(action: startPlayback) {
+            ZStack {
+                Circle()
+                    .fill(Color.white.opacity(0.92))
+                    .frame(width: 48, height: 48)
+                    .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
+                Image(systemName: "play.fill")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(Theme.accent)
+                    .offset(x: 2)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Play video")
     }
 
     private func startPlayback() {

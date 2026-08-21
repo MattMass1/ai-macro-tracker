@@ -327,6 +327,8 @@ def validate_workout_plan(plan: Any) -> dict[str, Any]:
         "rotation": list(rotation),
     }
     days_per_week = plan.get("days_per_week")
+    if days_per_week is None:
+        days_per_week = len(rotation)  # default: one day per rotation entry
     if isinstance(days_per_week, bool) or not isinstance(days_per_week, int):
         raise ValueError("plan.days_per_week must be an integer")
     if not 1 <= days_per_week <= 7:
@@ -362,14 +364,20 @@ def validate_workout_plan(plan: Any) -> dict[str, Any]:
             if not isinstance(exercise.get("name"), str) or not exercise["name"].strip():
                 raise ValueError(f"{exercise_prefix}.name must be a non-empty string")
             sets = exercise.get("sets")
+            if sets is None:
+                sets = 3  # default: 3 sets
             if (
                 isinstance(sets, bool)
                 or not isinstance(sets, int)
                 or not 1 <= sets <= 10
             ):
                 raise ValueError(f"{exercise_prefix}.sets must be an integer between 1 and 10")
-            if not isinstance(exercise.get("reps"), str) or not exercise["reps"].strip():
-                raise ValueError(f"{exercise_prefix}.reps must be a non-empty string")
+            reps = exercise.get("reps")
+            if not isinstance(reps, str) or not reps.strip():
+                if isinstance(reps, (int, float)):
+                    reps = str(int(reps))  # coerce 12 -> "12"
+                else:
+                    raise ValueError(f"{exercise_prefix}.reps must be a non-empty string")
             rest_sec = exercise.get("rest_sec")
             if (
                 isinstance(rest_sec, bool)
@@ -391,7 +399,7 @@ def validate_workout_plan(plan: Any) -> dict[str, Any]:
             clean_exercise = {
                 "name": exercise["name"].strip(),
                 "sets": sets,
-                "reps": exercise["reps"].strip(),
+                "reps": reps.strip(),
                 "rest_sec": rest_sec,
             }
             if swaps is not None:

@@ -67,6 +67,12 @@ BANANA_HIT = {
 }
 
 
+@pytest.fixture(autouse=True)
+def disable_live_food_classifier(monkeypatch):
+    """Keep cascade tests network-free unless they explicitly mock classification."""
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+
+
 def mock_transport(monkeypatch, handler):
     """Route every food_lookup HTTP call through a MockTransport, recording requests."""
     calls = []
@@ -145,6 +151,104 @@ async def test_usda_hit_parses_macros_and_source(monkeypatch):
     calls = mock_transport(monkeypatch, handler)
     assert await food_lookup.resolve_food("banana") == BANANA_HIT
     assert len(calls) == 1  # OpenFoodFacts is never contacted on a USDA hit
+
+
+@pytest.mark.parametrize(
+    ("classification", "expected"),
+    [
+        ("whole", ["usda"]),
+        ("branded", ["off"]),
+        ("restaurant", ["tavily"]),
+        ("unknown", ["usda"]),
+    ],
+)
+async def test_classifier_routes_matching_tier_first(monkeypatch, classification, expected):
+    calls = []
+
+    async def fake_classify(_query):
+        return classification
+
+    def search(name):
+        async def fake(_query):
+            calls.append(name)
+            return BANANA_HIT
+        return fake
+
+    monkeypatch.setattr(food_lookup, "classify_food", fake_classify)
+    monkeypatch.setattr(food_lookup, "search_usda", search("usda"))
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", search("off"))
+    monkeypatch.setattr(food_lookup, "search_tavily", search("tavily"))
+
+    assert await food_lookup.resolve_food("food") == BANANA_HIT
+    assert calls == expected
+
+
+async def test_classifier_without_token_degrades_to_unknown(monkeypatch):
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+    assert await food_lookup.classify_food("Nutella") == "unknown"
+
+
+async def test_classified_first_tier_miss_runs_complete_fallback(monkeypatch):
+    calls = []
+
+    async def fake_classify(_query):
+        return "restaurant"
+
+    def search(name, result=None):
+        async def fake(_query):
+            calls.append(name)
+            return result
+        return fake
+
+    monkeypatch.setattr(food_lookup, "classify_food", fake_classify)
+    monkeypatch.setattr(food_lookup, "search_usda", search("usda"))
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", search("off", BANANA_HIT))
+    monkeypatch.setattr(food_lookup, "search_tavily", search("tavily"))
+
+    assert await food_lookup.resolve_food("food") == BANANA_HIT
+    assert calls == ["tavily", "usda", "off"]
+
+
+async def test_classification_can_be_disabled(monkeypatch):
+    calls = []
+
+    async def unexpected(_query):
+        raise AssertionError("classifier should not run")
+
+    def search(name, result=None):
+        async def fake(_query):
+            calls.append(name)
+            return result
+        return fake
+
+    monkeypatch.setattr(food_lookup, "classify_food", unexpected)
+    monkeypatch.setattr(food_lookup, "search_usda", search("usda"))
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", search("off", BANANA_HIT))
+    monkeypatch.setattr(food_lookup, "search_tavily", search("tavily"))
+
+    assert await food_lookup.resolve_food("food", classify=False) == BANANA_HIT
+    assert calls == ["usda", "off"]
+
+
+async def test_classifier_failure_uses_original_order(monkeypatch):
+    calls = []
+
+    async def failed_classify(_query):
+        raise httpx.ReadTimeout("slow")
+
+    def search(name, result=None):
+        async def fake(_query):
+            calls.append(name)
+            return result
+        return fake
+
+    monkeypatch.setattr(food_lookup, "classify_food", failed_classify)
+    monkeypatch.setattr(food_lookup, "search_usda", search("usda"))
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", search("off", BANANA_HIT))
+    monkeypatch.setattr(food_lookup, "search_tavily", search("tavily"))
+
+    assert await food_lookup.resolve_food("food") == BANANA_HIT
+    assert calls == ["usda", "off"]
 
 
 async def test_usda_miss_falls_through_to_openfoodfacts(monkeypatch):
@@ -257,6 +361,8 @@ def test_tavily_us_serving_size_with_weight_is_normalized_to_100g():
     })
 
     assert result is not None
+    assert result["serving_size"] == "1 bar (55g)"
+    assert result["macros_per_serving"]["calories"] == 200.0
     macros, _source = food_lookup.portion_from_grams(result, 55)
     assert macros["calories"] == pytest.approx(200.0, abs=0.01)
 
@@ -548,6 +654,44 @@ async def test_food_path_upgrades_parser_estimate_via_free_lookup(monkeypatch):
     assert payload["logged"][0]["name"] == "banana"
 
 
+async def test_food_path_gram_portion_takes_precedence_over_quantity(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    seen = {}
+
+    async def fake_parse(_message):
+        return [{"name": "banana", "calories": 105, "protein": 2,
+                 "carbs": 25, "fat": 1, "fiber": 3, "quantity": 1,
+                 "grams": 100, "meal": "Snack", "note": "ESTIMATE"}], None
+
+    async def fake_resolve(query, *, whole_item=False):
+        assert query == "banana"
+        assert whole_item is False
+        return BANANA_HIT
+
+    async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
+                              meal, day_value, allow_estimate=False, fiber=0):
+        seen.update(calories=calories, protein=protein, carbs=carbs, fat=fat,
+                    fiber=fiber, macro_source=macro_source)
+        return {"logged": {"name": name, "calories": calories, "protein": protein,
+                           "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
+
+    async def fake_day_payload(_day, ensure=None):
+        return {"totals": {"calories": 89}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+
+    response = await srv.api_chat(chat_request({"message": "1 100g banana"}))
+    assert response.status_code == 200
+    assert seen == {
+        **BANANA_HIT["macros_per_100g"],
+        "macro_source": "USDA FDC: 171705 — Bananas, raw, 100 g",
+    }
+
+
 async def test_food_path_keeps_flagged_estimate_on_miss_or_missing_grams(monkeypatch):
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
@@ -585,12 +729,116 @@ async def test_food_path_keeps_flagged_estimate_on_miss_or_missing_grams(monkeyp
     assert seen["calories"] == 300.0
     assert lookups == ["mystery smoothie"]
 
-    # No grams stated: nothing to scale honestly, so no lookup fires at all.
+    # No grams or whole-item intent: nothing can be scaled honestly, so no
+    # additional lookup fires.
     items[0].pop("grams")
     response = await srv.api_chat(chat_request({"message": "smoothie"}))
     assert response.status_code == 200
     assert seen["macro_source"] == "ESTIMATE"
     assert lookups == ["mystery smoothie"]
+
+
+async def test_food_path_upgrades_whole_item_from_serving_panel(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    seen = {}
+    lookup_queries = []
+
+    async def fake_parse(_message):
+        return [{"name": "Barebells", "calories": 210, "protein": 18,
+                 "carbs": 22, "fat": 8, "fiber": 2, "grams": None,
+                 "quantity": 1, "meal": "Snack", "note": "ESTIMATE"}], None
+
+    async def fake_usda(query):
+        lookup_queries.append(("usda", query))
+        return {
+            "name": "Barebells Protein Bar",
+            "macros_per_100g": {
+                "calories": 364,
+                "protein": 36,
+                "carbs": 33,
+                "fat": 15,
+                "fiber": 5,
+            },
+            "source": "USDA FDC: 123456",
+        }
+
+    async def fake_off(query):
+        lookup_queries.append(("off", query))
+        return None
+
+    async def fake_tavily(query):
+        lookup_queries.append(("tavily", query))
+        return food_lookup._tavily_result("1 Barebells", {
+            "title": "Barebells Protein Bar Nutrition",
+            "url": "https://example.com/barebells",
+            "content": (
+                "Serving size 1 bar Calories 200 Protein 20g "
+                "Carbohydrate 18g Fat 8g Fiber 3g"
+            ),
+        })
+
+    async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
+                              meal, day_value, allow_estimate=False, fiber=0):
+        seen.update(calories=calories, macro_source=macro_source)
+        return {"logged": {"name": name, "calories": calories, "protein": protein,
+                           "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
+
+    async def fake_day_payload(_day, ensure=None):
+        return {"totals": {"calories": 200}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(food_lookup, "search_usda", fake_usda)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", fake_off)
+    monkeypatch.setattr(food_lookup, "search_tavily", fake_tavily)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+
+    response = await srv.api_chat(chat_request({"message": "log 1 barebells"}))
+    assert response.status_code == 200
+    assert seen == {
+        "calories": 200.0,
+        "macro_source": "Tavily: https://example.com/barebells",
+    }
+    assert lookup_queries == [
+        ("usda", "Barebells"),
+        ("off", "Barebells"),
+        ("tavily", "1 Barebells"),
+    ]
+
+    async def fake_parse_multiple(_message):
+        return [
+            {"name": "Barebells", "calories": 210, "protein": 18,
+             "carbs": 22, "fat": 8, "fiber": 2, "quantity": 1,
+             "grams": None, "meal": "Snack", "note": "ESTIMATE"},
+            {"name": "cookies", "calories": 180, "protein": 2,
+             "carbs": 28, "fat": 8, "fiber": 1, "quantity": 2,
+             "grams": None, "meal": "Snack", "note": "ESTIMATE"},
+        ], None
+
+    async def fake_resolve_multiple(query, *, whole_item=False):
+        lookup_queries.append((query, whole_item))
+        return None
+
+    lookup_queries.clear()
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse_multiple)
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve_multiple)
+
+    response = await srv.api_chat(
+        chat_request({"message": "log 1 Barebells and 2 cookies"})
+    )
+    assert response.status_code == 200
+    assert lookup_queries == [("Barebells", True)]
+
+
+async def test_whole_item_per_100g_only_keeps_flagged_estimate(monkeypatch):
+    async def fake_resolve(_query):
+        return BANANA_HIT
+
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
+    assert await srv._upgrade_estimate(
+        "mystery bar", None, whole_item=True
+    ) is None
 
 
 async def test_food_path_skips_lookup_for_sourced_items(monkeypatch):

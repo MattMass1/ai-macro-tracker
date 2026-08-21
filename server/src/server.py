@@ -607,8 +607,8 @@ Known foods (values are calories/protein/carbs/fat unless labeled):
 {KNOWN_CHAT_FOODS}
 
 For a food-related message, output ONLY a JSON array with one object per item:
-[{{"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"grams":null,"meal":"Breakfast|Lunch|Dinner|Snack","note":"source"}}]
-Use a matching preset or known-food value when possible. Infer the meal from context and time; default to Snack. Set grams only when the user states the portion weight ("100g chicken" -> 100, "3 oz venison" -> 85, converting oz/lb to grams); leave grams null when no weight is stated — never guess it. For an ambiguous or unknown food, make a reasonable macro estimate and set note exactly to ESTIMATE. Coffee without stated additions is 5 kcal with zero macros. Never add commentary around a food JSON array.
+[{{"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"quantity":null,"grams":null,"meal":"Breakfast|Lunch|Dinner|Snack","note":"source"}}]
+Use a matching preset or known-food value when possible. Infer the meal from context and time; default to Snack. Set quantity to the number of that item the user states ("1 bar" -> 1, "two cookies" -> 2, "a banana" -> 1); otherwise leave quantity null. Set grams only when the user states the portion weight ("100g chicken" -> 100, "3 oz venison" -> 85, converting oz/lb to grams); leave grams null when no weight is stated — never guess it. For an ambiguous or unknown food, make a reasonable macro estimate and set note exactly to ESTIMATE. Coffee without stated additions is 5 kcal with zero macros. Never add commentary around a food JSON array.
 If the message is a greeting, question, or otherwise not asking to log food, output [] followed by one short plain-text reply. Do not invent food items."""
     try:
         payload = {
@@ -628,25 +628,32 @@ If the message is a greeting, question, or otherwise not asking to log food, out
 
 
 async def _upgrade_estimate(
-    name: str, grams: Any
+    name: str, grams: Any, *, whole_item: bool = False
 ) -> tuple[dict[str, float], str] | None:
     """Try the free database cascade before writing a parser ESTIMATE.
 
-    Only a user-stated gram portion can size the database hit — scaling by the
-    parser's estimated calories would be circular. Without usable grams the
-    flagged estimate stands.
+    A user-stated gram portion can size a per-100g hit. An explicitly requested
+    whole item can use a source's per-serving panel directly. Nothing infers a
+    serving from per-100g data alone.
     """
     try:
         portion = float(grams)
     except (TypeError, ValueError):
-        return None
-    if not (0 < portion <= 5000):
+        portion = None
+    if portion is not None and not (0 < portion <= 5000):
+        portion = None
+    if portion is None and not whole_item:
         return None
     try:
-        found = await food_lookup.resolve_food(name)
+        if whole_item and portion is None:
+            found = await food_lookup.resolve_food(name, whole_item=True)
+        else:
+            found = await food_lookup.resolve_food(name)
         if not found:
             return None
-        return food_lookup.portion_from_grams(found, portion)
+        if portion is not None:
+            return food_lookup.portion_from_grams(found, portion)
+        return food_lookup.portion_from_serving(found)
     except Exception:
         logger.exception("Food lookup failed; keeping the estimate")
         return None
@@ -1601,7 +1608,7 @@ async def api_chat(request: Request) -> Any:
         try:
             requested_day = body.get("date")
             day = domain.parse_date(requested_day) if requested_day is not None else domain.effective_date()
-            validated: list[tuple[str, dict[str, float], str, str, Any]] = []
+            validated: list[tuple[str, dict[str, float], str, str, Any, Any]] = []
             for raw in raw_items[:10]:
                 if not isinstance(raw, dict):
                     raise MacroError("I couldn't understand one of those food items. Please rephrase it.")
@@ -1613,19 +1620,34 @@ async def api_chat(request: Request) -> Any:
                 meal_name = domain.normalize_meal(raw.get("meal"))
                 validated.append(
                     (clean_name, macros, str(raw.get("note") or "Chat & Log"),
-                     meal_name, raw.get("grams"))
+                     meal_name, raw.get("grams"), raw.get("quantity"))
                 )
 
             logged: list[dict[str, Any]] = []
             # Free-database upgrade: a parser ESTIMATE becomes a real sourced
-            # entry when the user stated a gram portion and USDA FDC or
-            # OpenFoodFacts knows the food. Bounded so one request cannot fan
-            # out into many external calls.
+            # entry when a stated gram portion can scale per-100g data, or one
+            # whole item can use an explicit serving panel. Bounded so one
+            # request cannot fan out into many external calls.
             lookups_left = 3
-            for clean_name, macros, note, meal_name, grams in validated:
-                if note.strip().upper() == "ESTIMATE" and grams is not None and lookups_left > 0:
+            for clean_name, macros, note, meal_name, grams, quantity in validated:
+                try:
+                    portion = float(grams)
+                except (TypeError, ValueError):
+                    portion = None
+                has_valid_grams = portion is not None and 0 < portion <= 5000
+                try:
+                    whole_item = not has_valid_grams and float(quantity) == 1
+                except (TypeError, ValueError):
+                    whole_item = False
+                if (
+                    note.strip().upper() == "ESTIMATE"
+                    and (grams is not None or whole_item)
+                    and lookups_left > 0
+                ):
                     lookups_left -= 1
-                    upgraded = await _upgrade_estimate(clean_name, grams)
+                    upgraded = await _upgrade_estimate(
+                        clean_name, grams, whole_item=whole_item
+                    )
                     if upgraded:
                         macros, note = upgraded
                 result = await write_meal(

@@ -12,6 +12,12 @@ struct ChatMessage: Identifiable {
 }
 
 struct ChatLogView: View {
+    let scanFoodTrigger: Int
+
+    init(scanFoodTrigger: Int = 0) {
+        self.scanFoodTrigger = scanFoodTrigger
+    }
+
     @EnvironmentObject private var store: AppStore
     @EnvironmentObject private var auth: AuthService
     @State private var messages: [ChatMessage] = []
@@ -31,6 +37,7 @@ struct ChatLogView: View {
     @State private var showExerciseLibrary = false
     @State private var swapTargetMessageId: UUID?
     @State private var pendingSwap: WorkoutLoggerSelection?
+    @State private var handledScanFoodTrigger = 0
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -132,7 +139,11 @@ struct ChatLogView: View {
             analysisGeneration += 1
             Task { await loadPhoto(item) }
         }
-        .onAppear { seedGreeting() }
+        .onChange(of: scanFoodTrigger) { _, _ in handleScanFoodTrigger() }
+        .onAppear {
+            seedGreeting()
+            handleScanFoodTrigger()
+        }
         .confirmationDialog("Sign out?", isPresented: $showSignOutConfirm, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { auth.signOut() }
         } message: {
@@ -322,6 +333,14 @@ struct ChatLogView: View {
     }
 
     private var imageIdentity: ObjectIdentifier? { image.map { ObjectIdentifier($0) } }
+
+    private func handleScanFoodTrigger() {
+        guard scanFoodTrigger > handledScanFoodTrigger else { return }
+        handledScanFoodTrigger = scanFoodTrigger
+        dismissKeyboard()
+        scanMode = .barcode
+        showScanSheet = true
+    }
 
     private func loadPhoto(_ item: PhotosPickerItem?) async {
         guard let item else { return }

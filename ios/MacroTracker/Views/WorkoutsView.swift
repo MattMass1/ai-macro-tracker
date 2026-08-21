@@ -160,26 +160,13 @@ private struct TodaysSessionCard: View {
                     .font(.subheadline).foregroundStyle(Theme.muted)
             } else {
                 ForEach(Array(exercises.enumerated()), id: \.offset) { index, name in
-                    HStack(spacing: 10) {
-                        Button { toggle(name) } label: {
-                            Image(systemName: completed.contains(name) ? "checkmark.circle.fill" : "circle")
-                                .font(.title3)
-                                .foregroundStyle(completed.contains(name) ? Theme.accent : Theme.muted)
-                        }
-                        .buttonStyle(.plain)
-                        Button { onLog(.init(type: session.type, exercise: name)) } label: {
-                            Text(name)
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(completed.contains(name) ? Theme.muted : Theme.ink)
-                                .strikethrough(completed.contains(name))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        Button { onSwap(name, index) } label: {
-                            Text("SWAP").font(.caption2.weight(.bold)).tracking(0.8).foregroundStyle(Theme.accent)
-                        }
-                    }
+                    WorkoutExerciseRow(
+                        name: name,
+                        isCompleted: completed.contains(name),
+                        onToggle: { toggle(name) },
+                        onLog: { onLog(.init(type: session.type, exercise: name)) },
+                        onSwap: { onSwap(name, index) }
+                    )
                     if index < exercises.count - 1 { Divider() }
                 }
             }
@@ -198,7 +185,7 @@ private struct TodaysSessionCard: View {
             set: { swapTarget = $0.map { (index: $0.index, name: $0.name) } }
         )) { target in
             ExerciseLibraryView { selection in
-                swapExercise(at: target.index, from: target.name, to: selection.name)
+                swapExercise(at: target.index, from: target.name, to: selection.exercise)
                 swapTarget = nil
             }
         }
@@ -229,6 +216,42 @@ private struct TodaysSessionCard: View {
 
     private func saveCompletions() {
         WorkoutSessionCompletions.save(completed, date: date, type: session.type)
+    }
+}
+
+private struct WorkoutExerciseRow: View {
+    let name: String
+    let isCompleted: Bool
+    let onToggle: () -> Void
+    let onLog: () -> Void
+    let onSwap: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: onToggle) {
+                Image(systemName: isCompleted ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isCompleted ? Theme.accent : Theme.muted)
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onLog) {
+                Text(name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(isCompleted ? Theme.muted : Theme.ink)
+                    .strikethrough(isCompleted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onSwap) {
+                Text("SWAP")
+                    .font(.caption2.weight(.bold))
+                    .tracking(0.8)
+                    .foregroundStyle(Theme.accent)
+            }
+        }
     }
 }
 

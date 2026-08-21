@@ -1798,8 +1798,54 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
         raw_plan = args["plan"]
         if not isinstance(raw_plan, dict):
             raise MacroError("plan must be a JSON object")
-        versioned_plan = {**raw_plan, "version": domain.WORKOUT_PLAN_VERSION}
-        try: plan = domain.validate_workout_plan(versioned_plan)
+        # --- Adapter: translate the coach's emitted plan shape to the canonical schema ---
+        # The coach may emit rotation as [{name, exercises}] or ["Push",...]; days may be
+        # missing (derived from rotation); field names may vary (rest_seconds vs rest_sec).
+        rotation_raw = raw_plan.get("rotation", raw_plan.get("sessions", []))
+        canonical_rotation: list[str] = []
+        sessions_by_name: dict[str, dict] = {}
+        for entry in rotation_raw:
+            if isinstance(entry, str):
+                canonical_rotation.append(entry)
+            elif isinstance(entry, dict):
+                name = entry.get("name")
+                if name:
+                    canonical_rotation.append(str(name))
+                    sessions_by_name[str(name)] = entry
+        if not canonical_rotation and isinstance(raw_plan.get("days"), dict):
+            canonical_rotation = list(raw_plan["days"].keys())
+        days_raw = raw_plan.get("days", {})
+        if not isinstance(days_raw, dict):
+            days_raw = {}
+        for name, session in sessions_by_name.items():
+            if name not in days_raw:
+                days_raw[name] = session
+        canonical_days: dict[str, dict] = {}
+        for day_name, day in days_raw.items():
+            if not isinstance(day, dict):
+                continue
+            exercises_raw = day.get("exercises", [])
+            exercises = []
+            for ex in exercises_raw:
+                if not isinstance(ex, dict):
+                    continue
+                exercises.append({
+                    "name": ex.get("name"),
+                    "sets": ex.get("sets"),
+                    "reps": ex.get("reps"),
+                    "rest_sec": ex.get("rest_sec", ex.get("rest_seconds")),
+                })
+            canonical_days[day_name] = {"label": day.get("label", str(day_name)), "exercises": exercises}
+        adapted = {
+            "version": domain.WORKOUT_PLAN_VERSION,
+            "rotation": canonical_rotation,
+            "days": canonical_days,
+        }
+        if raw_plan.get("days_per_week") is not None:
+            adapted["days_per_week"] = raw_plan["days_per_week"]
+        if raw_plan.get("notes") is not None:
+            adapted["notes"] = raw_plan["notes"]
+        try: plan = domain.validate_workout_plan(adapted)
         except ValueError as exc: raise MacroError(str(exc)) from None
         library = await store_client().fetch_workout_library()
         by_id = {str(row["id"]): row for row in library if row.get("id") is not None}
@@ -1833,11 +1879,9 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
             return matches[0]
 
         unknown = []
-        raw_days = raw_plan.get("days", {})
+        # Match against the ADAPTED (canonical) days — the coach's raw shape was translated above.
         for day_name, day in plan["days"].items():
-            raw_exercises = raw_days.get(day_name, {}).get("exercises", [])
-            for index, exercise in enumerate(day["exercises"]):
-                raw = raw_exercises[index] if index < len(raw_exercises) else {}
+            for exercise in day["exercises"]:
                 # Prefer the library name match; the id path was a failure mode
                 # (the coach often omits ids). Name matching is exact → longest → ambiguous-reject.
                 match = match_library_name(exercise["name"])

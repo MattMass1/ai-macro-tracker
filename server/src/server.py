@@ -511,6 +511,7 @@ async def write_meal(
 KNOWN_CHAT_FOODS = """Moe's cookie 170 kcal, 2g protein, 23g carbs, 8g fat
 Fairlife 30g shake 150/30/3/2.5
 Barebells 200/20/21/7
+Banana 105/1/27/0
 Rice Krispies Treat 90/1/16/3
 TJ olive oil butter 80/0/0/9
 TJ artisan roll 200/8/38/2
@@ -519,6 +520,26 @@ sweet potato about 86 kcal/100g
 3 large eggs 216/19/1/14
 McNuggets 10pc 410/24/25/25
 Michelob Ultra 95 kcal, 0g protein, 2.6g carbs, 0g fat"""
+
+KNOWN_CHAT_FOOD_NAMES = (
+    "Moe's cookie",
+    "Fairlife 30g shake",
+    "Barebells",
+    "Banana",
+    "Rice Krispies Treat",
+    "TJ olive oil butter",
+    "TJ artisan roll",
+    "93/7 ground beef",
+    "sweet potato",
+    "3 large eggs",
+    "McNuggets 10pc",
+    "Michelob Ultra",
+)
+
+
+def _normalized_food_name(name: str) -> str:
+    """Normalize only case and whitespace for exact food-name matching."""
+    return " ".join(name.split()).casefold()
 
 
 def _extract_chat_items(content: str) -> tuple[list[Any], str | None]:
@@ -590,7 +611,9 @@ async def _post_openai_chat(token: str, payload: dict[str, Any]) -> httpx.Respon
     raise RuntimeError("unreachable")
 
 
-async def parse_chat_message(message: str) -> tuple[list[Any], str | None]:
+async def parse_chat_message(
+    message: str,
+) -> tuple[list[Any], str | None, list[dict[str, Any]]]:
     day = domain.effective_date()
     meals, targets, presets = await asyncio.gather(
         fetch_meals(day), fetch_targets(day), fetch_presets()
@@ -607,24 +630,103 @@ Known foods (values are calories/protein/carbs/fat unless labeled):
 {KNOWN_CHAT_FOODS}
 
 For a food-related message, output ONLY a JSON array with one object per item:
-[{{"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"quantity":null,"grams":null,"meal":"Breakfast|Lunch|Dinner|Snack","note":"source"}}]
-Use a matching preset or known-food value when possible. Infer the meal from context and time; default to Snack. Set quantity to the number of that item the user states ("1 bar" -> 1, "two cookies" -> 2, "a banana" -> 1); otherwise leave quantity null. Set grams only when the user states the portion weight ("100g chicken" -> 100, "3 oz venison" -> 85, converting oz/lb to grams); leave grams null when no weight is stated — never guess it. For an ambiguous or unknown food, make a reasonable macro estimate and set note exactly to ESTIMATE. Coffee without stated additions is 5 kcal with zero macros. Never add commentary around a food JSON array.
+[{{"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"quantity":null,"grams":null,"basis":"per_unit|per_100g|per_serving","sourced_from":"preset|known|estimate|lookup","meal":"Breakfast|Lunch|Dinner|Snack","note":"source string or ESTIMATE"}}]
+The macros MUST be the FINAL TOTALS for exactly the portion the user stated. You own all portion arithmetic: "2 bananas" means return the macros for both bananas, and "200g sweet potato" means return the macros for 200g. Never return a per-unit or per-100g value when the user asked for a multiple or weighted portion. Set basis to per_unit for whole countable items, per_100g for foods sized from a weight-based value, or per_serving for a complete stated serving such as a bar, bowl, or saved preset. Set sourced_from to preset only when the name exactly identifies an available preset, known only when it exactly identifies a listed known food, lookup when you used lookup_food, or estimate when the macros are your fallback estimate. Prefer an exact available preset over a known-food match when both have the same name. Presets are per serving and have no serving weight: use them for whole servings only. When the user states grams for a preset, call lookup_food and scale its per-100g result instead; if lookup fails, keep your portion estimate labeled ESTIMATE. Use a matching preset or known-food value when possible. Infer the meal from context and time; default to Snack. Set quantity to the number of that item the user states ("1 bar" -> 1, "two cookies" -> 2, "a banana" -> 1); otherwise leave quantity null. Set grams only when the user states the portion weight ("100g chicken" -> 100, "3 oz venison" -> 85, converting oz/lb to grams); leave grams null when no weight is stated — never guess it. For an ambiguous or unknown food, make a reasonable final macro estimate. Coffee without stated additions is 5 kcal with zero macros. Never add commentary around a food JSON array.
+If a food is not an exact available preset or exact known food, call lookup_food with its name BEFORE choosing macros. Use the returned per-100g or per-serving values to calculate final macros for the stated portion, set sourced_from to lookup, and copy its source string exactly into note. Never invent a source or macros for a real food while lookup_food is available. If lookup_food fails, returns not found, or the lookup limit is reached, proceed with a reasonable estimate and set note to exactly ESTIMATE.
 If the message is a greeting, question, or otherwise not asking to log food, output [] followed by one short plain-text reply. Do not invent food items."""
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "lookup_food",
+            "description": (
+                "Look up real food macros using the USDA, OpenFoodFacts, and "
+                "Tavily cascade. Call for foods not in presets or known foods."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+    }]
     try:
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": message},
+        ]
         payload = {
             "model": "gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": message},
-            ],
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
         }
         token = _openai_access_token()
-        response = await _post_openai_chat(token, payload)
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
+        lookups_left = 3
+        verified_lookups: list[tuple[str, str]] = []
+        while True:
+            response = await _post_openai_chat(token, payload)
+            response.raise_for_status()
+            assistant = response.json()["choices"][0]["message"]
+            tool_calls = assistant.get("tool_calls") or []
+            if not tool_calls:
+                content = assistant.get("content") or ""
+                break
+            messages.append(assistant)
+            executed_lookup = False
+            for tool_call in tool_calls:
+                function = tool_call.get("function") or {}
+                result: dict[str, Any]
+                if function.get("name") != "lookup_food":
+                    result = {"result": "unsupported tool"}
+                elif lookups_left <= 0:
+                    result = {"result": "lookup limit reached; use ESTIMATE"}
+                else:
+                    lookups_left -= 1
+                    executed_lookup = True
+                    try:
+                        arguments = json.loads(function.get("arguments") or "{}")
+                        name = str(arguments.get("name") or "").strip()
+                        found = await food_lookup.resolve_food(name) if name else None
+                        if found:
+                            result = {
+                                key: found[key]
+                                for key in (
+                                    "name", "macros_per_100g", "macros_per_serving",
+                                    "serving_size", "source",
+                                )
+                                if key in found
+                            }
+                            source = result.get("source")
+                            if isinstance(source, str) and source:
+                                verified_lookups.append(
+                                    (_normalized_food_name(name), source)
+                                )
+                        else:
+                            result = {"result": "not found; use ESTIMATE"}
+                    except Exception:
+                        logger.exception("Parser food lookup failed; using estimate")
+                        result = {"result": "lookup failed; use ESTIMATE"}
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call["id"],
+                    "content": json.dumps(result, separators=(",", ":")),
+                })
+            if lookups_left <= 0 or not executed_lookup:
+                payload["tool_choice"] = "none"
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
         raise MacroError("I couldn't parse that right now. Please try again in a moment.") from exc
-    return _extract_chat_items(str(content))
+    items, reply = _extract_chat_items(str(content))
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        note = item.get("note")
+        lookup = (_normalized_food_name(str(item.get("name") or "")), note)
+        if lookup in verified_lookups:
+            verified_lookups.remove(lookup)
+        else:
+            item["note"] = "ESTIMATE"
+    return items, reply, presets
 
 
 async def _upgrade_estimate(
@@ -1600,7 +1702,9 @@ async def api_chat(request: Request) -> Any:
         raw_items = []
     else:
         try:
-            raw_items, _ = await parse_chat_message(text)
+            parsed_food = await parse_chat_message(text)
+            raw_items, _ = parsed_food[:2]
+            presets = parsed_food[2] if len(parsed_food) > 2 else await fetch_presets()
         except Exception:
             logger.exception("Food parser failed; falling back to coach")
             raw_items = []
@@ -1608,7 +1712,7 @@ async def api_chat(request: Request) -> Any:
         try:
             requested_day = body.get("date")
             day = domain.parse_date(requested_day) if requested_day is not None else domain.effective_date()
-            validated: list[tuple[str, dict[str, float], str, str, Any, Any]] = []
+            validated: list[tuple[str, dict[str, float], str, Any, Any, str, str, str]] = []
             for raw in raw_items[:10]:
                 if not isinstance(raw, dict):
                     raise MacroError("I couldn't understand one of those food items. Please rephrase it.")
@@ -1618,41 +1722,80 @@ async def api_chat(request: Request) -> Any:
                     raw.get("fat"), raw.get("fiber", 0)
                 )
                 meal_name = domain.normalize_meal(raw.get("meal"))
+                basis = str(raw.get("basis") or "").strip().casefold()
+                sourced_from = str(raw.get("sourced_from") or "estimate").strip().casefold()
+                note = str(raw.get("note") or "ESTIMATE").strip()
                 validated.append(
-                    (clean_name, macros, str(raw.get("note") or "Chat & Log"),
-                     meal_name, raw.get("grams"), raw.get("quantity"))
+                    (clean_name, macros, meal_name, raw.get("grams"), raw.get("quantity"),
+                     basis, sourced_from, note)
                 )
 
             logged: list[dict[str, Any]] = []
-            # Free-database upgrade: a parser ESTIMATE becomes a real sourced
-            # entry when a stated gram portion can scale per-100g data, or one
-            # whole item can use an explicit serving panel. Bounded so one
-            # request cannot fan out into many external calls.
-            lookups_left = 3
-            for clean_name, macros, note, meal_name, grams, quantity in validated:
-                try:
-                    portion = float(grams)
-                except (TypeError, ValueError):
-                    portion = None
-                has_valid_grams = portion is not None and 0 < portion <= 5000
-                try:
-                    whole_item = not has_valid_grams and float(quantity) == 1
-                except (TypeError, ValueError):
-                    whole_item = False
-                if (
-                    note.strip().upper() == "ESTIMATE"
-                    and (grams is not None or whole_item)
-                    and lookups_left > 0
-                ):
-                    lookups_left -= 1
-                    upgraded = await _upgrade_estimate(
-                        clean_name, grams, whole_item=whole_item
+            preset_by_name = {
+                _normalized_food_name(str(preset["name"])): preset
+                for preset in presets
+            }
+            known_by_name = {
+                _normalized_food_name(name): name for name in KNOWN_CHAT_FOOD_NAMES
+            }
+            # The parser chooses a route, but only a real exact preset/known
+            # record can mint one of those source labels.
+            preset_gram_lookups_left = 3
+            for clean_name, macros, meal_name, grams, quantity, basis, sourced_from, note in validated:
+                normalized_name = _normalized_food_name(clean_name)
+                preset = preset_by_name.get(normalized_name)
+                known_name = known_by_name.get(normalized_name)
+                if preset is not None:
+                    preset_macros = domain.validate_macros(
+                        *(preset.get(key) for key in domain.MACRO_KEYS)
                     )
-                    if upgraded:
-                        macros, note = upgraded
+                    try:
+                        stated_grams = float(grams)
+                    except (TypeError, ValueError):
+                        stated_grams = None
+                    if stated_grams is not None and stated_grams > 0:
+                        try:
+                            serving_weight = float(preset.get("serving_weight_g"))
+                        except (TypeError, ValueError):
+                            serving_weight = None
+                        if serving_weight is not None and serving_weight > 0:
+                            servings = stated_grams / serving_weight
+                            macros = domain.validate_macros(
+                                *(round(preset_macros[key] * servings, 2)
+                                  for key in domain.MACRO_KEYS)
+                            )
+                            source = f'Meal Preset: {preset["name"]}'
+                        else:
+                            upgraded = None
+                            if preset_gram_lookups_left > 0:
+                                preset_gram_lookups_left -= 1
+                                upgraded = await _upgrade_estimate(clean_name, stated_grams)
+                            if upgraded is not None:
+                                macros, source = upgraded
+                            else:
+                                source = "ESTIMATE"
+                    else:
+                        try:
+                            servings = float(quantity)
+                        except (TypeError, ValueError):
+                            servings = 1
+                        if servings <= 0:
+                            servings = 1
+                        macros = domain.validate_macros(
+                            *(round(preset_macros[key] * servings, 2)
+                              for key in domain.MACRO_KEYS)
+                        )
+                        source = f'Meal Preset: {preset["name"]}'
+                elif known_name is not None:
+                    # The parser already returned the known food's final macros
+                    # for the user's exact portion. The registry only proves the
+                    # source label; it does not redo language/portion math.
+                    source = f"Known food: {known_name}"
+                else:
+                    source = note if sourced_from == "lookup" else "ESTIMATE"
                 result = await write_meal(
                     clean_name, macros["calories"], macros["protein"], macros["carbs"],
-                    macros["fat"], note, meal_name, day.isoformat(), allow_estimate=True,
+                    macros["fat"], source, meal_name, day.isoformat(), allow_estimate=True,
                     fiber=macros["fiber"],
                 )
                 logged.append(result["logged"])

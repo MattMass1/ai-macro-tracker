@@ -332,13 +332,10 @@ async def workout_plan_payload() -> dict[str, Any]:
     def exercises_for(workout_type: str) -> list[dict[str, Any]]:
         # A missing plan intentionally starts empty. Matt's legacy defaults are
         # data seeded by the migration, never a default leaked to new users.
+        # ONLY the plan's stored exercises for this day — never append the
+        # user's full PR-log history (that's what made sessions balloon).
         names = list(planned_exercises.get(workout_type, ()))
-        seen = set(names)
-        for ex in known:
-            if workout_type in ex["workout_type"] and ex["name"] not in seen:
-                names.append(ex["name"])
-                seen.add(ex["name"])
-        return [{"name": name} for name in names]
+        return [{"name": name} for name in names[:8]]  # hard cap 8
 
     window = 5  # a 5-day training week at most cycles the split twice
     upcoming: list[dict[str, Any]] = []

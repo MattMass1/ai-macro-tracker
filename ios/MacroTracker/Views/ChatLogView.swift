@@ -6,7 +6,7 @@ struct ChatMessage: Identifiable {
     let id = UUID()
     let role: Role
     let text: String
-    var widget: MetricsFormWidget? = nil
+    var widget: ChatWidget? = nil
 
     enum Role { case user, assistant }
 }
@@ -27,6 +27,10 @@ struct ChatLogView: View {
     @State private var showScanSheet = false
     @State private var scanMode: ScanFoodMode = .barcode
     @State private var showManual = false
+    @State private var loggerSelection: WorkoutLoggerSelection?
+    @State private var showExerciseLibrary = false
+    @State private var swapTargetMessageId: UUID?
+    @State private var pendingSwap: WorkoutLoggerSelection?
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -54,6 +58,16 @@ struct ChatLogView: View {
                                             onDismiss: { dismissWidget(message.id) }
                                         )
                                     }
+                                    if message.role == .assistant, let widget = message.widget, widget.type == "exercise_card" {
+                                        ExerciseVideoCard(
+                                            exercise: widget.exercise ?? ExerciseCardExercise(),
+                                            onLogSet: { loggerSelection = $0 },
+                                            onSwap: {
+                                                swapTargetMessageId = message.id
+                                                showExerciseLibrary = true
+                                            }
+                                        )
+                                    }
                                 }
                                 .id(message.id)
                             }
@@ -77,6 +91,21 @@ struct ChatLogView: View {
             }
         }
         .sheet(isPresented: $showManual) { ManualFoodView() }
+        .sheet(item: $loggerSelection) { selection in
+            WorkoutLoggerView(initialType: selection.type, initialExercise: selection.exercise)
+        }
+        .sheet(isPresented: $showExerciseLibrary, onDismiss: {
+            if let selection = pendingSwap, let id = swapTargetMessageId {
+                applyExerciseSwap(messageId: id, selection: selection)
+            }
+            pendingSwap = nil
+            swapTargetMessageId = nil
+        }) {
+            ExerciseLibraryView { selection in
+                pendingSwap = selection
+                showExerciseLibrary = false
+            }
+        }
         .sheet(isPresented: $showCamera) { CameraPicker(image: $image) }
         .sheet(isPresented: $showScanSheet, onDismiss: { scanMode = .barcode }) {
             if scanMode == .photo {
@@ -214,6 +243,17 @@ struct ChatLogView: View {
     private func dismissWidget(_ id: UUID) {
         guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
         messages[index].widget = nil
+    }
+
+    private func applyExerciseSwap(messageId: UUID, selection: WorkoutLoggerSelection) {
+        guard let index = messages.firstIndex(where: { $0.id == messageId }) else { return }
+        guard case .exerciseCard(var card) = messages[index].widget else { return }
+        card.exercise.name = selection.exercise
+        card.exercise.workoutType = selection.type
+        if let muscle = selection.muscleGroup { card.exercise.muscleGroup = muscle }
+        if let equipment = selection.equipment { card.exercise.equipment = equipment }
+        card.exercise.videoUrl = nil
+        messages[index].widget = .exerciseCard(card)
     }
 
     private func metricsSummary(fields: [MetricsField], values: MetricsFieldValues) -> String {

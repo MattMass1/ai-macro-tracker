@@ -47,9 +47,11 @@ struct WorkoutsView: View {
     private var workoutSkeleton: some View { VStack(spacing: 10) { HStack { RoundedRectangle(cornerRadius: 20).frame(height: 130); RoundedRectangle(cornerRadius: 20).frame(height: 130) }; RoundedRectangle(cornerRadius: 20).frame(height: 160) }.foregroundStyle(Theme.surface).redacted(reason: .placeholder).shimmering() }
 }
 
-private struct WorkoutLoggerSelection: Identifiable {
+struct WorkoutLoggerSelection: Identifiable {
     let type: String
     let exercise: String
+    var muscleGroup: String? = nil
+    var equipment: String? = nil
     var id: String { "\(type)|\(exercise)" }
 }
 
@@ -227,7 +229,7 @@ private struct TodaysSessionCard: View {
     }
 }
 
-private struct ExerciseLibraryView: View {
+struct ExerciseLibraryView: View {
     private struct SectionGroup: Identifiable {
         let type: String
         let exercises: [LibraryExercise]
@@ -271,7 +273,12 @@ private struct ExerciseLibraryView: View {
                         ForEach(groupedExercises) { group in
                             Section(group.type) {
                                 ForEach(group.exercises) { exercise in
-                                    Button { onSelect(.init(type: group.type, exercise: exercise.name)) } label: {
+                                    Button { onSelect(.init(
+                                        type: group.type,
+                                        exercise: exercise.name,
+                                        muscleGroup: exercise.muscleGroup.first,
+                                        equipment: exercise.equipment.isEmpty ? nil : exercise.equipment
+                                    )) } label: {
                                         VStack(alignment: .leading, spacing: 3) {
                                             Text(exercise.name).foregroundStyle(Theme.ink)
                                             Text([exercise.muscleGroup.joined(separator: ", "), exercise.equipment]

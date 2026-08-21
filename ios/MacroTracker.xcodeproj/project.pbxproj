@@ -26,6 +26,7 @@
 		B00100000000000000000011 /* InviteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000014 /* InviteView.swift */; };
 		B00100000000000000000012 /* BarcodeScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000015 /* BarcodeScannerView.swift */; };
 		B00100000000000000000013 /* MetricsFormCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000016 /* MetricsFormCard.swift */; };
+		B00100000000000000000015 /* ExerciseVideoCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000017 /* ExerciseVideoCard.swift */; };
 		B00100000000000000000014 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000E /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -64,6 +65,7 @@
 		F00100000000000000000014 /* InviteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InviteView.swift; sourceTree = "<group>"; };
 		F00100000000000000000015 /* BarcodeScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BarcodeScannerView.swift; sourceTree = "<group>"; };
 		F00100000000000000000016 /* MetricsFormCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricsFormCard.swift; sourceTree = "<group>"; };
+		F00100000000000000000017 /* ExerciseVideoCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExerciseVideoCard.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -148,6 +150,7 @@
 				F0010000000000000000000D /* FoodComponents.swift */,
 				F00100000000000000000012 /* AddBarView.swift */,
 				F00100000000000000000016 /* MetricsFormCard.swift */,
+				F00100000000000000000017 /* ExerciseVideoCard.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -295,6 +298,7 @@
 				B00100000000000000000011 /* InviteView.swift in Sources */,
 				B00100000000000000000012 /* BarcodeScannerView.swift in Sources */,
 				B00100000000000000000013 /* MetricsFormCard.swift in Sources */,
+				B00100000000000000000015 /* ExerciseVideoCard.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

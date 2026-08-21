@@ -141,4 +141,50 @@ final class ModelDecodingTests: XCTestCase {
             accuracy: 0.0000001
         )
     }
+
+    func testChatReplyDecodesExerciseCardWidget() throws {
+        let json = #"{"reply":"Two moves to watch.","widget":{"type":"exercise_card","exercise":{"name":"Bulgarian Split Squat","muscle_group":"Legs","equipment":"Dumbbell","sets":3,"reps":"10","video_url":"https://example.com/split.mp4","instructions":"Front heel down.","workout_type":"Legs"}}}"#.data(using: .utf8)!
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let reply = try decoder.decode(ChatReply.self, from: json)
+        XCTAssertEqual(reply.widget?.type, "exercise_card")
+        XCTAssertEqual(reply.widget?.exercise?.name, "Bulgarian Split Squat")
+        XCTAssertEqual(reply.widget?.exercise?.muscleGroup, "Legs")
+        XCTAssertEqual(reply.widget?.exercise?.equipment, "Dumbbell")
+        XCTAssertEqual(reply.widget?.exercise?.sets, "3")
+        XCTAssertEqual(reply.widget?.exercise?.reps, "10")
+        XCTAssertEqual(reply.widget?.exercise?.videoUrl, "https://example.com/split.mp4")
+        XCTAssertEqual(reply.widget?.exercise?.instructions, "Front heel down.")
+        XCTAssertEqual(reply.widget?.exercise?.workoutType, "Legs")
+        XCTAssertEqual(reply.widget?.fields.count, 0)
+    }
+
+    func testExerciseCardDecodesOptionalFieldsAndArrays() throws {
+        let json = #"{"type":"exercise_card","exercise":{"name":"Leg Press (Machine)","muscle_group":["Legs","Quads"],"workout_type":["Legs"],"sets":null}}"#.data(using: .utf8)!
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let widget = try decoder.decode(ExerciseCardWidget.self, from: json)
+        XCTAssertEqual(widget.exercise.name, "Leg Press (Machine)")
+        XCTAssertEqual(widget.exercise.muscleGroup, "Legs")
+        XCTAssertEqual(widget.exercise.workoutType, "Legs")
+        XCTAssertNil(widget.exercise.equipment)
+        XCTAssertNil(widget.exercise.sets)
+        XCTAssertNil(widget.exercise.videoUrl)
+        XCTAssertNil(widget.exercise.videoURL)
+    }
+
+    func testChatReplyIgnoresUnknownWidgetType() throws {
+        let json = #"{"reply":"Logged it.","widget":{"type":"future_card","foo":1}}"#.data(using: .utf8)!
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let reply = try decoder.decode(ChatReply.self, from: json)
+        XCTAssertEqual(reply.reply, "Logged it.")
+        XCTAssertNil(reply.widget)
+    }
+
+    func testChatReplyStillDecodesWhenExerciseObjectIsMissing() throws {
+        let json = #"{"reply":"Try this.","widget":{"type":"exercise_card"}}"#.data(using: .utf8)!
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let reply = try decoder.decode(ChatReply.self, from: json)
+        XCTAssertEqual(reply.widget?.type, "exercise_card")
+        XCTAssertEqual(reply.widget?.exercise?.displayName, "Exercise")
+        XCTAssertNil(reply.widget?.exercise?.videoURL)
+    }
 }

@@ -287,12 +287,211 @@ struct MetricsFormWidget: Codable, Equatable {
     }
 }
 
+struct ExerciseCardExercise: Codable, Equatable {
+    var name: String?
+    var muscleGroup: String?
+    var equipment: String?
+    var sets: String?
+    var reps: String?
+    var videoUrl: String?
+    var instructions: String?
+    var workoutType: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name, muscleGroup, equipment, sets, reps, videoUrl, instructions, workoutType
+    }
+
+    init(
+        name: String? = nil,
+        muscleGroup: String? = nil,
+        equipment: String? = nil,
+        sets: String? = nil,
+        reps: String? = nil,
+        videoUrl: String? = nil,
+        instructions: String? = nil,
+        workoutType: String? = nil
+    ) {
+        self.name = name
+        self.muscleGroup = muscleGroup
+        self.equipment = equipment
+        self.sets = sets
+        self.reps = reps
+        self.videoUrl = videoUrl
+        self.instructions = instructions
+        self.workoutType = workoutType
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = Self.decodeText(container, forKey: .name)
+        muscleGroup = Self.decodeLabel(container, forKey: .muscleGroup)
+        equipment = Self.decodeText(container, forKey: .equipment)
+        sets = Self.decodeText(container, forKey: .sets)
+        reps = Self.decodeText(container, forKey: .reps)
+        videoUrl = Self.decodeText(container, forKey: .videoUrl)
+        instructions = Self.decodeText(container, forKey: .instructions)
+        workoutType = Self.decodeLabel(container, forKey: .workoutType)
+    }
+
+    var displayName: String {
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "Exercise" : trimmed
+    }
+
+    var loggerExerciseName: String {
+        name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    /// Prefer `workoutType`; muscle group is a reasonable fallback for the logger chips.
+    var loggerType: String {
+        if let type = Self.trimmed(workoutType) { return type }
+        if let muscle = Self.trimmed(muscleGroup) { return muscle }
+        return "Push"
+    }
+
+    var videoURL: URL? {
+        guard let raw = Self.trimmed(videoUrl) else { return nil }
+        return URL(string: raw)
+    }
+
+    private static func trimmed(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func decodeText(_ container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys) -> String? {
+        if let value = try? container.decode(String.self, forKey: key) {
+            return trimmed(value)
+        }
+        if let value = try? container.decode(Int.self, forKey: key) {
+            return String(value)
+        }
+        if let value = try? container.decode(Double.self, forKey: key) {
+            return value == value.rounded() ? String(Int(value)) : String(value)
+        }
+        return nil
+    }
+
+    private static func decodeLabel(_ container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys) -> String? {
+        if let value = decodeText(container, forKey: key) { return value }
+        if let values = try? container.decode([String].self, forKey: key) {
+            return values.compactMap { trimmed($0) }.first
+        }
+        return nil
+    }
+}
+
+struct ExerciseCardWidget: Codable, Equatable {
+    var type: String
+    var exercise: ExerciseCardExercise
+
+    enum CodingKeys: String, CodingKey { case type, exercise }
+
+    init(type: String = "exercise_card", exercise: ExerciseCardExercise) {
+        self.type = type
+        self.exercise = exercise
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        type = try container.decodeIfPresent(String.self, forKey: .type) ?? "exercise_card"
+        exercise = try container.decodeIfPresent(ExerciseCardExercise.self, forKey: .exercise) ?? ExerciseCardExercise()
+    }
+}
+
+/// In-chat widget payload. Unknown types decode as nil on `ChatReply` so additive backend fields cannot break chat.
+enum ChatWidget: Equatable {
+    case metricsForm(MetricsFormWidget)
+    case exerciseCard(ExerciseCardWidget)
+
+    var type: String {
+        switch self {
+        case .metricsForm(let widget): return widget.type
+        case .exerciseCard(let widget): return widget.type
+        }
+    }
+
+    var fields: [MetricsField] {
+        switch self {
+        case .metricsForm(let widget): return widget.fields
+        case .exerciseCard: return []
+        }
+    }
+
+    var exercise: ExerciseCardExercise? {
+        switch self {
+        case .exerciseCard(let widget): return widget.exercise
+        case .metricsForm: return nil
+        }
+    }
+}
+
+extension ChatWidget: Codable {
+    private enum CodingKeys: String, CodingKey { case type }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decodeIfPresent(String.self, forKey: .type) ?? ""
+        switch type {
+        case "exercise_card":
+            self = .exerciseCard(try ExerciseCardWidget(from: decoder))
+        case "metrics_form":
+            self = .metricsForm(try MetricsFormWidget(from: decoder))
+        default:
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Unsupported chat widget type: \(type)"
+            ))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        switch self {
+        case .metricsForm(let widget): try widget.encode(to: encoder)
+        case .exerciseCard(let widget): try widget.encode(to: encoder)
+        }
+    }
+}
+
 // Optionals keep decoding compatible while the coach backend rolls out the flags.
 struct ChatReply: Codable {
     var reply: String
     var hasPlan: Bool?
     var hasTargets: Bool?
-    var widget: MetricsFormWidget?
+    var widget: ChatWidget?
+
+    enum CodingKeys: String, CodingKey { case reply, hasPlan, hasTargets, widget }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        reply = try container.decode(String.self, forKey: .reply)
+        hasPlan = try container.decodeIfPresent(Bool.self, forKey: .hasPlan)
+        hasTargets = try container.decodeIfPresent(Bool.self, forKey: .hasTargets)
+        widget = try Self.decodeWidget(from: container)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(reply, forKey: .reply)
+        try container.encodeIfPresent(hasPlan, forKey: .hasPlan)
+        try container.encodeIfPresent(hasTargets, forKey: .hasTargets)
+        try container.encodeIfPresent(widget, forKey: .widget)
+    }
+
+    private static func decodeWidget(from container: KeyedDecodingContainer<CodingKeys>) throws -> ChatWidget? {
+        guard container.contains(.widget) else { return nil }
+        if try container.decodeNil(forKey: .widget) { return nil }
+        enum TypeKey: String, CodingKey { case type }
+        let type = try? container.nestedContainer(keyedBy: TypeKey.self, forKey: .widget)
+            .decodeIfPresent(String.self, forKey: .type)
+        switch type {
+        case "metrics_form", "exercise_card":
+            return try container.decode(ChatWidget.self, forKey: .widget)
+        default:
+            return nil
+        }
+    }
 }
 struct ClaimInviteBody: Codable { var code: String; var label: String?; var displayName: String? }
 struct ClaimInvitePayload: Codable { var token: String; var displayName: String }

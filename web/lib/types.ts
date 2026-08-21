@@ -65,7 +65,24 @@ export type ChatPayload = {
   reply: string;
   logged: Meal[];
   totals: Macros;
+  widget?: ChatWidget | null;
 };
+
+export type ChatWidget =
+  | { type: "metrics_form"; fields: string[] }
+  | {
+      type: "exercise_card";
+      exercise: {
+        name: string;
+        muscleGroup?: string;
+        equipment?: string;
+        sets?: number;
+        reps?: number;
+        videoUrl?: string | null;
+        instructions?: string | null;
+        workoutType?: string;
+      };
+    };
 
 export type VisionPayload = Macros & {
   name: string;

@@ -219,7 +219,8 @@ class Store:
         """Return the shared exercise library in stable type/name order."""
         pool = await self.connect()
         rows = await pool.fetch(
-            "SELECT name,muscle_group,workout_type,equipment,difficulty,swaps "
+            "SELECT name,muscle_group,workout_type,equipment,difficulty,swaps,"
+            "video_url,instructions "
             "FROM workout_library ORDER BY workout_type, lower(name)"
         )
         return [_dict(row) or {} for row in rows]

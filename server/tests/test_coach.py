@@ -44,6 +44,35 @@ def text_response(content, **extra):
     return response({"role": "assistant", "content": content}, **extra)
 
 
+ONBOARDING_METRICS = {
+    "height_cm": 178, "weight_kg": 80, "goal_weight_kg": 75,
+    "age": 32, "activity_level": "moderate",
+}
+ONBOARDING_TARGETS = {
+    "calories": 2200, "protein": 160, "carbs": 230, "fat": 70, "fiber": 30,
+}
+ONBOARDING_PLAN = {"days": {"Day 1": {"exercises": [
+    {"name": "Bench Press", "sets": 3, "reps": "8-10"}
+]}}}
+
+
+def onboarding_handlers(seen):
+    async def handler(name, arguments):
+        seen.append((name, arguments))
+        if name == "get_metrics":
+            return {"metrics": ONBOARDING_METRICS}
+        if name == "get_library":
+            return {"exercises": [{"name": "Bench Press"}]}
+        return {"ok": True}
+
+    return {
+        name: (lambda arguments, name=name: handler(name, arguments))
+        for name in ("set_display_name", "set_metrics", "get_metrics",
+                     "request_metrics_form", "get_library", "set_targets",
+                     "set_workout_plan")
+    }
+
+
 async def test_tool_dispatch_keeps_authenticated_user_scope(monkeypatch):
     monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
     wanted_user = uuid4()
@@ -119,6 +148,47 @@ async def test_total_execution_cap_bounds_multi_tool_rounds(monkeypatch):
     assert executed == 16  # 6 + 6 + 4, then the 17th execution is refused
 
 
+async def test_library_audit_is_compact_but_model_receives_full_result(monkeypatch):
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
+    exercises = [{
+        "name": f"Exercise {index}", "muscle_group": ["Legs"],
+        "workout_type": "Strength", "equipment": "barbell",
+        "video_url": f"https://media.example/{index}.gif",
+        "instructions": "A large instruction payload", "overview": "A large overview",
+    } for index in range(15)]
+    calls = 0
+
+    async def fake_post(_token, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return tool_response(tool_call("library", "get_library", {"query": "missing"}))
+        tool_result = json.loads(payload["messages"][-1]["content"])["result"]
+        assert tool_result["exercises"][0]["instructions"] == "A large instruction payload"
+        assert len(tool_result["exercises"]) == 15
+        return text_response("Try Exercise 13.")
+
+    async def get_library(_args):
+        return {"exercises": exercises, "note": "full library returned"}
+
+    _reply, audit = await run_agent(
+        history=[], message="Find something", onboarding=False,
+        handlers={"get_library": get_library}, post=fake_post,
+    )
+
+    persisted = audit[0]["result"]["exercises"]
+    assert len(persisted) == 15
+    assert set(persisted[0]) == {
+        "name", "instructions", "video_url", "muscle_group", "equipment",
+        "workout_type",
+    }
+    assert persisted[0]["instructions"] == "A large instruction payload"
+    assert "overview" not in json.dumps(audit)
+    widget = srv.exercise_card_widget("Try Exercise 13.", audit)
+    assert widget["exercise"]["exercise_name"] == "Exercise 13"
+    assert widget["exercise"]["video_url"] == "https://media.example/13.gif"
+
+
 async def test_same_role_history_is_merged_before_the_api_call(monkeypatch):
     """Orphaned user rows (failed prior turns) must not produce consecutive user roles."""
     monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
@@ -139,6 +209,133 @@ async def test_same_role_history_is_merged_before_the_api_call(monkeypatch):
     assert [m["role"] for m in captured["messages"]] == ["system", "user"]
     merged = captured["messages"][1]["content"]
     assert "first orphan" in merged and "second orphan" in merged and "new question" in merged
+
+
+async def test_full_onboarding_completes_plan_and_targets_immediately_after_metrics(monkeypatch):
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
+    history = []
+    saved_metrics = {}
+    writes = []
+
+    async def handle(name, arguments):
+        if name == "get_metrics":
+            return {"metrics": saved_metrics}
+        if name == "set_metrics":
+            saved_metrics.update(arguments)
+        if name in {"set_targets", "set_workout_plan"}:
+            writes.append(name)
+        if name == "get_library":
+            return {"exercises": [{"name": "Bench Press"}]}
+        return {"ok": True}
+
+    handlers = {
+        name: (lambda arguments, name=name: handle(name, arguments))
+        for name in ("set_display_name", "set_metrics", "get_metrics",
+                     "request_metrics_form", "get_library", "set_targets",
+                     "set_workout_plan")
+    }
+
+    async def fake_post(_token, payload):
+        system = payload["messages"][0]["content"]
+        assert "HARD ONBOARDING COMPLETION RULE" in system
+        assert "Conversation history is onboarding state" in system
+        messages = payload["messages"][1:]
+        user_text = next(message["content"] for message in reversed(messages)
+                         if message["role"] == "user")
+        tools_since_user = []
+        for message in reversed(messages):
+            if message["role"] == "user":
+                break
+            if message["role"] == "assistant":
+                tools_since_user.extend(
+                    call["function"]["name"] for call in message.get("tool_calls", [])
+                )
+        tools_since_user.reverse()
+
+        if user_text == "Alex":
+            if "set_display_name" not in tools_since_user:
+                return tool_response(tool_call("name", "set_display_name", {"name": "Alex"}))
+            return text_response("What is your main goal?")
+        if user_text == "Build muscle":
+            return text_response("What is your experience level?")
+        if user_text == "Intermediate":
+            return text_response("How many days can you train, and what equipment do you have?")
+        if user_text == "3 days in a full gym":
+            if "get_metrics" not in tools_since_user:
+                return tool_response(tool_call("metrics-check", "get_metrics"))
+            if "request_metrics_form" not in tools_since_user:
+                return tool_response(tool_call("metrics-form", "request_metrics_form"))
+            return text_response("Add your measurements here.")
+        if user_text.startswith("178 cm"):
+            if "set_metrics" not in tools_since_user:
+                return tool_response(tool_call("metrics-save", "set_metrics", ONBOARDING_METRICS))
+            if "get_library" not in tools_since_user:
+                return tool_response(tool_call("library", "get_library", {"query": "full gym"}))
+            if "set_targets" not in tools_since_user:
+                return tool_response(
+                    tool_call("targets", "set_targets", {"values": ONBOARDING_TARGETS}),
+                    tool_call("plan", "set_workout_plan", {"plan": ONBOARDING_PLAN}),
+                )
+            return text_response("Your targets and plan are ready.")
+        pytest.fail(f"Unexpected onboarding state: {user_text!r}")
+
+    user_turns = [
+        "Alex", "Build muscle", "Intermediate", "3 days in a full gym",
+        "178 cm, 80 kg, goal 75 kg, age 32, moderately active",
+    ]
+    final_audit = []
+    for message in user_turns:
+        reply, final_audit = await run_agent(
+            history=history, message=message, onboarding=True,
+            handlers=handlers, post=fake_post,
+        )
+        history.extend((
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": reply},
+        ))
+
+    assert writes == ["set_targets", "set_workout_plan"]
+    assert [entry["tool"] for entry in final_audit] == [
+        "set_metrics", "get_library", "set_targets", "set_workout_plan",
+    ]
+
+
+async def test_all_onboarding_details_in_one_message_builds_without_questions(monkeypatch):
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
+    seen = []
+    handlers = onboarding_handlers(seen)
+
+    async def fake_post(_token, payload):
+        messages = payload["messages"]
+        called = [call["function"]["name"] for message in messages
+                  for call in message.get("tool_calls", [])]
+        if not called:
+            return tool_response(
+                tool_call("name", "set_display_name", {"name": "Alex"}),
+                tool_call("metrics", "set_metrics", ONBOARDING_METRICS),
+            )
+        if "get_library" not in called:
+            return tool_response(tool_call("library", "get_library", {"query": "full gym"}))
+        if "set_targets" not in called:
+            return tool_response(
+                tool_call("targets", "set_targets", {"values": ONBOARDING_TARGETS}),
+                tool_call("plan", "set_workout_plan", {"plan": ONBOARDING_PLAN}),
+            )
+        return text_response("Your targets and plan are ready.")
+
+    message = ("I'm Alex. I want to build muscle, I'm intermediate, and I can train "
+               "3 days a week in a full gym. I'm 178 cm, 80 kg, aiming for 75 kg, "
+               "age 32, and moderately active.")
+    reply, audit = await run_agent(
+        history=[], message=message, onboarding=True,
+        handlers=handlers, post=fake_post,
+    )
+
+    assert "?" not in reply
+    assert [entry["tool"] for entry in audit] == [
+        "set_display_name", "set_metrics", "get_library",
+        "set_targets", "set_workout_plan",
+    ]
 
 
 async def test_tool_error_is_returned_to_model(monkeypatch):
@@ -231,7 +428,8 @@ async def test_usage_is_recorded_per_api_call_and_never_fatal(monkeypatch):
 
 
 class FakeStore:
-    def __init__(self, today_count=0, plan=None, has_targets=False, chat_messages=None):
+    def __init__(self, today_count=0, plan=None, has_targets=False, chat_messages=None,
+                 library=None):
         self.today_count = today_count
         self.plan = plan
         self.targets = has_targets
@@ -242,6 +440,7 @@ class FakeStore:
         self.metrics = []
         self.chat_messages = chat_messages or []
         self.history_day_start = None
+        self.library = library or []
 
     async def insert_user_chat_message(self, content, daily_cap):
         if self.today_count >= daily_cap:
@@ -289,6 +488,9 @@ class FakeStore:
 
     async def fetch_workout_plan(self):
         return self.plan
+
+    async def fetch_workout_library(self):
+        return self.library
 
     async def has_macro_targets(self):
         return self.targets
@@ -644,6 +846,130 @@ async def test_widget_is_emitted_when_metrics_form_tool_was_called(monkeypatch):
     }
 
 
+async def test_library_tool_returns_enriched_exercise_objects(monkeypatch):
+    exercise = {
+        "name": "Bench Press", "muscle_group": ["Chest", "Triceps"],
+        "workout_type": "Push", "equipment": "barbell",
+        "difficulty": "intermediate", "swaps": [],
+        "video_url": "https://media.example/bench.gif",
+        "instructions": "Lower the bar.\nPress it up.",
+    }
+    monkeypatch.setattr(srv, "_client", FakeStore(library=[exercise]))
+
+    result = await srv._coach_tool_handlers()["get_library"]({"query": "push"})
+
+    assert result["exercises"][0]["video_url"] == exercise["video_url"]
+    assert result["exercises"][0]["instructions"] == exercise["instructions"]
+
+
+async def test_library_call_emits_exercise_card_widget(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    exercise = {
+        "name": "Bench Press", "muscle_group": ["Chest", "Triceps"],
+        "workout_type": "Push", "equipment": "barbell",
+        "video_url": "https://media.example/bench.gif",
+        "instructions": "Lower the bar.\nPress it up.",
+    }
+
+    async def fake_parse(_message): return [], None
+    async def fake_run_agent(**_kwargs):
+        return "Try Bench Press today.", [{
+            "tool": "get_library", "input": {"query": "push"}, "ok": True,
+            "result": {"exercises": [exercise]},
+        }]
+    async def fake_day_payload(_day): return {"totals": {"calories": 0}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+
+    response = await srv.api_chat(chat_request({"message": "What should I train?"}))
+
+    assert json.loads(response.body)["widget"] == {
+        "type": "exercise_card",
+        "exercise": {
+            "exercise_name": "Bench Press",
+            "muscle_group": ["Chest", "Triceps"],
+            "equipment": "barbell", "sets": None, "reps": None,
+            "video_url": "https://media.example/bench.gif",
+            "instructions": "Lower the bar.\nPress it up.",
+            "workout_type": "Push",
+        },
+    }
+
+
+async def test_run_agent_library_audit_keeps_exercise_card_fields(monkeypatch):
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-key")
+    exercise = {
+        "name": "Bench Press", "muscle_group": ["Chest", "Triceps"],
+        "workout_type": "Push", "equipment": "barbell",
+        "video_url": "https://media.example/bench.gif",
+        "instructions": "Lower the bar.\nPress it up.",
+        "overview": "A long overview that must not be persisted.",
+        "description": "A long description that must not be persisted.",
+    }
+    calls = 0
+
+    async def fake_post(_token, _payload):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return tool_response(tool_call("library", "get_library", {"query": "push"}))
+        return text_response("Try Bench Press today.")
+
+    async def get_library(_arguments):
+        return {"exercises": [exercise]}
+
+    reply, audit = await run_agent(
+        history=[], message="What should I train?", onboarding=False,
+        handlers={"get_library": get_library}, post=fake_post,
+    )
+
+    compact = audit[0]["result"]["exercises"][0]
+    assert compact == {key: exercise[key] for key in (
+        "name", "instructions", "video_url", "muscle_group", "equipment", "workout_type",
+    )}
+    assert srv.exercise_card_widget(reply, audit)["exercise"]["instructions"] == exercise["instructions"]
+
+
+async def test_library_call_without_exercise_mention_emits_no_card(monkeypatch):
+    result = {"tool": "get_library", "input": {}, "ok": True,
+              "result": {"exercises": [{"name": "Bench Press"}]}}
+    widget = srv.exercise_card_widget("Here is another option.", [result])
+    assert widget is None
+
+
+def test_library_widget_selects_exercise_mentioned_in_reply():
+    first_result = {"tool": "get_library", "input": {}, "ok": True,
+                    "result": {"exercises": [
+                        {"name": "Back Squat"},
+                        {"name": "Deadlift", "video_url": "https://media.example/deadlift.gif"},
+                    ]}}
+    second_result = {"tool": "get_library", "input": {}, "ok": True,
+                     "result": {"exercises": [{"name": "Leg Press"}]}}
+
+    widget = srv.exercise_card_widget(
+        "Deadlift is the best choice today.", [first_result, second_result],
+    )
+
+    assert widget["exercise"]["exercise_name"] == "Deadlift"
+    assert widget["exercise"]["video_url"] == "https://media.example/deadlift.gif"
+
+
+def test_library_widget_prefers_longest_overlapping_exercise_name():
+    exercises = [
+        {"name": "Squat", "video_url": "https://media.example/squat.gif"},
+        {"name": "Back Squat", "video_url": "https://media.example/back-squat.gif"},
+    ]
+    result = {"tool": "get_library", "input": {}, "ok": True,
+              "result": {"exercises": exercises}}
+
+    widget = srv.exercise_card_widget("Try Back Squat today.", [result])
+
+    assert widget["exercise"]["exercise_name"] == "Back Squat"
+
+
 async def test_structured_metrics_are_stored_once_and_routed_to_coach(monkeypatch):
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
@@ -747,6 +1073,30 @@ class ProfilePool:
                 "goal_weight_kg": args[3], "age": args[4],
                 "activity_level": args[5],
                 "updated_at": datetime(2026, 8, 19, 12, 0)}
+
+
+async def test_fetch_workout_library_returns_media_and_instructions():
+    class LibraryPool:
+        def __init__(self):
+            self.sql = ""
+
+        async def fetch(self, sql, *args):
+            self.sql = sql
+            return [{"name": "Bench Press", "muscle_group": ["Chest"],
+                     "workout_type": "Push", "equipment": "barbell",
+                     "difficulty": "intermediate", "swaps": [],
+                     "video_url": "https://media.example/bench.gif",
+                     "instructions": "Press with control."}]
+
+    pool = LibraryPool()
+    store = Store("postgresql://unused/unused")
+    store.pool = pool
+
+    rows = await store.fetch_workout_library()
+
+    assert rows[0]["video_url"] == "https://media.example/bench.gif"
+    assert rows[0]["instructions"] == "Press with control."
+    assert "video_url,instructions" in pool.sql
 
 
 async def test_profile_store_writes_and_reads_only_bound_user():

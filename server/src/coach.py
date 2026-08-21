@@ -52,7 +52,9 @@ TOOLS = [
     _schema("log_workout", "Log one exercise and its sets.", {"exercise": S, "workout_type": S, "muscle_group": S, "sets": {"type": "array", "items": {"type": "object", "properties": {"weight": N, "reps": N}, "required": ["weight", "reps"]}}}, ("exercise", "workout_type", "muscle_group", "sets")),
     _schema("get_recent_workouts", "Read recent workout history.", {"n": {"type": "integer", "minimum": 1, "maximum": 30}}, ("n",)),
     _schema("get_workout_plan", "Read the current workout plan.", {}),
-    _schema("set_workout_plan", "Validate and write a workout plan built from the library. The server adds the plan format version automatically.", {"plan": {"type": "object"}}, ("plan",)),
+    _schema("set_workout_plan", """Write a workout plan built from library exercises. The server adds the version automatically. Use EXACTLY this shape:
+{"plan": {"rotation": ["Push", "Pull", "Legs"], "days": {"Push": {"label": "Push Day", "exercises": [{"name": "Bench Press", "sets": 3, "reps": "8-10", "rest_sec": 90}]}, "Pull": {"label": "Pull Day", "exercises": [{"name": "Lat Pulldown", "sets": 3, "reps": "10", "rest_sec": 90}]}, "Legs": {"label": "Legs Day", "exercises": [{"name": "Squat", "sets": 3, "reps": "8", "rest_sec": 120}]}}}}
+rules: rotation is an array of workout-type strings (Push/Pull/Legs/Abs/Cardio/Full Body) — one per day; days has one key per rotation entry, each with a label and exercises array; each exercise has name (from the library), sets (int 1-10), reps (string like "8-10"), rest_sec (int seconds).""", {"plan": {"type": "object"}}, ("plan",)),
     _schema("get_library", "Search the exercise library.", {"query": S}, ("query",)),
     _schema("get_readiness", "Read WHOOP readiness when available, otherwise rotation context.", {}),
 ]

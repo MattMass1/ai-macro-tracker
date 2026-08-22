@@ -752,7 +752,7 @@ If the message is a greeting, question, or otherwise not asking to log food, out
             {"role": "user", "content": message},
         ]
         payload = {
-            "model": "gpt-4o-mini",
+            "model": "gpt-5.6-luna",
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",

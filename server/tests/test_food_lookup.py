@@ -729,7 +729,7 @@ async def test_parser_known_food_skips_lookup(monkeypatch):
     monkeypatch.setattr(food_lookup, "resolve_food", unexpected_resolve)
 
     items, _, _ = await srv.parse_chat_message("a banana")
-    assert captured["model"] == "gpt-4o-mini"
+    assert captured["model"] == "gpt-5.6-luna"
     assert captured["tools"][0]["function"]["name"] == "lookup_food"
     assert items[0]["sourced_from"] == "known"
 

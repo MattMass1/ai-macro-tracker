@@ -2262,6 +2262,7 @@ async def api_chat(request: Request) -> Any:
             history=[{"role": row["role"], "content": row["content"]} for row in history],
             message=agent_message, onboarding=onboarding,
             handlers=handlers, record_usage=record_usage,
+            max_rounds=12, max_tool_calls=24,
         )
     except Exception:
         try:

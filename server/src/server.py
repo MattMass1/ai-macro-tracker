@@ -10,6 +10,7 @@ import functools
 import hmac
 import json
 import logging
+import math
 import os
 import sys
 import tempfile
@@ -638,6 +639,120 @@ def _normalized_food_name(name: str) -> str:
     return " ".join(name.split()).casefold()
 
 
+#: Physically possible ceiling for per-100g calories (pure fat is ~900).
+_MAX_KCAL_PER_100G = 950.0
+
+#: Countable foods the parser sizes from standard portions, with per-unit
+#: sanity ceilings (kcal, fat g). A portion above its ceiling means the
+#: parser's numbers are suspect; the server re-derives the portion as
+#: per-100g × standard unit weight instead.
+_PORTION_SANITY: tuple[tuple[re.Pattern[str], float, float, float], ...] = (
+    (re.compile(r"\beggs?\b", re.IGNORECASE), 50.0, 90.0, 6.5),
+    (re.compile(r"\bapples?\b", re.IGNORECASE), 182.0, 150.0, 1.5),
+    (re.compile(r"\bbananas?\b", re.IGNORECASE), 118.0, 160.0, 1.5),
+    (re.compile(r"\b(?:bread|toast)\b", re.IGNORECASE), 29.0, 130.0, 6.0),
+    (re.compile(r"\bchicken breasts?\b", re.IGNORECASE), 174.0, 430.0, 15.0),
+    (re.compile(r"\brice\b", re.IGNORECASE), 158.0, 280.0, 5.0),
+    (re.compile(r"\bavocados?\b", re.IGNORECASE), 150.0, 330.0, 33.0),
+)
+
+
+def _per_100g_macros(value: Any) -> dict[str, float] | None:
+    """Validated per-100g panel from the parser, or None when unusable."""
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        macros = domain.validate_macros(
+            value.get("calories"), value.get("protein"), value.get("carbs"),
+            value.get("fat"), value.get("fiber", 0),
+        )
+    except MacroError:
+        return None
+    if not 0 < macros["calories"] <= _MAX_KCAL_PER_100G:
+        return None
+    return macros
+
+
+def _portion_grams(value: Any) -> float | None:
+    """Parser-reported portion weight, or None when unusable."""
+    try:
+        grams = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(grams) or not 0 < grams <= 5000:  # >5 kg is not a meal
+        return None
+    return grams
+
+
+def _portion_count(value: Any, name: str) -> float:
+    """Item count for per-unit portions: the parser's quantity, else a leading
+    count in the name ("3 eggs"), else 1."""
+    try:
+        count = float(value)
+    except (TypeError, ValueError):
+        count = None
+    if count is None or not math.isfinite(count) or not 0 < count <= 100:
+        leading = re.match(r"\s*(\d{1,2})\s", name)
+        count = float(leading.group(1)) if leading and int(leading.group(1)) > 0 else 1.0
+    return count
+
+
+def _server_scaled_macros(
+    per100: dict[str, float] | None, grams: float | None, count: float, basis: str
+) -> dict[str, float] | None:
+    """Deterministic portion math: per-100g × portion weight, × count when the
+    grams are per unit. None when the parser sent no usable per-100g basis."""
+    if per100 is None or grams is None or basis not in ("per_100g", "per_unit"):
+        return None
+    total_grams = grams * count if basis == "per_unit" else grams
+    if not 0 < total_grams <= 5000:
+        return None
+    factor = total_grams / 100.0
+    try:
+        return domain.validate_macros(
+            *(round(per100[key] * factor, 2) for key in domain.MACRO_KEYS)
+        )
+    except MacroError:
+        return None
+
+
+def _clamped_to_standard_portion(
+    name: str,
+    macros: dict[str, float],
+    per100: dict[str, float] | None,
+    count: float,
+    basis: str,
+) -> dict[str, float] | None:
+    """Re-derive an implausible countable portion from per-100g × standard weight.
+
+    Applies only to portions the parser sized itself (per_unit/per_serving); a
+    user-stated weight (per_100g basis) is taken at face value. Returns the
+    corrected macros, or None when the portion is plausible or unfixable.
+    """
+    if basis == "per_100g":
+        return None
+    for pattern, unit_grams, max_kcal, max_fat in _PORTION_SANITY:
+        if pattern.search(name):
+            break
+    else:
+        return None
+    if macros["calories"] <= max_kcal * count and macros["fat"] <= max_fat * count:
+        return None
+    if per100 is None:
+        logger.warning(
+            "Implausible macros for %r (%s kcal, %sg fat) kept: no per-100g panel to rescale",
+            name, macros["calories"], macros["fat"],
+        )
+        return None
+    factor = unit_grams * count / 100.0
+    try:
+        return domain.validate_macros(
+            *(round(per100[key] * factor, 2) for key in domain.MACRO_KEYS)
+        )
+    except MacroError:
+        return None
+
+
 def _extract_chat_items(content: str) -> tuple[list[Any], str | None]:
     """Accept a bare JSON array (preferred), fenced JSON, or prose for non-food chat."""
     cleaned = content.strip()
@@ -726,10 +841,15 @@ Known foods (values are calories/protein/carbs/fat unless labeled):
 {KNOWN_CHAT_FOODS}
 
 For a food-related message, output ONLY a JSON array with one object per item:
-[{{"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"quantity":null,"grams":null,"basis":"per_unit|per_100g|per_serving","sourced_from":"preset|known|estimate|lookup","meal":"Breakfast|Lunch|Dinner|Snack","note":"source string or ESTIMATE"}}]
-The macros MUST be the FINAL TOTALS for exactly the portion the user stated. You own all portion arithmetic: "2 bananas" means return the macros for both bananas, and "200g sweet potato" means return the macros for 200g. Never return a per-unit or per-100g value when the user asked for a multiple or weighted portion. Set basis to per_unit for whole countable items, per_100g for foods sized from a weight-based value, or per_serving for a complete stated serving such as a bar, bowl, or saved preset. Set sourced_from to preset only when the name exactly identifies an available preset, known only when it exactly identifies a listed known food, lookup when you used lookup_food, or estimate when the macros are your fallback estimate. Prefer an exact available preset over a known-food match when both have the same name. Presets are per serving and have no serving weight: use them for whole servings only. When the user states grams for a preset, call lookup_food and scale its per-100g result instead; if lookup fails, keep your portion estimate labeled ESTIMATE. Use a matching preset or known-food value when possible. Infer the meal from context and time; default to Snack. Set quantity to the number of that item the user states ("1 bar" -> 1, "two cookies" -> 2, "a banana" -> 1); otherwise leave quantity null. Set grams only when the user states the portion weight ("100g chicken" -> 100, "3 oz venison" -> 85, converting oz/lb to grams); leave grams null when no weight is stated — never guess it. Coffee without stated additions is 5 kcal with zero macros. Never add commentary around a food JSON array.
-MANDATORY LOOKUP: For EVERY food that is not an exact preset or exact known food from the lists above, you MUST call lookup_food with its name BEFORE outputting macros. This is not optional — even for common foods like eggs, apples, or bread. Call lookup_food for each such item (you have up to 3 calls; group them one per tool call). Then use the returned per-100g or per-serving values to calculate final macros for the stated portion, set sourced_from to lookup, and copy its source string exactly into note. Never invent a source or macros for a real food while lookup_food is available. If lookup_food fails, returns not found, or the lookup limit is reached, proceed with a reasonable estimate and set note to exactly ESTIMATE.
-SCALING RULE (critical): lookup_food returns macros PER 100g. ALWAYS scale by the actual portion weight. When the user gives no weight, use standard portion weights: 1 large egg = 50g, 1 medium apple = 182g, 1 banana = 118g, 1 slice bread = 29g, 1 cup cooked rice = 158g, 1 chicken breast = 174g, 1 medium avocado = 150g. Example: a medium apple is 182g, so take the per-100g values and multiply by 1.82. Never output the per-100g values as if they were the final portion. Never output fat/protein/calories that are obviously too high for the food (a single apple is never 250 kcal; 3 eggs are never 42g fat).
+[{{"name":"...","macros_per_100g":{{"calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0}},"grams":null,"quantity":null,"basis":"per_unit|per_100g|per_serving","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"sourced_from":"preset|known|estimate|lookup","meal":"Breakfast|Lunch|Dinner|Snack","note":"source string or ESTIMATE"}}]
+THE SERVER DOES ALL PORTION MATH — never scale macros yourself. You report per-100g values plus the portion, and the server multiplies:
+- macros_per_100g: the PER-100g values from lookup_food (or your per-100g estimate when lookup is unavailable), copied verbatim and NEVER scaled by you. Null only for per_serving items.
+- basis "per_unit": countable whole items ("2 eggs", "an apple"). Set grams to the weight of ONE unit and quantity to the count ("3 eggs" -> grams 50, quantity 3). When the user gives no weight, use standard unit weights: large egg 50, medium apple 182, banana 118, bread slice 29, cup cooked rice 158, chicken breast 174, medium avocado 150.
+- basis "per_100g": the user stated a portion weight ("200g sweet potato", "3 oz venison"). Set grams to that TOTAL weight in grams (1 oz = 28.35 g, 1 lb = 454 g) and quantity to null.
+- basis "per_serving": a complete stated serving whose macros are already final — an available preset, a listed known food, or a labeled single serving such as a bar, bowl, or shake. Here calories/protein/carbs/fat/fiber ARE the values that get logged: return the final totals for the stated portion ("2 Barebells" -> both bars), and macros_per_100g may be null.
+Always also fill calories/protein/carbs/fat/fiber with your best final-portion totals; for per_unit and per_100g items they are only a fallback — the server recomputes them as macros_per_100g x grams/100 (x quantity for per_unit).
+Set sourced_from to preset only when the name exactly identifies an available preset, known only when it exactly identifies a listed known food, lookup when you used lookup_food, or estimate when the values are your fallback estimate. Prefer an exact available preset over a known-food match when both have the same name. Presets are per serving and have no serving weight: use them for whole servings only. When the user states grams for a preset, call lookup_food and return its per-100g values with basis per_100g; if lookup fails, keep your portion estimate labeled ESTIMATE. Use a matching preset or known-food value when possible. Infer the meal from context and time; default to Snack. Coffee without stated additions is 5 kcal with zero macros. Never add commentary around a food JSON array.
+MANDATORY LOOKUP: For EVERY food that is not an exact preset or exact known food from the lists above, you MUST call lookup_food with its name BEFORE outputting macros. This is not optional — even for common foods like eggs, apples, or bread. Call lookup_food for each such item (you have up to 5 calls; group them one per tool call). Then copy the returned per-100g values into macros_per_100g unchanged, set sourced_from to lookup, and copy its source string exactly into note. Never invent a source or macros for a real food while lookup_food is available. If lookup_food fails, returns not found, or the lookup limit is reached, proceed with a reasonable per-100g estimate and set note to exactly ESTIMATE.
 If the message is a greeting, question, or otherwise not asking to log food, output [] followed by one short plain-text reply. Do not invent food items."""
     tools = [{
         "type": "function",
@@ -2143,22 +2263,30 @@ async def api_chat(request: Request) -> Any:
         try:
             requested_day = body.get("date")
             day = domain.parse_date(requested_day) if requested_day is not None else domain.effective_date()
-            validated: list[tuple[str, dict[str, float], str, Any, Any, str, str, str]] = []
+            validated: list[tuple[str, dict[str, float], str, float | None, float,
+                                  str, str, str, dict[str, float] | None]] = []
             for raw in raw_items[:10]:
                 if not isinstance(raw, dict):
                     raise MacroError("I couldn't understand one of those food items. Please rephrase it.")
                 clean_name = domain.validate_name(str(raw.get("name", "")))
-                macros = domain.validate_macros(
-                    raw.get("calories"), raw.get("protein"), raw.get("carbs"),
-                    raw.get("fat"), raw.get("fiber", 0)
-                )
                 meal_name = domain.normalize_meal(raw.get("meal"))
                 basis = str(raw.get("basis") or "").strip().casefold()
                 sourced_from = str(raw.get("sourced_from") or "estimate").strip().casefold()
                 note = str(raw.get("note") or "ESTIMATE").strip()
+                per100 = _per_100g_macros(raw.get("macros_per_100g"))
+                grams = _portion_grams(raw.get("grams"))
+                count = _portion_count(raw.get("quantity"), clean_name)
+                # The server owns portion arithmetic; the parser's own final
+                # numbers are only a fallback when it sent no per-100g panel.
+                macros = _server_scaled_macros(per100, grams, count, basis)
+                if macros is None:
+                    macros = domain.validate_macros(
+                        raw.get("calories"), raw.get("protein"), raw.get("carbs"),
+                        raw.get("fat"), raw.get("fiber", 0)
+                    )
                 validated.append(
-                    (clean_name, macros, meal_name, raw.get("grams"), raw.get("quantity"),
-                     basis, sourced_from, note)
+                    (clean_name, macros, meal_name, grams, count,
+                     basis, sourced_from, note, per100)
                 )
 
             logged: list[dict[str, Any]] = []
@@ -2172,7 +2300,7 @@ async def api_chat(request: Request) -> Any:
             # The parser chooses a route, but only a real exact preset/known
             # record can mint one of those source labels.
             preset_gram_lookups_left = 3
-            for clean_name, macros, meal_name, grams, quantity, basis, sourced_from, note in validated:
+            for clean_name, macros, meal_name, grams, count, basis, sourced_from, note, per100 in validated:
                 normalized_name = _normalized_food_name(clean_name)
                 preset = preset_by_name.get(normalized_name)
                 known_name = known_by_name.get(normalized_name)
@@ -2180,10 +2308,9 @@ async def api_chat(request: Request) -> Any:
                     preset_macros = domain.validate_macros(
                         *(preset.get(key) for key in domain.MACRO_KEYS)
                     )
-                    try:
-                        stated_grams = float(grams)
-                    except (TypeError, ValueError):
-                        stated_grams = None
+                    # Per-unit grams are the parser's standard unit weight, not
+                    # a user-stated portion; only a stated weight resizes a preset.
+                    stated_grams = grams if basis != "per_unit" else None
                     if stated_grams is not None and stated_grams > 0:
                         try:
                             serving_weight = float(preset.get("serving_weight_g"))
@@ -2206,14 +2333,8 @@ async def api_chat(request: Request) -> Any:
                             else:
                                 source = "ESTIMATE"
                     else:
-                        try:
-                            servings = float(quantity)
-                        except (TypeError, ValueError):
-                            servings = 1
-                        if servings <= 0:
-                            servings = 1
                         macros = domain.validate_macros(
-                            *(round(preset_macros[key] * servings, 2)
+                            *(round(preset_macros[key] * count, 2)
                               for key in domain.MACRO_KEYS)
                         )
                         source = f'Meal Preset: {preset["name"]}'
@@ -2224,6 +2345,16 @@ async def api_chat(request: Request) -> Any:
                     source = f"Known food: {known_name}"
                 else:
                     source = note if sourced_from == "lookup" else "ESTIMATE"
+                    clamped = _clamped_to_standard_portion(
+                        clean_name, macros, per100, count, basis
+                    )
+                    if clamped is not None:
+                        logger.warning(
+                            "Implausible parser portion for %r (%s kcal, %sg fat); "
+                            "reclamped to per-100g × standard portion",
+                            clean_name, macros["calories"], macros["fat"],
+                        )
+                        macros = clamped
                 result = await write_meal(
                     clean_name, macros["calories"], macros["protein"], macros["carbs"],
                     macros["fat"], source, meal_name, day.isoformat(), allow_estimate=True,

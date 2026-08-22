@@ -749,6 +749,131 @@ async def test_food_message_goes_through_parser_not_coach(monkeypatch):
     assert seen.get("parsed") is True
 
 
+def _fast_path_env(monkeypatch, items):
+    """Wire the food fast-path with a canned parser result; return the writes."""
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    written = []
+
+    async def fake_parse(_message):
+        return (items, None, [])
+
+    async def unexpected_run_agent(*_args, **_kw):
+        pytest.fail("food logging must go through the parser fast-path, never the coach loop")
+
+    async def fake_day_payload(_day, **_kw):
+        return {"totals": {"calories": 0}, "targets": {"calories": 2000}}
+
+    async def fake_write_meal(name, calories, protein, carbs, fat, source,
+                              meal, _day, allow_estimate=False, fiber=0):
+        written.append({"name": name, "calories": calories, "protein": protein,
+                        "carbs": carbs, "fat": fat, "fiber": fiber,
+                        "source": source, "meal": meal})
+        return {"logged": {"name": name, "calories": calories}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "run_agent", unexpected_run_agent)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    return written
+
+
+EGG_PER_100G = {"calories": 143, "protein": 12.6, "carbs": 0.7, "fat": 9.5, "fiber": 0}
+APPLE_PER_100G = {"calories": 52, "protein": 0.3, "carbs": 13.8, "fat": 0.2, "fiber": 2.4}
+
+
+async def test_server_scales_per_unit_portion_and_ignores_parser_finals(monkeypatch):
+    """3 eggs = 3 × 50 g × per-100g, computed by the server. The parser's own
+    (absurd) final numbers never reach the log."""
+    written = _fast_path_env(monkeypatch, [{
+        "name": "eggs", "macros_per_100g": EGG_PER_100G,
+        "grams": 50, "quantity": 3, "basis": "per_unit",
+        "calories": 999, "protein": 5, "carbs": 30, "fat": 42, "fiber": 0,
+        "sourced_from": "lookup", "meal": "Breakfast", "note": "USDA FDC: 173424",
+    }])
+
+    response = await srv.api_chat(chat_request({"message": "3 eggs"}))
+
+    assert response.status_code == 200
+    assert written == [{
+        "name": "eggs", "calories": 214.5, "protein": 18.9, "carbs": 1.05,
+        "fat": 14.25, "fiber": 0.0, "source": "USDA FDC: 173424", "meal": "Breakfast",
+    }]
+
+
+async def test_server_scales_per_100g_and_single_unit_portions(monkeypatch):
+    """A stated weight scales as grams/100; one apple scales by its unit weight."""
+    written = _fast_path_env(monkeypatch, [
+        {"name": "Dave's bread toast", "macros_per_100g": {
+            "calories": 270, "protein": 12, "carbs": 44, "fat": 4, "fiber": 6},
+         "grams": 21, "quantity": None, "basis": "per_100g",
+         "calories": 57, "protein": 2.5, "carbs": 9.2, "fat": 0.8, "fiber": 1.3,
+         "sourced_from": "lookup", "meal": "Breakfast", "note": "OpenFoodFacts: Dave's Killer Bread"},
+        {"name": "green apple", "macros_per_100g": APPLE_PER_100G,
+         "grams": 182, "quantity": 1, "basis": "per_unit",
+         "calories": 95, "protein": 0.5, "carbs": 25, "fat": 0.4, "fiber": 4.4,
+         "sourced_from": "lookup", "meal": "Snack", "note": "USDA FDC: 171688"},
+    ])
+
+    response = await srv.api_chat(chat_request({"message": "1 Dave's bread 21g toast and 1 green apple"}))
+
+    assert response.status_code == 200
+    assert written[0]["calories"] == round(270 * 0.21, 2)  # 56.7
+    assert written[0]["fat"] == round(4 * 0.21, 2)
+    assert written[1]["calories"] == round(52 * 1.82, 2)  # 94.64
+    assert written[1]["carbs"] == round(13.8 * 1.82, 2)
+
+
+async def test_absurd_parser_portion_is_clamped_to_standard_portion(monkeypatch):
+    """Implausible per-unit output is rebuilt as per-100g × standard weight:
+    an apple never logs 254 kcal, 3 eggs never log 42 g fat."""
+    written = _fast_path_env(monkeypatch, [
+        # Absurd unit weight: computed 500 g apple (260 kcal) breaks the
+        # single-apple ceiling and is re-derived at the standard 182 g.
+        {"name": "green apple", "macros_per_100g": APPLE_PER_100G,
+         "grams": 500, "quantity": 1, "basis": "per_unit",
+         "calories": 254, "protein": 1, "carbs": 67, "fat": 1, "fiber": 12,
+         "sourced_from": "lookup", "meal": "Snack", "note": "USDA FDC: 171688"},
+        # Absurd per_serving finals: the fat ceiling (6.5 g/egg) trips and the
+        # portion is rebuilt as 3 × 50 g of the looked-up per-100g panel.
+        {"name": "eggs", "macros_per_100g": EGG_PER_100G,
+         "grams": None, "quantity": 3, "basis": "per_serving",
+         "calories": 645, "protein": 19, "carbs": 1, "fat": 42, "fiber": 0,
+         "sourced_from": "lookup", "meal": "Breakfast", "note": "USDA FDC: 173424"},
+    ])
+
+    response = await srv.api_chat(chat_request({"message": "an apple and 3 eggs"}))
+
+    assert response.status_code == 200
+    assert written[0]["calories"] == 94.64  # 52 × 1.82, not 260
+    assert written[1]["calories"] == 214.5  # 143 × 1.5, not 645
+    assert written[1]["fat"] == 14.25  # never 42
+
+
+async def test_per_serving_without_per_100g_logs_parser_finals_as_is(monkeypatch):
+    """A complete serving with no per-100g panel (and no sanity match) passes
+    through unchanged; a user-stated weight is never clamped."""
+    written = _fast_path_env(monkeypatch, [
+        {"name": "mystery stew", "macros_per_100g": None,
+         "grams": None, "quantity": None, "basis": "per_serving",
+         "calories": 300, "protein": 12, "carbs": 35, "fat": 12, "fiber": 4,
+         "sourced_from": "estimate", "meal": "Dinner", "note": "ESTIMATE"},
+        # 500 g of apple slices at a user-stated weight keeps its real size.
+        {"name": "apple slices", "macros_per_100g": APPLE_PER_100G,
+         "grams": 500, "quantity": None, "basis": "per_100g",
+         "calories": 260, "protein": 1.5, "carbs": 69, "fat": 1, "fiber": 12,
+         "sourced_from": "lookup", "meal": "Snack", "note": "USDA FDC: 171688"},
+    ])
+
+    response = await srv.api_chat(chat_request({"message": "stew and 500g apple slices"}))
+
+    assert response.status_code == 200
+    assert written[0]["calories"] == 300
+    assert written[0]["source"] == "ESTIMATE"
+    assert written[1]["calories"] == 260.0  # 52 × 5 — stated weight wins
+    assert written[1]["source"] == "USDA FDC: 171688"
+
+
 def test_chat_quota_window_rolls_at_4am_not_midnight():
     tz = domain.LOCAL_TZ
     start, end = domain.effective_day_window(datetime(2026, 8, 19, 2, 30, tzinfo=tz))

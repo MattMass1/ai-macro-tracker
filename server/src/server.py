@@ -615,7 +615,10 @@ TJ artisan roll 200/8/38/2
 sweet potato about 86 kcal/100g
 3 large eggs 216/19/1/14
 McNuggets 10pc 410/24/25/25
-Michelob Ultra 95 kcal, 0g protein, 2.6g carbs, 0g fat"""
+Michelob Ultra 95 kcal, 0g protein, 2.6g carbs, 0g fat
+Chipotle bowl 625/75/45/16
+Chipotle burrito 945/83/100/24
+CFA 8ct grilled nuggets + grilled club + sauce 710/62/45/31"""
 
 KNOWN_CHAT_FOOD_NAMES = (
     "Moe's cookie",
@@ -630,6 +633,9 @@ KNOWN_CHAT_FOOD_NAMES = (
     "3 large eggs",
     "McNuggets 10pc",
     "Michelob Ultra",
+    "Chipotle bowl",
+    "Chipotle burrito",
+    "CFA 8ct grilled nuggets + grilled club + sauce",
 )
 
 

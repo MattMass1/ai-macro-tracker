@@ -644,6 +644,42 @@ def _normalized_food_name(name: str) -> str:
     return " ".join(name.split()).casefold()
 
 
+# Restaurant orders the parser kept refusing (no USDA/label to "verify").
+# Base macros: calories/protein/carbs/fat. Keyed by lowercase trigger phrase.
+_SHORT_CIRCUIT_FOODS: dict[str, dict[str, float]] = {
+    "chipotle bowl": {"calories": 625, "protein": 75, "carbs": 45, "fat": 16},
+    "chipotle burrito": {"calories": 945, "protein": 83, "carbs": 100, "fat": 24},
+    "cfa lunch": {"calories": 710, "protein": 62, "carbs": 45, "fat": 31},
+    "chick-fil-a lunch": {"calories": 710, "protein": 62, "carbs": 45, "fat": 31},
+}
+
+
+def _short_circuit_known_food(message: str) -> dict[str, Any] | None:
+    """Deterministically match a restaurant order to its known base macros.
+
+    Returns a parser-style item dict (so the write path treats it as known),
+    or None when no short-circuit phrase matches.
+    """
+    lowered = " ".join(message.split()).casefold()
+    for phrase, macros in _SHORT_CIRCUIT_FOODS.items():
+        if phrase in lowered:
+            return {
+                "name": phrase,
+                "calories": macros["calories"],
+                "protein": macros["protein"],
+                "carbs": macros["carbs"],
+                "fat": macros["fat"],
+                "fiber": 0,
+                "quantity": 1,
+                "grams": None,
+                "basis": "per_serving",
+                "sourced_from": "known",
+                "meal": "Snack",
+                "note": f"Known food: {phrase}",
+            }
+    return None
+
+
 def _extract_chat_items(content: str) -> tuple[list[Any], str | None]:
     """Accept a bare JSON array (preferred), fenced JSON, or prose for non-food chat."""
     cleaned = content.strip()
@@ -2138,13 +2174,21 @@ async def api_chat(request: Request) -> Any:
     if structured_metrics is not None:
         raw_items = []
     else:
-        try:
-            parsed_food = await parse_chat_message(text)
-            raw_items, _ = parsed_food[:2]
-            presets = parsed_food[2] if len(parsed_food) > 2 else await fetch_presets()
-        except Exception:
-            logger.exception("Food parser failed; falling back to coach")
-            raw_items = []
+        # ── Deterministic restaurant-order short-circuit (before the LLM) ──
+        # The parser model kept refusing complex orders (Chipotle) because it
+        # can't "verify" restaurant macros. Match the known base entry in code.
+        short_circuit = _short_circuit_known_food(text)
+        if short_circuit is not None:
+            raw_items = [short_circuit]
+            presets = []
+        else:
+            try:
+                parsed_food = await parse_chat_message(text)
+                raw_items, _ = parsed_food[:2]
+                presets = parsed_food[2] if len(parsed_food) > 2 else await fetch_presets()
+            except Exception:
+                logger.exception("Food parser failed; falling back to coach")
+                raw_items = []
     if raw_items:
         try:
             requested_day = body.get("date")

@@ -17,7 +17,6 @@ import coach  # noqa: E402
 import food_lookup  # noqa: E402
 import server as srv  # noqa: E402
 from auth import bind_user, reset_user  # noqa: E402
-from domain import MacroError  # noqa: E402
 from test_coach import FakeStore, chat_request  # noqa: E402
 
 USDA_PAYLOAD = {"foods": [{
@@ -735,14 +734,14 @@ async def test_parser_known_food_skips_lookup(monkeypatch):
     assert items[0]["sourced_from"] == "known"
 
 
-async def test_parser_lookup_tool_executes_at_most_five_calls(monkeypatch):
+async def test_parser_lookup_tool_executes_at_most_three_calls(monkeypatch):
     monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-openai-token")
     monkeypatch.setattr(srv, "_client", FakeStore())
     resolved = []
     tool_calls = [{
         "id": f"lookup-{index}", "type": "function",
         "function": {"name": "lookup_food", "arguments": json.dumps({"name": f"food {index}"})},
-    } for index in range(6)]
+    } for index in range(4)]
     responses = [
         _openai_response({"role": "assistant", "content": None, "tool_calls": tool_calls}),
         _openai_response({"role": "assistant", "content": "[]"}),
@@ -760,8 +759,8 @@ async def test_parser_lookup_tool_executes_at_most_five_calls(monkeypatch):
     monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
     monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
 
-    await srv.parse_chat_message("six unknown foods")
-    assert resolved == ["food 0", "food 1", "food 2", "food 3", "food 4"]
+    await srv.parse_chat_message("four unknown foods")
+    assert resolved == ["food 0", "food 1", "food 2"]
     assert final_payload["tool_choice"] == "none"
 
 
@@ -794,71 +793,220 @@ async def test_coach_lookup_food_tool_returns_hit_and_not_found(monkeypatch):
         reset_user(token)
 
 
-async def test_food_message_routes_to_parser_not_coach(monkeypatch):
-    """Split models (Matt's call): a food message goes through the gpt-4o-mini
-    parser fast-path; the coach loop must NOT run for food."""
+async def test_food_path_does_not_repeat_parser_lookup(monkeypatch):
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
     seen = {}
 
     async def fake_parse(_message):
-        seen["parsed"] = True
-        return ([{"name": "eggs", "calories": 140, "protein": 12, "carbs": 1, "fat": 10, "fiber": 0,
-                   "quantity": 2, "grams": None, "basis": "per_unit", "sourced_from": "lookup",
-                   "meal": "Breakfast", "note": "USDA: egg, whole, cooked"}], None, [])
-
-    async def unexpected_run_agent(*args, **kw):
-        pytest.fail("food logging must go through the parser fast-path, never the coach loop")
-
-    async def fake_day_payload(_day, **kw):
-        return {"totals": {"calories": 140}, "targets": {"calories": 2000}}
-
-    async def fake_write_meal(*args, **kw):
-        return {"logged": {"name": args[0], "calories": 140}}
-
-    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
-    monkeypatch.setattr(srv, "run_agent", unexpected_run_agent)
-    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
-    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
-
-    http_response = await srv.api_chat(chat_request({"message": "log 2 eggs and toast"}))
-    assert http_response.status_code == 200
-    assert seen.get("parsed") is True
-
-
-async def test_coach_lookup_food_source_is_required_for_log_meal(monkeypatch):
-    """The unified path keeps provenance: lookup_food hands the coach a real
-    source and log_meal still refuses placeholder sources."""
-    fake = FakeStore()
-    monkeypatch.setattr(srv, "_client", fake)
+        return [{"name": "sliced banana", "calories": 105, "protein": 2, "carbs": 25,
+                 "fat": 1, "fiber": 3, "grams": 150, "meal": "Snack",
+                 "note": "ESTIMATE"}], None
 
     async def fake_resolve(query):
-        assert query == "greek yogurt"
+        assert query == "sliced banana"
         return BANANA_HIT
 
+    async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
+                              meal, day_value, allow_estimate=False, fiber=0):
+        seen.update(name=name, calories=calories, protein=protein,
+                    macro_source=macro_source, allow_estimate=allow_estimate)
+        return {"logged": {"name": name, "calories": calories, "protein": protein,
+                           "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
+
+    async def fake_day_payload(_day, ensure=None):
+        return {"totals": {"calories": 105}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
     monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
 
-    handlers = srv._coach_tool_handlers()
-    token = bind_user(uuid4())
-    try:
-        lookup = await handlers["lookup_food"]({"query": "greek yogurt"})
-        args = {
-            "name": "Greek yogurt", "meal_type": "Snack",
-            "calories": 100, "protein": 10, "carbs": 5, "fat": 0, "fiber": 0,
+    response = await srv.api_chat(chat_request({"message": "I ate 150g of banana"}))
+    assert response.status_code == 200
+    assert seen["macro_source"] == "ESTIMATE"
+    assert seen["calories"] == 105.0
+    assert seen["protein"] == 2.0
+    assert seen["allow_estimate"] is True
+    payload = json.loads(response.body)
+    assert payload["logged"][0]["name"] == "sliced banana"
+
+
+async def test_food_path_gram_portion_takes_precedence_over_quantity(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    seen = {}
+
+    async def fake_parse(_message):
+        return [{"name": "sliced banana", "calories": 105, "protein": 2,
+                 "carbs": 25, "fat": 1, "fiber": 3, "quantity": 1,
+                 "grams": 100, "meal": "Snack", "note": "ESTIMATE"}], None
+
+    async def fake_resolve(query, *, whole_item=False):
+        assert query == "sliced banana"
+        assert whole_item is False
+        return BANANA_HIT
+
+    async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
+                              meal, day_value, allow_estimate=False, fiber=0):
+        seen.update(calories=calories, protein=protein, carbs=carbs, fat=fat,
+                    fiber=fiber, macro_source=macro_source)
+        return {"logged": {"name": name, "calories": calories, "protein": protein,
+                           "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
+
+    async def fake_day_payload(_day, ensure=None):
+        return {"totals": {"calories": 89}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+
+    response = await srv.api_chat(chat_request({"message": "1 100g banana"}))
+    assert response.status_code == 200
+    assert seen == {
+        "calories": 105.0, "protein": 2.0, "carbs": 25.0, "fat": 1.0,
+        "fiber": 3.0, "macro_source": "ESTIMATE",
+    }
+
+
+async def test_food_path_labels_unsourced_lookup_miss_as_estimate(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    seen = {}
+    lookups = []
+    items = [{"name": "mystery smoothie", "calories": 300, "protein": 10,
+              "carbs": 40, "fat": 8, "fiber": 2, "grams": 400, "meal": "Snack",
+              "note": "ESTIMATE"}]
+
+    async def fake_parse(_message):
+        return items, None
+
+    async def fake_miss(query):
+        lookups.append(query)
+        return None
+
+    async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
+                              meal, day_value, allow_estimate=False, fiber=0):
+        seen.update(macro_source=macro_source, calories=calories)
+        return {"logged": {"name": name, "calories": calories, "protein": protein,
+                           "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
+
+    async def fake_day_payload(_day, ensure=None):
+        return {"totals": {"calories": 300}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_miss)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+
+    # Grams stated but both databases miss: parser macros stay, honestly labeled.
+    response = await srv.api_chat(chat_request({"message": "400g smoothie"}))
+    assert response.status_code == 200
+    assert seen["macro_source"] == "ESTIMATE"
+    assert seen["calories"] == 300.0
+    assert lookups == []
+
+    # No grams or whole-item intent: nothing can be scaled honestly, so no
+    # additional lookup fires.
+    items[0].pop("grams")
+    response = await srv.api_chat(chat_request({"message": "smoothie"}))
+    assert response.status_code == 200
+    assert seen["macro_source"] == "ESTIMATE"
+    assert lookups == []
+
+
+async def test_food_path_upgrades_whole_item_from_serving_panel(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    seen = {}
+    lookup_queries = []
+
+    async def fake_parse(_message):
+        return [{"name": "Chipotle chicken burrito bowl", "calories": 600,
+                 "protein": 40, "carbs": 80, "fat": 20, "fiber": 2,
+                 "grams": None, "quantity": 1, "meal": "Lunch",
+                 "basis": "per_serving", "sourced_from": "cascade"}], None
+
+    async def fake_usda(query):
+        lookup_queries.append(("usda", query))
+        return {
+            "name": "Barebells Protein Bar",
+            "macros_per_100g": {
+                "calories": 364,
+                "protein": 36,
+                "carbs": 33,
+                "fat": 15,
+                "fiber": 5,
+            },
+            "source": "USDA FDC: 123456",
         }
-        with pytest.raises(MacroError):
-            await handlers["log_meal"]({**args, "macro_source": "estimate"})
-        with pytest.raises(MacroError):
-            await handlers["log_meal"]({**args, "macro_source": " "})
-        # The looked-up source passes the provenance gate and lands in the write.
-        result = await handlers["log_meal"]({**args, "macro_source": lookup["source"]})
-    finally:
-        reset_user(token)
 
-    assert lookup["source"] == BANANA_HIT["source"]
-    assert result["logged"]["macro_source"] == BANANA_HIT["source"]
-    assert fake.meals[-1]["macro_source"] == BANANA_HIT["source"]
-    assert fake.meals[-1]["name"] == "Greek yogurt"
+    async def fake_off(query):
+        lookup_queries.append(("off", query))
+        return None
+
+    async def fake_tavily(query):
+        lookup_queries.append(("tavily", query))
+        return food_lookup._tavily_result("1 Chipotle chicken burrito bowl", {
+            "title": "Chipotle Chicken Burrito Bowl Nutrition",
+            "url": "https://example.com/chipotle-bowl",
+            "content": (
+                "Serving size 1 bowl Calories 700 Protein 50g "
+                "Carbohydrate 70g Fat 24g Fiber 10g"
+            ),
+        })
+
+    async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
+                              meal, day_value, allow_estimate=False, fiber=0):
+        seen.update(calories=calories, macro_source=macro_source)
+        return {"logged": {"name": name, "calories": calories, "protein": protein,
+                           "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
+
+    async def fake_day_payload(_day, ensure=None):
+        return {"totals": {"calories": 700}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(food_lookup, "search_usda", fake_usda)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", fake_off)
+    monkeypatch.setattr(food_lookup, "search_tavily", fake_tavily)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+
+    response = await srv.api_chat(
+        chat_request({"message": "log 1 chipotle chicken burrito bowl"})
+    )
+    assert response.status_code == 200
+    assert seen == {"calories": 600.0, "macro_source": "ESTIMATE"}
+    assert lookup_queries == []
+
+    async def fake_parse_multiple(_message):
+        return [
+            {"name": "Barebells", "calories": 210, "protein": 18,
+             "carbs": 22, "fat": 8, "fiber": 2, "quantity": 1,
+             "grams": None, "meal": "Snack", "basis": "per_serving",
+             "sourced_from": "known"},
+            {"name": "cookies", "calories": 180, "protein": 2,
+             "carbs": 28, "fat": 8, "fiber": 1, "quantity": 2,
+             "grams": None, "meal": "Snack", "basis": "per_unit",
+             "sourced_from": "cascade"},
+        ], None
+
+    async def fake_resolve_multiple(query, *, whole_item=False):
+        lookup_queries.append((query, whole_item))
+        return None
+
+    lookup_queries.clear()
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse_multiple)
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve_multiple)
+
+    response = await srv.api_chat(
+        chat_request({"message": "log 1 Barebells and 2 cookies"})
+    )
+    assert response.status_code == 200
+    # A routed exact known-food match bypasses lookup. The parser already
+    # returned final macros for two cookies, so no one-serving cascade runs.
+    assert lookup_queries == []
 
 
 async def test_whole_item_per_100g_only_keeps_flagged_estimate(monkeypatch):
@@ -869,3 +1017,123 @@ async def test_whole_item_per_100g_only_keeps_flagged_estimate(monkeypatch):
     assert await srv._upgrade_estimate(
         "mystery bar", None, whole_item=True
     ) is None
+
+
+async def test_food_path_derives_sources_from_exact_real_data_matches(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    seen = []
+
+    async def fake_parse(_message):
+        return [
+            {"name": "  bareBELLS  ", "calories": 200, "protein": 20, "carbs": 21,
+             "fat": 7, "fiber": 0, "quantity": 2, "grams": 300, "meal": "Snack",
+             "basis": "per_serving", "sourced_from": "preset"},
+            {"name": "Banana", "calories": 210, "protein": 2, "carbs": 54,
+             "fat": 0, "fiber": 6, "quantity": 2, "meal": "Snack",
+             "basis": "per_unit", "sourced_from": "known"},
+            {"name": "sweet potato", "calories": 172, "protein": 3.2,
+             "carbs": 40.2, "fat": 0.2, "fiber": 6, "quantity": 1,
+             "grams": 200, "meal": "Lunch", "basis": "per_100g",
+             "sourced_from": "known"},
+            {"name": "93/7 ground beef", "calories": 340, "protein": 44,
+             "carbs": 0, "fat": 17.6, "fiber": 0, "quantity": 1,
+             "meal": "Dinner", "basis": "per_unit", "sourced_from": "known"},
+            {"name": "pizza", "calories": 200, "protein": 8, "carbs": 24,
+             "fat": 8, "fiber": 1, "quantity": 1, "meal": "Snack",
+             "basis": "per_serving", "sourced_from": "preset"},
+            {"name": "pizza", "calories": 200, "protein": 8, "carbs": 24,
+             "fat": 8, "fiber": 1, "quantity": 1, "meal": "Snack",
+             "basis": "per_serving", "sourced_from": "known"},
+            {"name": "Barebells pizza", "calories": 300, "protein": 12,
+             "carbs": 30, "fat": 14, "fiber": 1, "quantity": 1,
+             "meal": "Snack", "basis": "per_serving",
+             "sourced_from": "preset"},
+        ], None, [{
+            "name": "Barebells", "calories": 210, "protein": 22,
+            "carbs": 19, "fat": 8, "fiber": 4,
+        }]
+
+    lookup_queries = []
+
+    async def fake_resolve(query, *, whole_item=False):
+        lookup_queries.append((query, whole_item))
+        return None
+
+    async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
+                              meal, day_value, allow_estimate=False, fiber=0):
+        seen.append((macro_source, calories, protein, carbs, fat, fiber))
+        return {"logged": {"name": name, "calories": calories, "protein": protein,
+                           "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
+
+    async def fake_day_payload(_day, ensure=None):
+        return {"totals": {"calories": 200}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+
+    response = await srv.api_chat(chat_request({"message": "a Barebells and a banana"}))
+    assert response.status_code == 200
+    assert lookup_queries == [("bareBELLS", False)]
+    assert seen == [
+        ("ESTIMATE", 200.0, 20.0, 21.0, 7.0, 0.0),
+        ("Known food: Banana", 210.0, 2.0, 54.0, 0.0, 6.0),
+        ("Known food: sweet potato", 172.0, 3.2, 40.2, 0.2, 6.0),
+        ("Known food: 93/7 ground beef", 340.0, 44.0, 0.0, 17.6, 0.0),
+        ("ESTIMATE", 200.0, 8.0, 24.0, 8.0, 1.0),
+        ("ESTIMATE", 200.0, 8.0, 24.0, 8.0, 1.0),
+        ("ESTIMATE", 300.0, 12.0, 30.0, 14.0, 1.0),
+    ]
+
+
+async def test_food_path_weightless_preset_grams_use_cascade(monkeypatch):
+    monkeypatch.setattr(srv, "_client", FakeStore())
+    seen = {}
+
+    async def fake_parse(_message):
+        return [{
+            "name": "chili", "calories": 360, "protein": 24,
+            "carbs": 30, "fat": 15, "fiber": 9, "quantity": 1,
+            "grams": 100, "basis": "per_100g", "sourced_from": "preset",
+            "meal": "Dinner", "note": "Meal Preset: chili",
+        }], None, [{
+            "name": "chili", "calories": 360, "protein": 24,
+            "carbs": 30, "fat": 15, "fiber": 9,
+        }]
+
+    async def fake_resolve(name):
+        assert name == "chili"
+        return {
+            "name": "Chili with beans",
+            "macros_per_100g": {
+                "calories": 120, "protein": 8, "carbs": 10,
+                "fat": 5, "fiber": 3,
+            },
+            "source": "USDA FDC: 999999",
+        }
+
+    async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
+                              meal, day_value, allow_estimate=False, fiber=0):
+        seen.update(calories=calories, protein=protein, carbs=carbs, fat=fat,
+                    fiber=fiber, macro_source=macro_source)
+        return {"logged": {"name": name, "calories": calories, "protein": protein,
+                           "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
+
+    async def fake_day_payload(_day, ensure=None):
+        return {"totals": {"calories": 120}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+
+    response = await srv.api_chat(chat_request({"message": "100g chili"}))
+
+    assert response.status_code == 200
+    assert seen == {
+        "calories": 120.0, "protein": 8.0, "carbs": 10.0, "fat": 5.0,
+        "fiber": 3.0,
+        "macro_source": "USDA FDC: 999999 — Chili with beans, 100 g",
+    }

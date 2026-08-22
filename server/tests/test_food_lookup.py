@@ -735,14 +735,14 @@ async def test_parser_known_food_skips_lookup(monkeypatch):
     assert items[0]["sourced_from"] == "known"
 
 
-async def test_parser_lookup_tool_executes_at_most_three_calls(monkeypatch):
+async def test_parser_lookup_tool_executes_at_most_five_calls(monkeypatch):
     monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-openai-token")
     monkeypatch.setattr(srv, "_client", FakeStore())
     resolved = []
     tool_calls = [{
         "id": f"lookup-{index}", "type": "function",
         "function": {"name": "lookup_food", "arguments": json.dumps({"name": f"food {index}"})},
-    } for index in range(4)]
+    } for index in range(6)]
     responses = [
         _openai_response({"role": "assistant", "content": None, "tool_calls": tool_calls}),
         _openai_response({"role": "assistant", "content": "[]"}),
@@ -760,8 +760,8 @@ async def test_parser_lookup_tool_executes_at_most_three_calls(monkeypatch):
     monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
     monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
 
-    await srv.parse_chat_message("four unknown foods")
-    assert resolved == ["food 0", "food 1", "food 2"]
+    await srv.parse_chat_message("six unknown foods")
+    assert resolved == ["food 0", "food 1", "food 2", "food 3", "food 4"]
     assert final_payload["tool_choice"] == "none"
 
 

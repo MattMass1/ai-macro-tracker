@@ -667,24 +667,26 @@ async def test_chat_failure_persists_user_and_synthetic_assistant(monkeypatch):
 
 
 async def test_every_message_routes_to_coach_without_parser(monkeypatch):
-    """One agent under the hood: no parser fast-path exists anymore, so every
-    message — including food and plan requests — reaches the coach raw."""
+    """Split models (Matt's call): NON-food messages reach the coach; the
+    parser fast-path only handles food and is not invoked for coaching."""
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
     seen = {}
 
-    async def unexpected_parse(_message):
-        pytest.fail("there is no parser path anymore")
+    async def parse_returns_empty(_message):
+        seen["parsed"] = True
+        return ([], None, [])
 
     async def fake_run_agent(**kwargs):
         seen.update(kwargs)
         return "Let's work on that.", []
 
-    monkeypatch.setattr(srv, "parse_chat_message", unexpected_parse)
+    monkeypatch.setattr(srv, "parse_chat_message", parse_returns_empty)
     monkeypatch.setattr(srv, "run_agent", fake_run_agent)
 
     http_response = await srv.api_chat(chat_request({"message": "  build me a gym plan  "}))
     assert http_response.status_code == 200
+    assert seen.get("parsed") is True
     assert seen["message"] == "build me a gym plan"
     assert [(row[0], row[1]) for row in fake.inserted] == [
         ("user", "build me a gym plan"),
@@ -694,17 +696,17 @@ async def test_every_message_routes_to_coach_without_parser(monkeypatch):
 
 async def test_coach_error_keeps_friendly_fallback_without_parser(monkeypatch):
     """A coach failure still yields the friendly 502 reply; the parser path
-    must never be resurrected as a fallback."""
+    is for food only and never used as a coach fallback."""
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
 
-    async def unexpected_parse(_message):
-        pytest.fail("the parser fast-path must not be resurrected on coach error")
+    async def fake_parse(_message):
+        return ([], None, [])
 
     async def failing_run_agent(**_kw):
         raise CoachProviderError("The coach is having trouble connecting. Try again in a moment.")
 
-    monkeypatch.setattr(srv, "parse_chat_message", unexpected_parse)
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
     monkeypatch.setattr(srv, "run_agent", failing_run_agent)
 
     http_response = await srv.api_chat(chat_request({"message": "log 2 eggs"}))
@@ -715,35 +717,36 @@ async def test_coach_error_keeps_friendly_fallback_without_parser(monkeypatch):
     ]
 
 
-async def test_food_message_goes_through_coach_not_parser(monkeypatch):
-    """Matt's one-agent directive: a food message goes to the coach loop, not
-    the gpt-4o-mini parser fast-path. The coach holds the food tools."""
+async def test_food_message_goes_through_parser_not_coach(monkeypatch):
+    """Split models (Matt's call): a food message goes to the gpt-4o-mini
+    parser fast-path; the coach loop must not run for food."""
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
     seen = {}
 
-    async def unexpected_parse(_message):
-        pytest.fail("food logging must go through the coach, never the parser fast-path")
+    async def fake_parse(_message):
+        seen["parsed"] = True
+        return ([{"name": "eggs", "calories": 140, "protein": 12, "carbs": 1, "fat": 10, "fiber": 0,
+                   "quantity": 2, "grams": None, "basis": "per_unit", "sourced_from": "lookup",
+                   "meal": "Breakfast", "note": "USDA: egg, whole, cooked"}], None, [])
 
-    async def fake_run_agent(*, history, message, onboarding, handlers, record_usage=None, **_kw):
-        seen.update(message=message, onboarding=onboarding)
-        assert "lookup_food" in handlers and "log_meal" in handlers
-        return "2 eggs and toast, on it.", [{"tool": "log_meal", "input": {}, "ok": True}]
+    async def unexpected_run_agent(*args, **kw):
+        pytest.fail("food logging must go through the parser fast-path, never the coach loop")
 
-    async def fake_day_payload(_day):
-        return {"totals": {"calories": 0}}
+    async def fake_day_payload(_day, **kw):
+        return {"totals": {"calories": 140}, "targets": {"calories": 2000}}
 
-    monkeypatch.setattr(srv, "parse_chat_message", unexpected_parse)
-    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    async def fake_write_meal(*args, **kw):
+        return {"logged": {"name": args[0], "calories": 140}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "run_agent", unexpected_run_agent)
     monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
 
     http_response = await srv.api_chat(chat_request({"message": "log 2 eggs and toast"}))
-    payload = json.loads(http_response.body)
     assert http_response.status_code == 200
-    assert seen["message"] == "log 2 eggs and toast"
-    assert payload["reply"] == "2 eggs and toast, on it."
-    assert payload["logged"] == []
-    assert [row[0] for row in fake.inserted] == ["user", "assistant"]
+    assert seen.get("parsed") is True
 
 
 def test_chat_quota_window_rolls_at_4am_not_midnight():

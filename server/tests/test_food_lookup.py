@@ -794,32 +794,36 @@ async def test_coach_lookup_food_tool_returns_hit_and_not_found(monkeypatch):
         reset_user(token)
 
 
-async def test_food_message_routes_to_coach_not_parser(monkeypatch):
-    """One agent: a food message reaches the coach loop with the food tools;
-    the parser fast-path is gone and must never run."""
+async def test_food_message_routes_to_parser_not_coach(monkeypatch):
+    """Split models (Matt's call): a food message goes through the gpt-4o-mini
+    parser fast-path; the coach loop must NOT run for food."""
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
     seen = {}
 
-    async def unexpected_parse(_message):
-        pytest.fail("the parser fast-path must not run")
+    async def fake_parse(_message):
+        seen["parsed"] = True
+        return ([{"name": "eggs", "calories": 140, "protein": 12, "carbs": 1, "fat": 10, "fiber": 0,
+                   "quantity": 2, "grams": None, "basis": "per_unit", "sourced_from": "lookup",
+                   "meal": "Breakfast", "note": "USDA: egg, whole, cooked"}], None, [])
 
-    async def fake_run_agent(*, history, message, onboarding, handlers, record_usage=None, **_kw):
-        seen.update(message=message, onboarding=onboarding)
-        assert "lookup_food" in handlers and "log_meal" in handlers
-        return "Logged.", []
+    async def unexpected_run_agent(*args, **kw):
+        pytest.fail("food logging must go through the parser fast-path, never the coach loop")
 
-    async def fake_day_payload(_day):
-        return {"totals": {"calories": 0}}
+    async def fake_day_payload(_day, **kw):
+        return {"totals": {"calories": 140}, "targets": {"calories": 2000}}
 
-    monkeypatch.setattr(srv, "parse_chat_message", unexpected_parse)
-    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    async def fake_write_meal(*args, **kw):
+        return {"logged": {"name": args[0], "calories": 140}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "run_agent", unexpected_run_agent)
     monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
 
-    response = await srv.api_chat(chat_request({"message": "log 2 eggs and toast"}))
-    assert response.status_code == 200
-    assert seen["message"] == "log 2 eggs and toast"
-    assert json.loads(response.body)["logged"] == []
+    http_response = await srv.api_chat(chat_request({"message": "log 2 eggs and toast"}))
+    assert http_response.status_code == 200
+    assert seen.get("parsed") is True
 
 
 async def test_coach_lookup_food_source_is_required_for_log_meal(monkeypatch):

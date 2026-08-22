@@ -2127,6 +2127,125 @@ async def api_chat(request: Request) -> Any:
     if validated_metrics is not None:
         await client.put_metrics(validated_metrics)
 
+    # ── Food fast path (gpt-4o-mini parser) — ONE model for food ──────────
+    if structured_metrics is not None:
+        raw_items = []
+    else:
+        try:
+            parsed_food = await parse_chat_message(text)
+            raw_items, _ = parsed_food[:2]
+            presets = parsed_food[2] if len(parsed_food) > 2 else await fetch_presets()
+        except Exception:
+            logger.exception("Food parser failed; falling back to coach")
+            raw_items = []
+    if raw_items:
+        try:
+            requested_day = body.get("date")
+            day = domain.parse_date(requested_day) if requested_day is not None else domain.effective_date()
+            validated: list[tuple[str, dict[str, float], str, Any, Any, str, str, str]] = []
+            for raw in raw_items[:10]:
+                if not isinstance(raw, dict):
+                    raise MacroError("I couldn't understand one of those food items. Please rephrase it.")
+                clean_name = domain.validate_name(str(raw.get("name", "")))
+                macros = domain.validate_macros(
+                    raw.get("calories"), raw.get("protein"), raw.get("carbs"),
+                    raw.get("fat"), raw.get("fiber", 0)
+                )
+                meal_name = domain.normalize_meal(raw.get("meal"))
+                basis = str(raw.get("basis") or "").strip().casefold()
+                sourced_from = str(raw.get("sourced_from") or "estimate").strip().casefold()
+                note = str(raw.get("note") or "ESTIMATE").strip()
+                validated.append(
+                    (clean_name, macros, meal_name, raw.get("grams"), raw.get("quantity"),
+                     basis, sourced_from, note)
+                )
+
+            logged: list[dict[str, Any]] = []
+            preset_by_name = {
+                _normalized_food_name(str(preset["name"])): preset
+                for preset in presets
+            }
+            known_by_name = {
+                _normalized_food_name(name): name for name in KNOWN_CHAT_FOOD_NAMES
+            }
+            # The parser chooses a route, but only a real exact preset/known
+            # record can mint one of those source labels.
+            preset_gram_lookups_left = 3
+            for clean_name, macros, meal_name, grams, quantity, basis, sourced_from, note in validated:
+                normalized_name = _normalized_food_name(clean_name)
+                preset = preset_by_name.get(normalized_name)
+                known_name = known_by_name.get(normalized_name)
+                if preset is not None:
+                    preset_macros = domain.validate_macros(
+                        *(preset.get(key) for key in domain.MACRO_KEYS)
+                    )
+                    try:
+                        stated_grams = float(grams)
+                    except (TypeError, ValueError):
+                        stated_grams = None
+                    if stated_grams is not None and stated_grams > 0:
+                        try:
+                            serving_weight = float(preset.get("serving_weight_g"))
+                        except (TypeError, ValueError):
+                            serving_weight = None
+                        if serving_weight is not None and serving_weight > 0:
+                            servings = stated_grams / serving_weight
+                            macros = domain.validate_macros(
+                                *(round(preset_macros[key] * servings, 2)
+                                  for key in domain.MACRO_KEYS)
+                            )
+                            source = f'Meal Preset: {preset["name"]}'
+                        else:
+                            upgraded = None
+                            if preset_gram_lookups_left > 0:
+                                preset_gram_lookups_left -= 1
+                                upgraded = await _upgrade_estimate(clean_name, stated_grams)
+                            if upgraded is not None:
+                                macros, source = upgraded
+                            else:
+                                source = "ESTIMATE"
+                    else:
+                        try:
+                            servings = float(quantity)
+                        except (TypeError, ValueError):
+                            servings = 1
+                        if servings <= 0:
+                            servings = 1
+                        macros = domain.validate_macros(
+                            *(round(preset_macros[key] * servings, 2)
+                              for key in domain.MACRO_KEYS)
+                        )
+                        source = f'Meal Preset: {preset["name"]}'
+                elif known_name is not None:
+                    # The parser already returned the known food's final macros
+                    # for the user's exact portion. The registry only proves the
+                    # source label; it does not redo language/portion math.
+                    source = f"Known food: {known_name}"
+                else:
+                    source = note if sourced_from == "lookup" else "ESTIMATE"
+                result = await write_meal(
+                    clean_name, macros["calories"], macros["protein"], macros["carbs"],
+                    macros["fat"], source, meal_name, day.isoformat(), allow_estimate=True,
+                    fiber=macros["fiber"],
+                )
+                logged.append(result["logged"])
+
+            current = await day_payload(day, ensure=logged)
+            names = ", ".join(f'{item["name"]} {item["calories"]:g} kcal ✓' for item in logged)
+            totals = current["totals"]
+            targets = current["targets"]
+            reply = f'Logged {len(logged)} item{"s" if len(logged) != 1 else ""} — {names}. Total now {totals["calories"]:g}/{targets["calories"]:g} kcal.'
+            await client.insert_chat_message("assistant", reply)
+            return {"reply": reply, "logged": logged, "totals": totals, "widget": None}
+        except Exception:
+            try:
+                await client.insert_chat_message(
+                    "assistant", "Sorry, I couldn't log that. Try again."
+                )
+            except Exception:
+                pass  # The food-path error is the one worth surfacing.
+            raise
+
     plan, has_targets = await asyncio.gather(
         client.fetch_workout_plan(), client.has_macro_targets()
     )

@@ -759,7 +759,7 @@ If the message is a greeting, question, or otherwise not asking to log food, out
             "tool_choice": "auto",
         }
         token = _openai_access_token()
-        lookups_left = 3
+        lookups_left = 5
         verified_lookups: list[tuple[str, str]] = []
         while True:
             response = await _post_openai_chat(token, payload)

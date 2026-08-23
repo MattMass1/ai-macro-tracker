@@ -646,44 +646,55 @@ def _normalized_food_name(name: str) -> str:
 
 # Restaurant orders the parser kept refusing (no USDA/label to "verify").
 # Base macros: calories/protein/carbs/fat. Keyed by lowercase trigger phrase.
-# RESTAURANT ORDERS + branded items the parser kept refusing (no single USDA
-# label to "verify", or flavor words broke the exact known-food match).
-_SHORT_CIRCUIT_FOODS: dict[str, dict[str, float]] = {
+# RESTAURANT MEALS — always short-circuit (one meal; toppings can use 'and').
+_RESTAURANT_MEALS: dict[str, dict[str, float]] = {
     "chipotle bowl": {"calories": 625, "protein": 75, "carbs": 45, "fat": 16},
     "chipotle burrito": {"calories": 945, "protein": 83, "carbs": 100, "fat": 24},
     "cfa lunch": {"calories": 710, "protein": 62, "carbs": 45, "fat": 31},
     "chick-fil-a lunch": {"calories": 710, "protein": 62, "carbs": 45, "fat": 31},
+}
+# BRANDED ITEMS — short-circuit only when it's a single food (no 'and').
+_BRAND_ITEMS: dict[str, dict[str, float]] = {
     "barebells": {"calories": 200, "protein": 20, "carbs": 21, "fat": 7},
     "fairlife": {"calories": 150, "protein": 30, "carbs": 3, "fat": 2.5},
 }
 
 
 def _short_circuit_known_food(message: str) -> dict[str, Any] | None:
-    """Deterministically match a restaurant order or known brand to its base
-    macros. Returns a parser-style item dict, or None when no phrase matches.
+    """Deterministically match a restaurant meal or known brand to its base
+    macros. Returns a parser-style item dict, or None when nothing matches.
 
-    Skips when the message separates multiple foods with 'and'/'plus' so the
-    parser still handles mixed meals (single-food messages short-circuit).
+    Restaurant meals always match (toppings may be joined by 'and'). Branded
+    items match only for single-food messages, so the parser handles mixed
+    meals like 'a Barebells and a banana'.
     """
     lowered = " ".join(message.split()).casefold()
-    if re.search(r"\b(?:and|plus)\b", lowered):
-        return None
-    for phrase, macros in _SHORT_CIRCUIT_FOODS.items():
+
+    def _item(name: str, macros: dict[str, float]) -> dict[str, Any]:
+        return {
+            "name": name,
+            "calories": macros["calories"],
+            "protein": macros["protein"],
+            "carbs": macros["carbs"],
+            "fat": macros["fat"],
+            "fiber": 0,
+            "quantity": 1,
+            "grams": None,
+            "basis": "per_serving",
+            "sourced_from": "known",
+            "meal": "Snack",
+            "note": f"Known food: {name}",
+        }
+
+    for phrase, macros in _RESTAURANT_MEALS.items():
         if phrase in lowered:
-            return {
-                "name": phrase,
-                "calories": macros["calories"],
-                "protein": macros["protein"],
-                "carbs": macros["carbs"],
-                "fat": macros["fat"],
-                "fiber": 0,
-                "quantity": 1,
-                "grams": None,
-                "basis": "per_serving",
-                "sourced_from": "known",
-                "meal": "Snack",
-                "note": f"Known food: {phrase}",
-            }
+            return _item(phrase, macros)
+
+    has_multi = re.search(r"\b(?:and|plus)\b", lowered) is not None
+    if not has_multi:
+        for phrase, macros in _BRAND_ITEMS.items():
+            if phrase in lowered:
+                return _item(phrase, macros)
     return None
 
 

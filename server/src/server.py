@@ -651,6 +651,9 @@ _SHORT_CIRCUIT_FOODS: dict[str, dict[str, float]] = {
     "chipotle burrito": {"calories": 945, "protein": 83, "carbs": 100, "fat": 24},
     "cfa lunch": {"calories": 710, "protein": 62, "carbs": 45, "fat": 31},
     "chick-fil-a lunch": {"calories": 710, "protein": 62, "carbs": 45, "fat": 31},
+    # Branded known items — any flavor/descriptor still maps to the base value.
+    "barebells": {"calories": 200, "protein": 20, "carbs": 21, "fat": 7},
+    "fairlife": {"calories": 150, "protein": 30, "carbs": 3, "fat": 2.5},
 }
 
 

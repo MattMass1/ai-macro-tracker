@@ -646,24 +646,28 @@ def _normalized_food_name(name: str) -> str:
 
 # Restaurant orders the parser kept refusing (no USDA/label to "verify").
 # Base macros: calories/protein/carbs/fat. Keyed by lowercase trigger phrase.
-# RESTAURANT ORDERS ONLY — these have no single USDA/label answer, so they
-# short-circuit. Branded items (Barebells, Fairlife) stay in the known-foods
-# list so flavor words still map through the normal parser path.
+# RESTAURANT ORDERS + branded items the parser kept refusing (no single USDA
+# label to "verify", or flavor words broke the exact known-food match).
 _SHORT_CIRCUIT_FOODS: dict[str, dict[str, float]] = {
     "chipotle bowl": {"calories": 625, "protein": 75, "carbs": 45, "fat": 16},
     "chipotle burrito": {"calories": 945, "protein": 83, "carbs": 100, "fat": 24},
     "cfa lunch": {"calories": 710, "protein": 62, "carbs": 45, "fat": 31},
     "chick-fil-a lunch": {"calories": 710, "protein": 62, "carbs": 45, "fat": 31},
+    "barebells": {"calories": 200, "protein": 20, "carbs": 21, "fat": 7},
+    "fairlife": {"calories": 150, "protein": 30, "carbs": 3, "fat": 2.5},
 }
 
 
 def _short_circuit_known_food(message: str) -> dict[str, Any] | None:
-    """Deterministically match a restaurant order to its known base macros.
+    """Deterministically match a restaurant order or known brand to its base
+    macros. Returns a parser-style item dict, or None when no phrase matches.
 
-    Returns a parser-style item dict (so the write path treats it as known),
-    or None when no short-circuit phrase matches.
+    Skips when the message separates multiple foods with 'and'/'plus' so the
+    parser still handles mixed meals (single-food messages short-circuit).
     """
     lowered = " ".join(message.split()).casefold()
+    if re.search(r"\b(?:and|plus)\b", lowered):
+        return None
     for phrase, macros in _SHORT_CIRCUIT_FOODS.items():
         if phrase in lowered:
             return {

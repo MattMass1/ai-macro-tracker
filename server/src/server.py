@@ -2437,7 +2437,15 @@ async def api_chat(request: Request) -> Any:
             ]}
     if widget is None:
         widget = exercise_card_widget(reply, tool_results)
-    return {"reply": reply, "logged": [], "totals": current["totals"],
+    logged = [
+        dict(result["result"]["logged"])
+        for result in tool_results
+        if result.get("tool") == "log_meal"
+        and result.get("ok")
+        and isinstance(result.get("result"), Mapping)
+        and isinstance(result["result"].get("logged"), Mapping)
+    ]
+    return {"reply": reply, "logged": logged, "totals": current["totals"],
             "has_plan": plan is not None or await client.fetch_workout_plan() is not None,
             "has_targets": has_targets or await client.has_macro_targets(),
             "widget": widget}

@@ -233,8 +233,12 @@ async def run_agent(
                         result = {"error": str(exc)}
             audit_entry = {"tool": name, "input": tool_input, "ok": not is_error}
             # Keep the complete result in the tool message for the model, but
-            # persist only the fields needed by the exercise card.
-            if name in {"get_library", "library_tool"} and not is_error:
+            # persist only the fields needed by response widgets/cards.
+            if name == "log_meal" and not is_error:
+                logged = result.get("logged") if isinstance(result, Mapping) else None
+                if isinstance(logged, Mapping):
+                    audit_entry["result"] = {"logged": dict(logged)}
+            elif name in {"get_library", "library_tool"} and not is_error:
                 exercises = result.get("exercises") if isinstance(result, Mapping) else None
                 if isinstance(exercises, list):
                     compact_fields = (

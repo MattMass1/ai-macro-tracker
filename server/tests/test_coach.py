@@ -947,9 +947,47 @@ async def test_coach_logs_food_through_lookup_and_meal_tools(monkeypatch):
     assert calls == 3
     assert [entry["tool"] for entry in audit] == ["lookup_food", "log_meal"]
     assert [entry["ok"] for entry in audit] == [True, True]
+    assert audit[1]["result"] == {
+        "logged": {"name": "2 eggs", "calories": 144}
+    }
     assert reply == "Logged 2 eggs, 144 kcal."
     assert written == {"name": "2 eggs", "macro_source": "USDA FDC: 171705",
                        "allow_estimate": False, "meal": "Breakfast"}
+
+
+async def test_chat_returns_meals_logged_by_coach(monkeypatch):
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
+    monkeypatch.setattr(srv, "_client", fake)
+    logged_meal = {
+        "id": "meal-1", "name": "2 eggs", "meal": "Breakfast",
+        "calories": 144, "protein": 12.6, "carbs": 0.7, "fat": 9.5,
+        "fiber": 0, "date": domain.effective_date().isoformat(),
+        "created_time": "2026-08-23T12:00:00Z",
+        "macro_source": "USDA FDC: 171705",
+    }
+
+    async def fake_parse(_message):
+        return ([], None, [])
+
+    async def fake_run_agent(**_kwargs):
+        return "Logged 2 eggs, 144 kcal.", [
+            {"tool": "lookup_food", "input": {"query": "2 eggs"}, "ok": True},
+            {"tool": "log_meal", "input": {}, "ok": True,
+             "result": {"logged": logged_meal}},
+        ]
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+
+    response = await srv.api_chat(chat_request({"message": "log 2 eggs"}))
+
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert payload["reply"] == "Logged 2 eggs, 144 kcal."
+    assert payload["logged"] == [logged_meal]
+    assert payload["has_plan"] is True
+    assert payload["has_targets"] is True
+    assert payload["widget"] is None
 
 
 async def test_log_meal_still_requires_real_macro_source(monkeypatch):

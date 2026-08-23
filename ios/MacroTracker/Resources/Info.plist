@@ -25,7 +25,7 @@
 	<key>MACRO_API_URL</key>
 	<string>$(MACRO_API_URL)</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Scan a barcode or take a photo of your food to log its macros.</string>
+	<string>Scan product barcodes to look up and log nutrition.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Unlock your private nutrition and workout log.</string>
 	<key>UIApplicationSceneManifest</key>

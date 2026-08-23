@@ -102,6 +102,7 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertEqual(payload.protein, 9)
         XCTAssertEqual(payload.source, "Open Food Facts")
         XCTAssertEqual(payload.servingSize, "150 g")
+        XCTAssertNil(payload.macrosPerServing)
     }
 
     func testBarcodeFoodPayloadDecodesWithoutServingSize() throws {
@@ -110,7 +111,17 @@ final class ModelDecodingTests: XCTestCase {
         let payload = try decoder.decode(BarcodeFoodPayload.self, from: json)
         XCTAssertEqual(payload.name, "Cola")
         XCTAssertNil(payload.servingSize)
+        XCTAssertNil(payload.macrosPerServing)
         XCTAssertEqual(payload.carbs, 10.6)
+    }
+
+    func testBarcodeFoodPayloadDecodesMacrosPerServing() throws {
+        let json = #"{"name":"Protein Bar","calories":364,"protein":36,"carbs":27,"fat":9,"fiber":4,"source":"Open Food Facts","serving_size":"1 bar (55 g)","macros_per_serving":{"calories":200,"protein":20,"carbs":15,"fat":5,"fiber":2}}"#.data(using: .utf8)!
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let payload = try decoder.decode(BarcodeFoodPayload.self, from: json)
+        XCTAssertEqual(payload.servingSize, "1 bar (55 g)")
+        XCTAssertEqual(payload.calories, 364)
+        XCTAssertEqual(payload.macrosPerServing, MacroTotals(calories: 200, protein: 20, carbs: 15, fat: 5, fiber: 2))
     }
 
     func testBarcodeFoodRequestEncodesCode() throws {

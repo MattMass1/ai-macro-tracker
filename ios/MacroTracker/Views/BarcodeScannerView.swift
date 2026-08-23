@@ -2,18 +2,6 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
-enum ScanFoodMode: String, CaseIterable {
-    case barcode = "Barcode"
-    case photo = "Photo"
-
-    var icon: String {
-        switch self {
-        case .barcode: return "barcode.viewfinder"
-        case .photo: return "camera"
-        }
-    }
-}
-
 /// Native barcode camera: EAN-13 / EAN-8 / UPC-E (UPC-A is reported as EAN-13).
 struct BarcodeScannerView: View {
     @Binding var paused: Bool
@@ -161,7 +149,6 @@ struct BarcodeScannerView: View {
 }
 
 struct ScanFoodSheet: View {
-    var onChoosePhoto: () -> Void
     var onLogged: (String, Double) -> Void
 
     @EnvironmentObject private var store: AppStore
@@ -199,7 +186,6 @@ struct ScanFoodSheet: View {
         ZStack(alignment: .top) {
             BarcodeScannerView(paused: $paused, onCode: handleCode, onClose: { dismiss() })
             VStack(spacing: 14) {
-                scanModePicker(selected: .barcode)
                 if isLookingUp {
                     lookupBanner(text: "Looking up product…", progress: true)
                 } else if notFound {
@@ -212,27 +198,6 @@ struct ScanFoodSheet: View {
             .padding(.top, 58)
             .padding(.horizontal, 16)
         }
-    }
-
-    private func scanModePicker(selected: ScanFoodMode) -> some View {
-        HStack(spacing: 6) {
-            ForEach(ScanFoodMode.allCases, id: \.self) { mode in
-                Button {
-                    if mode == .photo { onChoosePhoto() }
-                } label: {
-                    Label(mode.rawValue, systemImage: mode.icon)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(mode == selected ? .white : Theme.ink)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(mode == selected ? Theme.accent : Theme.surface, in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(mode == selected ? .isSelected : [])
-            }
-        }
-        .padding(4)
-        .background(.ultraThinMaterial, in: Capsule())
     }
 
     private func lookupBanner(text: String, progress: Bool) -> some View {
@@ -256,23 +221,15 @@ struct ScanFoodSheet: View {
             Text("We could not find that barcode.")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Theme.ink)
-            Text("Try a photo instead and Coach will estimate from the plate.")
+            Text("Try scanning again or enter the food manually.")
                 .font(.caption)
                 .foregroundStyle(Theme.muted)
-            HStack(spacing: 8) {
-                Button("Try a photo instead") { onChoosePhoto() }
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Theme.accent, in: Capsule())
-                Button("Scan again") { resetScan() }
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.accent)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Theme.accentTint, in: Capsule())
-            }
+            Button("Scan again") { resetScan() }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.accent)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Theme.accentTint, in: Capsule())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
@@ -293,7 +250,9 @@ struct ScanFoodSheet: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close")
                 Spacer()
-                scanModePicker(selected: .barcode)
+                Text("Barcode")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.ink)
                 Spacer()
                 Color.clear.frame(width: 36, height: 36)
             }
@@ -337,7 +296,7 @@ struct ScanFoodSheet: View {
                         Button {
                             Task { await logProduct(product, grams: nil) }
                         } label: {
-                            groupLabel(isLogging ? nil : "Log 1 unit")
+                            groupLabel(isLogging ? nil : logOneServingTitle(product))
                         }
                         .disabled(isLogging)
                         .opacity(isLogging ? 0.6 : 1)
@@ -405,6 +364,13 @@ struct ScanFoodSheet: View {
         return value
     }
 
+    private func logOneServingTitle(_ product: BarcodeFoodPayload) -> String {
+        if product.macrosPerServing != nil || !(product.servingSize ?? "").isEmpty {
+            return "Log 1 serving"
+        }
+        return "Log 1 unit"
+    }
+
     private func handleCode(_ code: String) {
         Task { await lookup(code) }
     }
@@ -434,8 +400,31 @@ struct ScanFoodSheet: View {
 
     private func logProduct(_ product: BarcodeFoodPayload, grams: Double?) async {
         gramsFocused = false
-        let factor = grams.map { $0 / 100 } ?? 1
-        let calories = product.calories * factor
+        let calories: Double
+        let protein: Double
+        let carbs: Double
+        let fat: Double
+        let fiber: Double
+        if let grams {
+            let factor = grams / 100
+            calories = product.calories * factor
+            protein = product.protein * factor
+            carbs = product.carbs * factor
+            fat = product.fat * factor
+            fiber = product.fiber * factor
+        } else if let serving = product.macrosPerServing {
+            calories = serving.calories
+            protein = serving.protein
+            carbs = serving.carbs
+            fat = serving.fat
+            fiber = serving.fiber
+        } else {
+            calories = product.calories
+            protein = product.protein
+            carbs = product.carbs
+            fat = product.fat
+            fiber = product.fiber
+        }
         let name: String
         if let grams {
             name = "\(product.name) (\(Self.formatGrams(grams))g)"
@@ -446,10 +435,10 @@ struct ScanFoodSheet: View {
         let body = LogMealBody(
             name: name,
             calories: calories,
-            protein: product.protein * factor,
-            carbs: product.carbs * factor,
-            fat: product.fat * factor,
-            fiber: product.fiber * factor,
+            protein: protein,
+            carbs: carbs,
+            fat: fat,
+            fiber: fiber,
             macroSource: source.isEmpty ? "Barcode lookup" : source,
             meal: "Snack",
             day: store.isToday ? nil : store.dateString

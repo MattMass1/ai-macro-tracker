@@ -1,4 +1,3 @@
-import PhotosUI
 import SwiftUI
 import UIKit
 
@@ -25,14 +24,7 @@ struct ChatLogView: View {
     @State private var input = ""
     @State private var showSignOutConfirm = false
     @State private var isSending = false
-    @State private var photoItem: PhotosPickerItem?
-    @State private var image: UIImage?
-    @State private var vision: VisionPayload?
-    @State private var isAnalyzing = false
-    @State private var analysisGeneration = 0
-    @State private var showCamera = false
     @State private var showScanSheet = false
-    @State private var scanMode: ScanFoodMode = .barcode
     @State private var showManual = false
     @State private var loggerSelection: WorkoutLoggerSelection?
     @State private var showExerciseLibrary = false
@@ -97,7 +89,6 @@ struct ChatLogView: View {
                                 .id(message.id)
                             }
                             if isSending { TypingBubble() }
-                            if let image { VisionCard(image: image, result: vision, analyzing: isAnalyzing, onLog: logVision, onCancel: clearVision) }
                             Color.clear.frame(height: 1).id("end")
                         }.padding(16)
                     }
@@ -137,31 +128,12 @@ struct ChatLogView: View {
                 Task { await confirmOnboardingExercises(exercises) }
             }
         }
-        .sheet(isPresented: $showCamera) { CameraPicker(image: $image) }
-        .sheet(isPresented: $showScanSheet, onDismiss: { scanMode = .barcode }) {
-            if scanMode == .photo {
-                CameraPicker(image: $image)
-            } else {
-                ScanFoodSheet(
-                    onChoosePhoto: { scanMode = .photo },
-                    onLogged: { name, calories in
-                        messages.append(ChatMessage(role: .assistant, text: "Logged \(name), \(Int(calories)) kcal."))
-                    }
-                )
-            }
-        }
-        .onChange(of: imageIdentity) { old, new in
-            guard old != new else { return }
-            vision = nil
-            analysisGeneration += 1
-            let generation = analysisGeneration
-            guard new != nil else { return }
-            Task { await analyzeImage(generation: generation) }
-        }
-        .onChange(of: photoItem) { _, item in
-            vision = nil
-            analysisGeneration += 1
-            Task { await loadPhoto(item) }
+        .sheet(isPresented: $showScanSheet) {
+            ScanFoodSheet(
+                onLogged: { name, calories in
+                    messages.append(ChatMessage(role: .assistant, text: "Logged \(name), \(Int(calories)) kcal."))
+                }
+            )
         }
         .onChange(of: scanFoodTrigger) { _, _ in handleScanFoodTrigger() }
         .onAppear {
@@ -202,12 +174,9 @@ struct ChatLogView: View {
                 Menu {
                     Button("Scan Barcode", systemImage: "barcode.viewfinder") {
                         dismissKeyboard()
-                        scanMode = .barcode
                         showScanSheet = true
                     }
-                    Button("Take Photo", systemImage: "camera") { showCamera = true }
-                    PhotosPicker(selection: $photoItem, matching: .images) { Label("Choose Photo", systemImage: "photo") }
-                } label: { Image(systemName: "camera.fill").font(.body).foregroundStyle(Theme.accent).frame(width: 42, height: 42).background(Theme.accentTint, in: Circle()) }
+                } label: { Image(systemName: "barcode.viewfinder").font(.body).foregroundStyle(Theme.accent).frame(width: 42, height: 42).background(Theme.accentTint, in: Circle()) }
                 TextField("Message Coach", text: $input, axis: .vertical).lineLimit(1...4).focused($inputFocused).padding(.horizontal, 14).padding(.vertical, 11).background(Theme.input, in: RoundedRectangle(cornerRadius: 18))
                     .submitLabel(.send)
                     .onSubmit { if !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { Task { await send() } } }
@@ -454,43 +423,12 @@ struct ChatLogView: View {
         return false
     }
 
-    private var imageIdentity: ObjectIdentifier? { image.map { ObjectIdentifier($0) } }
-
     private func handleScanFoodTrigger() {
         guard scanFoodTrigger > handledScanFoodTrigger else { return }
         handledScanFoodTrigger = scanFoodTrigger
         dismissKeyboard()
-        scanMode = .barcode
         showScanSheet = true
     }
-
-    private func loadPhoto(_ item: PhotosPickerItem?) async {
-        guard let item else { return }
-        guard let data = try? await item.loadTransferable(type: Data.self), let picked = UIImage(data: data) else { return }
-        guard photoItem == item else { return }
-        image = picked
-    }
-    private func analyzeImage(generation: Int) async {
-        guard generation == analysisGeneration, let data = image?.resizedJPEG(maxDimension: 1800, quality: 0.72) else { return }
-        isAnalyzing = true; vision = nil
-        defer { if generation == analysisGeneration { isAnalyzing = false } }
-        do {
-            let result = try await store.analyze(image: "data:image/jpeg;base64,\(data.base64EncodedString())")
-            guard generation == analysisGeneration else { return }
-            vision = result
-        } catch {
-            guard generation == analysisGeneration else { return }
-            messages.append(ChatMessage(role: .assistant, text: error.localizedDescription)); clearVision()
-        }
-    }
-    private func logVision() {
-        guard let vision else { return }
-        Task {
-            let body = LogMealBody(name: vision.name, calories: vision.calories, protein: vision.protein, carbs: vision.carbs, fat: vision.fat, fiber: vision.fiber, macroSource: "Vision model (estimated from food photo)", meal: vision.meal, day: store.isToday ? nil : store.dateString)
-            if await store.logMeal(body) { messages.append(ChatMessage(role: .assistant, text: "Logged \(vision.name), \(Int(vision.calories)) kcal.")); clearVision() }
-        }
-    }
-    private func clearVision() { analysisGeneration += 1; image = nil; vision = nil; photoItem = nil; isAnalyzing = false }
 }
 
 private struct ChatBubble: View {
@@ -501,22 +439,6 @@ private struct TypingBubble: View {
     @State private var pulse = false
     var body: some View { HStack { HStack(spacing: 5) { ForEach(0..<3) { index in Circle().fill(Color.secondary).frame(width: 5, height: 5).opacity(pulse ? 0.3 : 1).animation(.easeInOut(duration: 0.7).repeatForever().delay(Double(index) * 0.15), value: pulse) } }.padding(14).background(Theme.surface, in: Capsule()); Spacer() }.onAppear { pulse = true } }
 }
-private struct VisionCard: View {
-    let image: UIImage; let result: VisionPayload?; let analyzing: Bool; let onLog: () -> Void; let onCancel: () -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Image(uiImage: image).resizable().scaledToFill().frame(height: 180).frame(maxWidth: .infinity).clipped().clipShape(RoundedRectangle(cornerRadius: 15))
-            if analyzing { Label("Reading the plate…", systemImage: "sparkle.magnifyingglass").font(.subheadline).foregroundStyle(.secondary) }
-            if let result {
-                Text(result.name).font(.headline)
-                Text("\(Int(result.calories)) kcal  ·  \(Int(result.protein))p  ·  \(Int(result.carbs))c  ·  \(Int(result.fat))f").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                Text(result.note).font(.caption).foregroundStyle(.secondary)
-                HStack { Button("Log this", systemImage: "checkmark") { onLog() }.buttonStyle(.borderedProminent); Button("Cancel", action: onCancel).buttonStyle(.bordered) }
-            }
-        }.appCard()
-    }
-}
-
 struct ManualFoodView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
@@ -545,19 +467,4 @@ struct ManualFoodView: View {
     }
     private func numberField(_ title: String, _ value: Binding<String>) -> some View { TextField(title, text: value).keyboardType(.decimalPad).focused($isInputFocused) }
     private func submit() { isInputFocused = false; Task { let body = LogMealBody(name: name, calories: Double(calories) ?? 0, protein: Double(protein) ?? 0, carbs: Double(carbs) ?? 0, fat: Double(fat) ?? 0, fiber: Double(fiber) ?? 0, macroSource: "Manual iOS entry", meal: meal, day: store.isToday ? nil : store.dateString); if await store.logMeal(body) { dismiss() } } }
-}
-
-private struct CameraPicker: UIViewControllerRepresentable {
-    @Environment(\.dismiss) private var dismiss; @Binding var image: UIImage?
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-    func makeUIViewController(context: Context) -> UIImagePickerController { let picker = UIImagePickerController(); picker.sourceType = UIImagePickerController.isSourceTypeAvailable(.camera) ? .camera : .photoLibrary; picker.delegate = context.coordinator; return picker }
-    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
-    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate { let parent: CameraPicker; init(_ parent: CameraPicker) { self.parent = parent }; func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) { parent.image = info[.originalImage] as? UIImage; parent.dismiss() }; func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { parent.dismiss() } }
-}
-
-private extension UIImage {
-    func resizedJPEG(maxDimension: CGFloat, quality: CGFloat) -> Data? {
-        let scale = min(1, maxDimension / max(size.width, size.height)); let target = CGSize(width: size.width * scale, height: size.height * scale)
-        return UIGraphicsImageRenderer(size: target).image { _ in draw(in: CGRect(origin: .zero, size: target)) }.jpegData(compressionQuality: quality)
-    }
 }

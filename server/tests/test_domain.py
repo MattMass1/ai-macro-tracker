@@ -195,6 +195,7 @@ def test_validate_name():
         "FDA FoodData Central: chicken breast, roasted",
         "Fairlife Core Power label",
         "user provided from package",
+        "ESTIMATE — 6 pieces sushi, typical values",
     ],
 )
 def test_validate_macro_source_accepts_real_sources(source):

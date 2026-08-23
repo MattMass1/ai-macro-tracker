@@ -1375,6 +1375,72 @@ async def test_parser_greeting_reply_is_not_forced_into_a_food_entry(monkeypatch
     assert reply == "Hey Matthew! Ready to crush today."
 
 
+SUSHI_MESSAGE = "salmon sashimi, 1 piece of tuna sushi, 3 pieces of white tuna sushi"
+
+
+async def test_parser_zero_items_for_food_message_forces_estimate(monkeypatch):
+    # The model returned zero items with refusal wording that matches no
+    # known pattern and never called lookup_food. The backstop no longer
+    # cares: a non-greeting, non-question message force-logs regardless of
+    # how the model worded its deflection.
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-openai-token")
+    monkeypatch.setattr(srv, "_client", FakeStore())
+    lookups = []
+
+    async def fake_post(_token, _payload):
+        return _openai_response({
+            "role": "assistant",
+            "content": "[] Sushi portions vary a lot between restaurants, so "
+                       "reliable entries are hard to pin down.",
+        })
+
+    async def fake_resolve(name):
+        lookups.append(name)
+        return None
+
+    monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
+
+    items, reply, _ = await srv.parse_chat_message(SUSHI_MESSAGE)
+    assert lookups == [SUSHI_MESSAGE]
+    assert reply is None
+    assert len(items) == 1
+    assert items[0]["name"] == SUSHI_MESSAGE
+    assert items[0]["note"] == "ESTIMATE"
+    assert items[0]["sourced_from"] == "estimate"
+    assert items[0]["calories"] == 250.0
+
+
+@pytest.mark.parametrize(
+    "message, answer",
+    [
+        ("what's my plan", "[] Push day: bench, rows, curls."),
+        ("how many calories did I eat", "[] You're at 1,200 kcal so far."),
+        ("can you undo that", "[] Done — removed the last entry."),
+    ],
+)
+async def test_parser_question_without_question_mark_is_not_forced(
+    monkeypatch, message, answer
+):
+    # Questions and commands often arrive without a "?" — they must pass
+    # through as conversation, never force-log as food.
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-openai-token")
+    monkeypatch.setattr(srv, "_client", FakeStore())
+
+    async def fake_post(_token, _payload):
+        return _openai_response({"role": "assistant", "content": answer})
+
+    async def unexpected_resolve(_name):
+        pytest.fail("a question must not trigger the food fallback lookup")
+
+    monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
+    monkeypatch.setattr(food_lookup, "resolve_food", unexpected_resolve)
+
+    items, reply, _ = await srv.parse_chat_message(message)
+    assert items == []
+    assert reply == answer.removeprefix("[] ")
+
+
 async def test_food_path_zero_macro_item_is_rescued_by_lookup(monkeypatch):
     monkeypatch.setattr(srv, "_client", FakeStore())
     seen = {}

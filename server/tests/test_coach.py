@@ -967,6 +967,23 @@ async def test_log_meal_still_requires_real_macro_source(monkeypatch):
         await handler({**args, "macro_source": " "})
 
 
+def test_food_guidance_never_refuses_and_allows_flagged_estimates():
+    """The coach must log every food message: verified macros when a source
+    resolves, a clearly-flagged estimate when nothing does — never a label ask."""
+    log_meal = next(tool for tool in TOOLS if tool["name"] == "log_meal")
+    description = log_meal["description"]
+    assert "Never refuse" in description
+    assert "ESTIMATE" in description
+    assert "Never estimate" not in description
+
+    for prompt in (SYSTEM_PROMPT, system_prompt(onboarding=False)):
+        normalized = " ".join(prompt.replace("`", "").split())
+        assert "never ask for a label" in normalized
+        assert "ESTIMATE" in normalized
+        assert "Only ask for a label" not in normalized
+        assert "Never estimate" not in normalized
+
+
 def rotation_plan():
     return {
         "version": 1,

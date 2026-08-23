@@ -352,7 +352,6 @@ async def test_undo_excludes_the_row_it_just_deleted(lagging):
     }
     assert payload["remaining"]["protein"] == 215.0
 
-
 async def test_undo_with_nothing_logged_is_an_actionable_error(monkeypatch):
     monkeypatch.setattr(srv, "_client", FakeStore([]))
     with pytest.raises(Exception) as excinfo:
@@ -377,36 +376,3 @@ async def test_write_normalizes_fields_and_records_the_source(lagging):
     assert row["date"] == "2026-07-20"
     assert row["macro_source"] == "FDA FoodData Central: chicken breast, roasted"
     assert row["calories"] == 300.0 and row["protein"] == 55.0 and row["fat"] == 7.0
-
-
-async def test_vision_log_uses_openai_token_and_vision_model(monkeypatch):
-    captured = {}
-
-    async def fake_post(token, payload):
-        captured["token"] = token
-        captured["payload"] = payload
-        return httpx.Response(
-            200,
-            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
-            json={
-                "choices": [{
-                    "message": {
-                        "content": '{"name":"Chicken bowl","calories":500,"protein":40,"carbs":45,"fat":18}'
-                    }
-                }]
-            },
-        )
-
-    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "openai-test-token")
-    monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
-
-    result = await srv.analyze_food_image("data:image/jpeg;base64,AAAA", "lunch")
-
-    assert captured["token"] == "openai-test-token"
-    assert captured["payload"]["model"] == "gpt-4o-mini"
-    assert captured["payload"]["messages"][1]["content"][1] == {
-        "type": "image_url",
-        "image_url": {"url": "data:image/jpeg;base64,AAAA"},
-    }
-    assert result["name"] == "Chicken bowl"
-    assert result["meal"] == "Lunch"

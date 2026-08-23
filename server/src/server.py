@@ -721,24 +721,6 @@ def _extract_chat_items(content: str) -> tuple[list[Any], str | None]:
     return [], cleaned or None
 
 
-def _extract_vision_result(content: str) -> dict[str, Any]:
-    """Extract the single JSON object requested from the vision response."""
-    cleaned = content.strip()
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
-    candidates = [fenced.group(1)] if fenced else [cleaned]
-    embedded = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if embedded and embedded.group(0) not in candidates:
-        candidates.append(embedded.group(0))
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-            if isinstance(parsed, dict):
-                return parsed
-        except (json.JSONDecodeError, TypeError):
-            continue
-    raise MacroError("I couldn't analyze that photo. Please try another one.")
-
-
 def _openai_access_token() -> str:
     token = os.environ.get("OPENAI_ACCESS_TOKEN", "").strip()
     if not token:
@@ -788,16 +770,19 @@ def _normalize_brand_flavor(message: str) -> str:
     return message
 
 
-# Parser replies that refuse or deflect a food message instead of logging it:
-# label/verification asks, "couldn't find" apologies, portion questions. When
-# one of these follows an empty item list, code logs the food anyway.
-_PARSER_REFUSAL = re.compile(
-    r"label|verif|barcode|packag|"
-    r"can(?:no|')?t\s+(?:log|find|locate|confirm|estimate|look|verify)|"
-    r"couldn'?t\s+(?:find|locate|confirm|verify)|"
-    r"unable\s+to|not\s+able\s+to|clarif|"
-    r"which\s+(?:brand|flavor|size)|what\s+(?:brand|flavor|size)|"
-    r"how\s+(?:much|many)|more\s+details?",
+# Messages that are conversation, not food: greetings/acknowledgements and
+# question-shaped openers (questions often arrive without a "?"). Anything
+# else that parses to zero items force-logs — matching the model's refusal
+# wording proved too fragile, so the guard now classifies the user's message.
+_NON_FOOD_MESSAGE = re.compile(
+    r"^(?:hi|hey+|hello|yo|sup|howdy|hiya|thanks|thank\s+you|thx|"
+    r"ok(?:ay)?|yes|yep|yeah|no|nope|cool|nice|great|"
+    r"good\s+(?:morning|afternoon|evening|night)|"
+    r"what(?:'?s)?|how|why|when|where|who|whose|which|"
+    r"can(?!\s+of\b)|could|should|shall|would|will|"
+    r"do|does|did|is|are|am|was|were|"
+    r"tell|show|give|explain|help|remind|"
+    r"undo|delete|remove|update|change|set)\b",
     re.IGNORECASE,
 )
 _LEADING_LOG_WORDS = re.compile(
@@ -813,26 +798,21 @@ _FALLBACK_ESTIMATE = {
 
 async def _forced_food_item(
     message: str,
-    reply: str | None,
     attempted_lookups: list[str],
     lookup_found: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
     """Deterministic never-refuse backstop for a food message the model
-    declined to log. The model proved the message names food either by calling
-    lookup_food or by replying with a label/verification ask; in both cases the
-    user wants an entry, not a question. Build it in code: a lookup result's
-    serving (or 100 g) panel when one exists, otherwise a flagged conservative
-    estimate. Returns None when the message never looked like food."""
+    declined to log. Any message that isn't a greeting, acknowledgement, or
+    question is treated as naming food — regardless of how the model worded
+    its refusal or whether it called lookup_food. Build the entry in code: a
+    lookup result's serving (or 100 g) panel when one exists, otherwise a
+    flagged conservative estimate. Returns None only for conversation."""
     text = " ".join(str(message or "").split())
-    if not text or "?" in text:
+    if not text or "?" in text or _NON_FOOD_MESSAGE.match(text):
         return None
-    name = ""
-    if attempted_lookups:
-        name = attempted_lookups[0]
-    elif reply and _PARSER_REFUSAL.search(reply):
-        name = _LEADING_LOG_WORDS.sub("", text).strip(" .!") or text
+    name = attempted_lookups[0] if attempted_lookups else ""
     if not name:
-        return None
+        name = _LEADING_LOG_WORDS.sub("", text).strip(" .!") or text
     name = name[:80]
     found = lookup_found.get(_normalized_food_name(name))
     if found is None and not attempted_lookups:
@@ -997,7 +977,7 @@ If the message is a greeting, question, or otherwise not asking to log food, out
             item["note"] = "ESTIMATE"
     if not any(isinstance(item, dict) for item in items):
         forced = await _forced_food_item(
-            message, reply, attempted_lookups, lookup_found
+            message, attempted_lookups, lookup_found
         )
         if forced is not None:
             items, reply = [forced], None
@@ -1072,58 +1052,6 @@ async def _best_available_macros(
     if portioned is None:
         portioned = food_lookup.portion_from_grams(found, 100)
     return portioned
-
-
-async def analyze_food_image(image: str, meal_hint: str | None = None) -> dict[str, Any]:
-    """Ask OpenAI's vision-capable chat model for one conservative macro estimate."""
-    if not image.startswith("data:image/") or ";base64," not in image:
-        raise MacroError("Please provide a valid food photo.")
-    if len(image.encode("utf-8")) > 2_800_000:
-        raise MacroError("That photo is too large. Please choose a smaller image.")
-
-    meal = domain.normalize_meal(meal_hint) if meal_hint else None
-    system = """You are a food logging assistant. Look at this food image and identify what food or meal is shown. Return ONLY a JSON object with: {"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"note":"ESTIMATE — vision model"}. Estimate macros conservatively — when unsure, estimate low on protein and high on calories. If you cannot identify the food, return {"error":"Could not identify food"}."""
-    prompt = "Identify this food and estimate its macros."
-    if meal:
-        prompt += f" The user says this is for {meal}."
-    payload = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": image}},
-                ],
-            },
-        ],
-    }
-    try:
-        token = _openai_access_token()
-        response = await _post_openai_chat(token, payload)
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        result = _extract_vision_result(str(content))
-    except MacroError:
-        raise
-    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-        raise MacroError(
-            "I couldn't analyze that photo right now. Please try again in a moment."
-        ) from exc
-
-    if result.get("error"):
-        raise MacroError("I couldn't identify food in that photo. Try a clearer angle.")
-    clean_name = domain.validate_name(str(result.get("name", "")))
-    macros = domain.validate_macros(
-        result.get("calories"), result.get("protein"), result.get("carbs"), result.get("fat"), result.get("fiber", 0)
-    )
-    return {
-        "name": clean_name,
-        **macros,
-        "note": "ESTIMATE — vision model",
-        **({"meal": meal} if meal else {}),
-    }
 
 
 async def find_preset(preset_name: str) -> dict[str, Any]:
@@ -1848,28 +1776,6 @@ async def api_log(request: Request) -> Any:
         meal=body.get("meal"),
         day_value=body.get("date"),
     )
-
-
-@api_route("/api/vision-log", methods=["POST"])
-@api_route("/api/macro/vision-log", methods=["POST"])
-async def api_vision_log(request: Request) -> Any:
-    body = await _json_body(request)
-    image = body.get("image")
-    if not isinstance(image, str) or not image:
-        raise MacroError("image is required")
-    meal_hint = body.get("meal")
-    if meal_hint is not None and not isinstance(meal_hint, str):
-        raise MacroError("meal must be a string")
-    # M3 (Fable): daily cap on the paid vision path — barcodes are unaffected.
-    user_id = getattr(request.state, "user_id", None)
-    if user_id is not None:
-        used = await store_client().count_vision_logs_today(user_id)
-        if used >= 20:
-            raise MacroError("Daily vision-log limit reached (20 photos/day). Use chat logging or barcodes instead.")
-    result = await analyze_food_image(image, meal_hint)
-    if user_id is not None:
-        await store_client().record_vision_log(user_id)
-    return result
 
 
 _LIBRARY_STOPWORDS = {

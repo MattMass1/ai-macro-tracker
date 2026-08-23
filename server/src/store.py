@@ -423,24 +423,6 @@ class Store:
             current_user_id(), model, input_tokens, output_tokens,
         )
 
-    async def count_vision_logs_today(self, user_id: UUID) -> int:
-        """Count today's vision-log calls for a user (model='vision' rows)."""
-        pool = await self.connect()
-        return int(await pool.fetchval(
-            "SELECT count(*) FROM coach_usage "
-            "WHERE user_id=$1 AND model='vision' AND created_at::date = CURRENT_DATE",
-            user_id,
-        ) or 0)
-
-    async def record_vision_log(self, user_id: UUID) -> None:
-        """Record one vision-log call (used for the daily cap)."""
-        pool = await self.connect()
-        await pool.execute(
-            "INSERT INTO coach_usage(user_id,model,input_tokens,output_tokens) "
-            "VALUES($1,'vision',0,0)",
-            user_id,
-        )
-
     async def has_macro_targets(self) -> bool:
         pool = await self.connect()
         return bool(await pool.fetchval(

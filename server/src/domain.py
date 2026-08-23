@@ -205,9 +205,11 @@ def validate_macro_source(macro_source: str) -> str:
         )
     if text.lower().strip(" .!") in PLACEHOLDER_SOURCES:
         raise MacroError(
-            f"macro_source {text!r} is a placeholder, not a source. Never estimate "
-            "macros: look up the brand's nutrition label or the FDA FoodData Central "
-            "entry and cite it (e.g. \"Fairlife Core Power label\")."
+            f"macro_source {text!r} is a placeholder, not a source. Cite the "
+            "nutrition label or the FDA FoodData Central entry when one exists "
+            "(e.g. \"Fairlife Core Power label\"); if nothing resolves, log a "
+            "flagged estimate that says what you assumed "
+            "(e.g. \"ESTIMATE — 6 pieces sushi, typical values\") — do not refuse."
         )
     return text
 

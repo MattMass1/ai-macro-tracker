@@ -788,6 +788,86 @@ def _normalize_brand_flavor(message: str) -> str:
     return message
 
 
+# Parser replies that refuse or deflect a food message instead of logging it:
+# label/verification asks, "couldn't find" apologies, portion questions. When
+# one of these follows an empty item list, code logs the food anyway.
+_PARSER_REFUSAL = re.compile(
+    r"label|verif|barcode|packag|"
+    r"can(?:no|')?t\s+(?:log|find|locate|confirm|estimate|look|verify)|"
+    r"couldn'?t\s+(?:find|locate|confirm|verify)|"
+    r"unable\s+to|not\s+able\s+to|clarif|"
+    r"which\s+(?:brand|flavor|size)|what\s+(?:brand|flavor|size)|"
+    r"how\s+(?:much|many)|more\s+details?",
+    re.IGNORECASE,
+)
+_LEADING_LOG_WORDS = re.compile(
+    r"^(?:please\s+)?(?:log|add|track|i\s+(?:just\s+)?(?:ate|had)|ate|had)\b[\s:,-]*",
+    re.IGNORECASE,
+)
+# Conservative single-serving fallback for a food nothing could resolve.
+# 4/4/9-consistent so the entry logs without an Atwater warning.
+_FALLBACK_ESTIMATE = {
+    "calories": 250.0, "protein": 10.0, "carbs": 30.0, "fat": 10.0, "fiber": 0.0,
+}
+
+
+async def _forced_food_item(
+    message: str,
+    reply: str | None,
+    attempted_lookups: list[str],
+    lookup_found: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Deterministic never-refuse backstop for a food message the model
+    declined to log. The model proved the message names food either by calling
+    lookup_food or by replying with a label/verification ask; in both cases the
+    user wants an entry, not a question. Build it in code: a lookup result's
+    serving (or 100 g) panel when one exists, otherwise a flagged conservative
+    estimate. Returns None when the message never looked like food."""
+    text = " ".join(str(message or "").split())
+    if not text or "?" in text:
+        return None
+    name = ""
+    if attempted_lookups:
+        name = attempted_lookups[0]
+    elif reply and _PARSER_REFUSAL.search(reply):
+        name = _LEADING_LOG_WORDS.sub("", text).strip(" .!") or text
+    if not name:
+        return None
+    name = name[:80]
+    found = lookup_found.get(_normalized_food_name(name))
+    if found is None and not attempted_lookups:
+        # The model never searched; run the cascade ourselves before estimating.
+        try:
+            found = await food_lookup.resolve_food(name)
+        except Exception:
+            logger.exception("Never-refuse fallback lookup failed; estimating")
+            found = None
+    portioned = None
+    if found:
+        portioned = (food_lookup.portion_from_serving(found)
+                     or food_lookup.portion_from_grams(found, 100))
+    if portioned is not None:
+        macros, source = portioned
+        sourced_from, note = "lookup", source
+    else:
+        macros = dict(_FALLBACK_ESTIMATE)
+        sourced_from, note = "estimate", "ESTIMATE"
+    return {
+        "name": name,
+        "calories": macros["calories"],
+        "protein": macros["protein"],
+        "carbs": macros["carbs"],
+        "fat": macros["fat"],
+        "fiber": macros.get("fiber", 0),
+        "quantity": 1,
+        "grams": None,
+        "basis": "per_serving",
+        "sourced_from": sourced_from,
+        "meal": "Snack",
+        "note": note,
+    }
+
+
 async def parse_chat_message(
     message: str,
 ) -> tuple[list[Any], str | None, list[dict[str, Any]]]:
@@ -848,6 +928,8 @@ If the message is a greeting, question, or otherwise not asking to log food, out
         token = _openai_access_token()
         lookups_left = 3
         verified_lookups: list[tuple[str, str]] = []
+        attempted_lookups: list[str] = []
+        lookup_found: dict[str, dict[str, Any]] = {}
         while True:
             response = await _post_openai_chat(token, payload)
             response.raise_for_status()
@@ -871,8 +953,11 @@ If the message is a greeting, question, or otherwise not asking to log food, out
                     try:
                         arguments = json.loads(function.get("arguments") or "{}")
                         name = str(arguments.get("name") or "").strip()
+                        if name:
+                            attempted_lookups.append(name)
                         found = await food_lookup.resolve_food(name) if name else None
                         if found:
+                            lookup_found[_normalized_food_name(name)] = found
                             result = {
                                 key: found[key]
                                 for key in (
@@ -910,6 +995,12 @@ If the message is a greeting, question, or otherwise not asking to log food, out
             verified_lookups.remove(lookup)
         else:
             item["note"] = "ESTIMATE"
+    if not any(isinstance(item, dict) for item in items):
+        forced = await _forced_food_item(
+            message, reply, attempted_lookups, lookup_found
+        )
+        if forced is not None:
+            items, reply = [forced], None
     return items, reply, presets
 
 
@@ -943,6 +1034,44 @@ async def _upgrade_estimate(
     except Exception:
         logger.exception("Food lookup failed; keeping the estimate")
         return None
+
+
+# Foods that legitimately log at zero macros; everything else with an all-zero
+# panel is a parser failure that must be rescued.
+_ZERO_CALORIE_NAME = re.compile(
+    r"\b(?:water|diet|zero|coffee|espresso|tea|seltzer|sparkling)\b",
+    re.IGNORECASE,
+)
+
+
+async def _best_available_macros(
+    name: str, grams: Any
+) -> tuple[dict[str, float], str] | None:
+    """Last-resort lookup for an entry the parser left macro-less.
+
+    A user-stated gram portion scales a per-100g hit; otherwise a serving
+    panel logs as one serving; otherwise a bare per-100g hit logs as 100 g —
+    a sourced approximation always beats a zero-macro row.
+    """
+    try:
+        found = await food_lookup.resolve_food(name)
+    except Exception:
+        logger.exception("Zero-macro rescue lookup failed")
+        return None
+    if not found:
+        return None
+    try:
+        weight = float(grams)
+    except (TypeError, ValueError):
+        weight = None
+    portioned = None
+    if weight is not None:
+        portioned = food_lookup.portion_from_grams(found, weight)
+    if portioned is None:
+        portioned = food_lookup.portion_from_serving(found)
+    if portioned is None:
+        portioned = food_lookup.portion_from_grams(found, 100)
+    return portioned
 
 
 async def analyze_food_image(image: str, meal_hint: str | None = None) -> dict[str, Any]:
@@ -2137,9 +2266,10 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
         found = await food_lookup.resolve_food(str(args["query"]))
         if not found:
             return {"result": "not found",
-                    "guidance": "No free-database match. Ask for the nutrition "
-                                "label or portion; a clearly flagged estimate is "
-                                "the last resort."}
+                    "guidance": "No free-database match. Log your best estimate "
+                                "NOW with log_meal (macro_source like 'ESTIMATE — "
+                                "typical serving'); never ask the user for a "
+                                "nutrition label or refuse to log."}
         return found
     async def readiness_tool(_args):
         workouts, plan, integration = await asyncio.gather(
@@ -2318,6 +2448,25 @@ async def api_chat(request: Request) -> Any:
                     source = f"Known food: {known_name}"
                 else:
                     source = note if sourced_from == "lookup" else "ESTIMATE"
+                # "Logged without macros" is the worst outcome: an all-zero
+                # panel on a non-zero-calorie food means the parser failed.
+                # Attach best-available macros — lookup scaled to the stated
+                # portion, or a flagged conservative estimate — never zeros.
+                if (preset is None and known_name is None
+                        and all(macros[key] <= 0
+                                for key in ("calories", "protein", "carbs", "fat"))
+                        and _ZERO_CALORIE_NAME.search(clean_name) is None):
+                    upgraded = await _best_available_macros(clean_name, grams)
+                    if upgraded is not None:
+                        portion_macros, source = upgraded
+                        macros = domain.validate_macros(
+                            *(portion_macros.get(key, 0) for key in domain.MACRO_KEYS)
+                        )
+                    else:
+                        macros = domain.validate_macros(
+                            *(_FALLBACK_ESTIMATE[key] for key in domain.MACRO_KEYS)
+                        )
+                        source = "ESTIMATE"
                 result = await write_meal(
                     clean_name, macros["calories"], macros["protein"], macros["carbs"],
                     macros["fat"], source, meal_name, day.isoformat(), allow_estimate=True,

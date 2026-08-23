@@ -157,9 +157,9 @@ async def search_openfoodfacts(query: str) -> dict[str, Any] | None:
     try:
         data = await _get_json(OFF_SEARCH_URL, {
             "search_terms": text, "search_simple": 1,
-            "action": "process", "json": 1, "page_size": 3,
+            "action": "process", "json": 1, "page_size": 5,
         })
-        for product in (data.get("products") or [])[:3]:
+        for product in (data.get("products") or [])[:5]:
             if not isinstance(product, dict):
                 continue
             nutriments = product.get("nutriments") or {}
@@ -261,9 +261,12 @@ _TAVILY_BASIS = re.compile(
     r"\bper\s+(\d+(?:\.\d+)?)\s*(?:g\b|grams?\b)[^:]{0,80}:\s*",
     re.IGNORECASE,
 )
+# "Serving size 1 bar (55g), Calories 200..." and label panels that lead with
+# a unit cue instead — "Per slice: Calories 60..." — are both serving columns.
+# The (?!\d) keeps "per 100g"-style weight cues on the _TAVILY_BASIS path.
 _US_SERVING = re.compile(
-    r"\bserving\s*(?:size\s*)?(?::|[-=])?\s*"
-    r"(?P<serving>.+?)\s*[,;.]?\s*(?=calories\b)",
+    r"\b(?:serving\s*(?:size\s*)?(?::|[-=])?|per\s+(?!\d))\s*"
+    r"(?P<serving>.{1,60}?)\s*[,;.:]?\s*(?=calories\b)",
     re.IGNORECASE,
 )
 _GRAM_WEIGHT = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s*(?:g\b|grams?\b)", re.IGNORECASE)
@@ -273,7 +276,7 @@ _WHOLE_SERVING_QUERY = re.compile(
     re.IGNORECASE,
 )
 
-_PLAIN_CAL = re.compile(r"\b(\d{2,4})\s*cal\b", re.IGNORECASE)
+_PLAIN_CAL = re.compile(r"\b(\d{2,4})\s*k?cal(?:ories?)?\b", re.IGNORECASE)
 _PLAIN_PROTEIN = re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s*g\s+protein\b", re.IGNORECASE)
 _PLAIN_CARBS = re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s*g\s+(?:carbs?|net carbs)\b", re.IGNORECASE)
 _PLAIN_FAT = re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s*g\s+fat\b", re.IGNORECASE)
@@ -402,9 +405,13 @@ def _tavily_result(query: str, result: Mapping[str, Any]) -> dict[str, Any] | No
 
     if serving_panel is not None and serving_panel[1] is None:
         serving, _weight, values = serving_panel
-        # A gram request cannot use a weightless serving. Only explicitly whole-item
-        # queries may consume these values without inventing a conversion.
-        if _QUERY_GRAMS.search(query) or not _WHOLE_SERVING_QUERY.search(query):
+        # A gram request cannot use a weightless serving, and an explicit
+        # numeric quantity other than 1 (1/2, 1.5, 2) can't be sized from one
+        # serving without inventing a conversion. A query with no stated
+        # quantity means one serving — never reject it for lacking a weight.
+        if _QUERY_GRAMS.search(query):
+            return None
+        if re.search(r"\d", query) and not _WHOLE_SERVING_QUERY.search(query):
             return None
         macros = _macros(values)
         if macros is None:
@@ -490,6 +497,35 @@ async def search_tavily(query: str) -> dict[str, Any] | None:
     return None
 
 
+def _query_variants(query: str) -> list[str]:
+    """Fallback query ladder for branded names the sources miss verbatim.
+
+    "L'oven Fresh Cinnamon Raisin Bread" tries itself, then the phrase with
+    one and two leading brand words dropped, then the brand alone, then the
+    trailing generic food word — so a brand+flavor entry degrades to a close
+    generic match instead of resolving to nothing.
+    """
+    text = " ".join(str(query or "").split())
+    if not text:
+        return []
+    words = text.split()
+    candidates = [text]
+    if len(words) >= 3:
+        candidates.append(" ".join(words[1:]))
+        candidates.append(" ".join(words[2:]))
+        candidates.append(" ".join(words[:2]))
+        if len(words[-1]) >= 4:
+            candidates.append(words[-1])
+    variants: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = candidate.casefold()
+        if candidate and key not in seen:
+            seen.add(key)
+            variants.append(candidate)
+    return variants
+
+
 async def resolve_food(
     query: str, classify: bool = True, *, whole_item: bool = False
 ) -> dict[str, Any] | None:
@@ -507,15 +543,16 @@ async def resolve_food(
         }.get(classification)
         if preferred is not None:
             searches = [preferred] + [search for search in searches if search is not preferred]
-    for search in searches:
-        search_query = f"1 {query}" if whole_item and search is search_tavily else query
-        found = await search(search_query)
-        if found:
-            if whole_item:
-                serving = found.get("macros_per_serving")
-                if not isinstance(serving, Mapping) or _macros(serving) is None:
-                    continue
-            return found
+    for variant in _query_variants(query):
+        for search in searches:
+            search_query = f"1 {variant}" if whole_item and search is search_tavily else variant
+            found = await search(search_query)
+            if found:
+                if whole_item:
+                    serving = found.get("macros_per_serving")
+                    if not isinstance(serving, Mapping) or _macros(serving) is None:
+                        continue
+                return found
     return None
 
 

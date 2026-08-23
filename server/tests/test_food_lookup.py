@@ -423,14 +423,19 @@ def test_tavily_conflicting_dual_column_panel_returns_none():
     }) is None
 
 
-def test_tavily_per_serving_without_weight_returns_none():
-    assert food_lookup._tavily_result("Barebells protein bar", {
+def test_tavily_per_serving_without_weight_is_accepted_for_unquantified_query():
+    # A query with no stated quantity means one serving — the weightless
+    # serving panel is the best available answer, not a reason to refuse.
+    result = food_lookup._tavily_result("Barebells protein bar", {
         "title": "Barebells Protein Bar Nutrition",
         "content": (
             "Per serving: Calories 200, Protein 20g, Carbs 18g, "
             "Fat 8g, Fiber 3g."
         ),
-    }) is None
+    })
+    assert result is not None
+    assert result["basis"] == "serving"
+    assert result["macros_per_serving"]["calories"] == 200.0
 
 
 def test_tavily_per_100g_panel_is_accepted_as_is():
@@ -1137,3 +1142,341 @@ async def test_food_path_weightless_preset_grams_use_cascade(monkeypatch):
         "fiber": 3.0,
         "macro_source": "USDA FDC: 999999 — Chili with beans, 100 g",
     }
+
+
+# --------------------------------------------------------------------------- #
+# Branded + flavor lookup resolution and the deterministic never-refuse path
+# --------------------------------------------------------------------------- #
+
+LOVEN_QUERY = "L'oven fresh Cinnamon Raisin bread"
+
+LOVEN_OFF_PAYLOAD = {"products": [{
+    "code": "4099100179378",
+    "product_name": "Cinnamon Raisin Bread",
+    "nutriments": {"energy-kcal_100g": 230, "proteins_100g": 7.7,
+                   "carbohydrates_100g": 46.2, "fat_100g": 3.8,
+                   "fiber_100g": 3.8},
+}]}
+
+
+def test_query_variants_ladder_covers_brand_flavor_and_generic():
+    assert food_lookup._query_variants(LOVEN_QUERY) == [
+        LOVEN_QUERY,
+        "fresh Cinnamon Raisin bread",
+        "Cinnamon Raisin bread",
+        "L'oven fresh",
+        "bread",
+    ]
+    assert food_lookup._query_variants("banana") == ["banana"]
+    assert food_lookup._query_variants("   ") == []
+
+
+async def test_branded_flavor_query_resolves_via_generic_variant(monkeypatch):
+    # Full brand+flavor phrase misses OpenFoodFacts; the generic variant hits.
+    monkeypatch.delenv("USDA_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
+    def handler(request):
+        assert request.url.host == "world.openfoodfacts.org"
+        if request.url.params["search_terms"].casefold() == "cinnamon raisin bread":
+            return httpx.Response(200, json=LOVEN_OFF_PAYLOAD)
+        return httpx.Response(200, json={"products": []})
+
+    calls = mock_transport(monkeypatch, handler)
+    result = await food_lookup.resolve_food(LOVEN_QUERY)
+    assert result is not None
+    assert result["source"] == "OpenFoodFacts: 4099100179378"
+    assert result["macros_per_100g"]["calories"] == 230.0
+    assert [c.url.params["search_terms"] for c in calls] == [
+        LOVEN_QUERY, "fresh Cinnamon Raisin bread", "Cinnamon Raisin bread",
+    ]
+
+
+async def test_branded_flavor_query_resolves_via_tavily_per_slice_panel(monkeypatch):
+    # OpenFoodFacts misses everywhere; a Tavily "per slice (26g)" web panel
+    # is parsed instead of being rejected.
+    monkeypatch.delenv("USDA_API_KEY", raising=False)
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
+
+    def handler(request):
+        if request.url.host == "world.openfoodfacts.org":
+            return httpx.Response(200, json={"products": []})
+        assert request.url.host == "api.tavily.com"
+        return httpx.Response(200, json={"results": [{
+            "title": "L'Oven Fresh Cinnamon Raisin Bread Nutrition Facts",
+            "url": "https://example.com/loven-fresh",
+            "content": (
+                "Per slice (26g): Calories 60, Protein 2g, Carbs 12g, "
+                "Fat 1g, Fiber 1g."
+            ),
+        }]})
+
+    mock_transport(monkeypatch, handler)
+    result = await food_lookup.resolve_food(LOVEN_QUERY)
+    assert result is not None
+    assert result["source"] == "Tavily: https://example.com/loven-fresh"
+    assert result["macros_per_serving"]["calories"] == 60.0
+    macros, source = food_lookup.portion_from_serving(result)
+    assert macros["calories"] == 60.0
+    assert source == "Tavily: https://example.com/loven-fresh"
+
+
+def test_tavily_weightless_per_slice_panel_accepted_for_unquantified_query():
+    result = food_lookup._tavily_result(LOVEN_QUERY, {
+        "title": "L'Oven Fresh Cinnamon Raisin Bread Nutrition",
+        "url": "https://example.com/loven-fresh",
+        "content": (
+            "Per slice: Calories 60, Protein 2g, Carbs 12g, "
+            "Fat 1g, Fiber 1g."
+        ),
+    })
+    assert result is not None
+    assert result["basis"] == "serving"
+    assert result["serving"] == "slice"
+    assert result["macros_per_serving"]["calories"] == 60.0
+
+
+def test_plain_macro_line_accepts_calories_spelling():
+    assert food_lookup._plain_macro_line(
+        "150 calories | 5g protein | 26g carbs | 1g fat"
+    ) == {"calories": 150.0, "protein": 5.0, "carbs": 26.0, "fat": 1.0}
+    assert food_lookup._plain_macro_line("650 kcal | 43g protein") == {
+        "calories": 650.0, "protein": 43.0, "carbs": 0.0, "fat": 0.0,
+    }
+    # Label-first panels with no basis cue stay rejected (ambiguous).
+    assert food_lookup._plain_macro_line("Calories: 310 Protein: 20g") is None
+
+
+async def test_parser_refusal_after_failed_lookup_still_logs_estimate(monkeypatch):
+    # The model called lookup_food (proving the message names food), the
+    # cascade missed, and the model refused with a label ask anyway. The
+    # deterministic backstop logs a flagged estimate instead.
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-openai-token")
+    monkeypatch.setattr(srv, "_client", FakeStore())
+    responses = [
+        _openai_response({
+            "role": "assistant", "content": None,
+            "tool_calls": [{
+                "id": "lookup-1", "type": "function",
+                "function": {"name": "lookup_food",
+                             "arguments": json.dumps({"name": LOVEN_QUERY})},
+            }],
+        }),
+        _openai_response({
+            "role": "assistant",
+            "content": "[] I couldn't find that product — could you share "
+                       "the nutrition label?",
+        }),
+    ]
+
+    async def fake_post(_token, _payload):
+        return responses.pop(0)
+
+    async def fake_resolve(_name):
+        return None
+
+    monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
+
+    items, reply, _ = await srv.parse_chat_message(LOVEN_QUERY)
+    assert reply is None
+    assert len(items) == 1
+    assert items[0]["name"] == LOVEN_QUERY
+    assert items[0]["note"] == "ESTIMATE"
+    assert items[0]["calories"] == 250.0
+
+
+async def test_parser_refusal_without_lookup_runs_cascade_then_estimates(monkeypatch):
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-openai-token")
+    monkeypatch.setattr(srv, "_client", FakeStore())
+    lookups = []
+
+    async def fake_post(_token, _payload):
+        return _openai_response({
+            "role": "assistant",
+            "content": "[] I can't log that without the nutrition label.",
+        })
+
+    async def fake_resolve(name):
+        lookups.append(name)
+        return None
+
+    monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
+
+    items, reply, _ = await srv.parse_chat_message(LOVEN_QUERY)
+    assert lookups == [LOVEN_QUERY]
+    assert reply is None
+    assert items[0]["note"] == "ESTIMATE"
+    assert items[0]["calories"] == 250.0
+
+
+async def test_parser_refusal_after_successful_lookup_logs_lookup_macros(monkeypatch):
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-openai-token")
+    monkeypatch.setattr(srv, "_client", FakeStore())
+    responses = [
+        _openai_response({
+            "role": "assistant", "content": None,
+            "tool_calls": [{
+                "id": "lookup-1", "type": "function",
+                "function": {"name": "lookup_food",
+                             "arguments": json.dumps({"name": LOVEN_QUERY})},
+            }],
+        }),
+        _openai_response({
+            "role": "assistant",
+            "content": "[] Please confirm the serving size on the label first.",
+        }),
+    ]
+
+    async def fake_post(_token, _payload):
+        return responses.pop(0)
+
+    async def fake_resolve(_name):
+        return {
+            "name": "L'Oven Fresh Cinnamon Raisin Bread",
+            "macros_per_100g": {"calories": 230, "protein": 7.7,
+                                "carbs": 46.2, "fat": 3.8, "fiber": 3.8},
+            "macros_per_serving": {"calories": 60, "protein": 2,
+                                   "carbs": 12, "fat": 1, "fiber": 1},
+            "serving_size": "1 slice (26 g)",
+            "source": "OpenFoodFacts: 4099100179378",
+        }
+
+    monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
+
+    items, reply, _ = await srv.parse_chat_message(LOVEN_QUERY)
+    assert reply is None
+    assert items[0]["sourced_from"] == "lookup"
+    assert items[0]["note"] == "OpenFoodFacts: 4099100179378"
+    assert items[0]["calories"] == 60.0
+    assert items[0]["protein"] == 2.0
+
+
+async def test_parser_greeting_reply_is_not_forced_into_a_food_entry(monkeypatch):
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-openai-token")
+    monkeypatch.setattr(srv, "_client", FakeStore())
+
+    async def fake_post(_token, _payload):
+        return _openai_response({
+            "role": "assistant",
+            "content": "[] Hey Matthew! Ready to crush today.",
+        })
+
+    async def unexpected_resolve(_name):
+        pytest.fail("a greeting must not trigger the food fallback lookup")
+
+    monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
+    monkeypatch.setattr(food_lookup, "resolve_food", unexpected_resolve)
+
+    items, reply, _ = await srv.parse_chat_message("hello")
+    assert items == []
+    assert reply == "Hey Matthew! Ready to crush today."
+
+
+async def test_food_path_zero_macro_item_is_rescued_by_lookup(monkeypatch):
+    monkeypatch.setattr(srv, "_client", FakeStore())
+    seen = {}
+
+    async def fake_parse(_message):
+        return [{"name": LOVEN_QUERY, "calories": 0, "protein": 0,
+                 "carbs": 0, "fat": 0, "fiber": 0, "quantity": 1,
+                 "grams": None, "meal": "Snack", "sourced_from": "estimate",
+                 "note": "ESTIMATE"}], None
+
+    async def fake_resolve(name):
+        assert name == LOVEN_QUERY
+        return {
+            "name": "L'Oven Fresh Cinnamon Raisin Bread",
+            "macros_per_serving": {"calories": 60, "protein": 2,
+                                   "carbs": 12, "fat": 1, "fiber": 1},
+            "source": "OpenFoodFacts: 4099100179378",
+        }
+
+    async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
+                              meal, day_value, allow_estimate=False, fiber=0):
+        seen.update(calories=calories, protein=protein, macro_source=macro_source)
+        return {"logged": {"name": name, "calories": calories, "protein": protein,
+                           "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
+
+    async def fake_day_payload(_day, ensure=None):
+        return {"totals": {"calories": 60}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+
+    response = await srv.api_chat(chat_request({"message": LOVEN_QUERY}))
+    assert response.status_code == 200
+    assert seen == {
+        "calories": 60.0, "protein": 2.0,
+        "macro_source": "OpenFoodFacts: 4099100179378",
+    }
+
+
+async def test_food_path_zero_macro_item_without_lookup_gets_default_estimate(monkeypatch):
+    monkeypatch.setattr(srv, "_client", FakeStore())
+    seen = {}
+
+    async def fake_parse(_message):
+        return [{"name": "mystery pastry", "calories": 0, "protein": 0,
+                 "carbs": 0, "fat": 0, "fiber": 0, "meal": "Snack",
+                 "sourced_from": "estimate", "note": "ESTIMATE"}], None
+
+    async def fake_resolve(_name):
+        return None
+
+    async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
+                              meal, day_value, allow_estimate=False, fiber=0):
+        seen.update(calories=calories, protein=protein, carbs=carbs, fat=fat,
+                    macro_source=macro_source)
+        return {"logged": {"name": name, "calories": calories, "protein": protein,
+                           "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
+
+    async def fake_day_payload(_day, ensure=None):
+        return {"totals": {"calories": 250}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+
+    response = await srv.api_chat(chat_request({"message": "mystery pastry"}))
+    assert response.status_code == 200
+    assert seen == {
+        "calories": 250.0, "protein": 10.0, "carbs": 30.0, "fat": 10.0,
+        "macro_source": "ESTIMATE",
+    }
+
+
+async def test_food_path_zero_calorie_foods_keep_their_zeros(monkeypatch):
+    monkeypatch.setattr(srv, "_client", FakeStore())
+    seen = {}
+
+    async def fake_parse(_message):
+        return [{"name": "Diet Coke", "calories": 0, "protein": 0,
+                 "carbs": 0, "fat": 0, "fiber": 0, "meal": "Snack",
+                 "sourced_from": "estimate", "note": "ESTIMATE"}], None
+
+    async def unexpected_resolve(_name):
+        pytest.fail("zero-calorie foods must not trigger the rescue lookup")
+
+    async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
+                              meal, day_value, allow_estimate=False, fiber=0):
+        seen.update(calories=calories, macro_source=macro_source)
+        return {"logged": {"name": name, "calories": calories, "protein": protein,
+                           "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
+
+    async def fake_day_payload(_day, ensure=None):
+        return {"totals": {"calories": 0}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(food_lookup, "resolve_food", unexpected_resolve)
+    monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+
+    response = await srv.api_chat(chat_request({"message": "a diet coke"}))
+    assert response.status_code == 200
+    assert seen == {"calories": 0.0, "macro_source": "ESTIMATE"}

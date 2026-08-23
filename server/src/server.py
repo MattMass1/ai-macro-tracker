@@ -752,9 +752,31 @@ async def _post_openai_chat(token: str, payload: dict[str, Any]) -> httpx.Respon
     raise RuntimeError("unreachable")
 
 
+# Known brand names that map to a base known-food entry. Any flavor/descriptor
+# words after the brand collapse to the bare brand so the parser matches it.
+_KNOWN_BRANDS = (
+    "barebells",
+    "fairlife",
+    "moe's",
+)
+
+
+def _normalize_brand_flavor(message: str) -> str:
+    """Collapse 'brand + flavor words' to just the brand for known brands,
+    so 'Barebells creamy crisp' matches the known 'Barebells' entry. Stops at
+    'and', a comma, or a quantity so multi-food messages stay intact."""
+    lowered = message.casefold()
+    for brand in _KNOWN_BRANDS:
+        if brand in lowered:
+            pattern = rf"\b{re.escape(brand)}\b(?:\s+(?!and\b|with\b|plus\b|,)[a-z][a-z'&.-]*)*"
+            return re.sub(pattern, brand, message, flags=re.IGNORECASE)
+    return message
+
+
 async def parse_chat_message(
     message: str,
 ) -> tuple[list[Any], str | None, list[dict[str, Any]]]:
+    message = _normalize_brand_flavor(message)
     day = domain.effective_date()
     meals, targets, presets = await asyncio.gather(
         fetch_meals(day), fetch_targets(day), fetch_presets()

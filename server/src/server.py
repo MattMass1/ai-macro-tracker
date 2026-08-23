@@ -646,14 +646,14 @@ def _normalized_food_name(name: str) -> str:
 
 # Restaurant orders the parser kept refusing (no USDA/label to "verify").
 # Base macros: calories/protein/carbs/fat. Keyed by lowercase trigger phrase.
+# RESTAURANT ORDERS ONLY — these have no single USDA/label answer, so they
+# short-circuit. Branded items (Barebells, Fairlife) stay in the known-foods
+# list so flavor words still map through the normal parser path.
 _SHORT_CIRCUIT_FOODS: dict[str, dict[str, float]] = {
     "chipotle bowl": {"calories": 625, "protein": 75, "carbs": 45, "fat": 16},
     "chipotle burrito": {"calories": 945, "protein": 83, "carbs": 100, "fat": 24},
     "cfa lunch": {"calories": 710, "protein": 62, "carbs": 45, "fat": 31},
     "chick-fil-a lunch": {"calories": 710, "protein": 62, "carbs": 45, "fat": 31},
-    # Branded known items — any flavor/descriptor still maps to the base value.
-    "barebells": {"calories": 200, "protein": 20, "carbs": 21, "fat": 7},
-    "fairlife": {"calories": 150, "protein": 30, "carbs": 3, "fat": 2.5},
 }
 
 
@@ -771,6 +771,10 @@ Known foods (values are calories/protein/carbs/fat unless labeled):
 {KNOWN_CHAT_FOODS}
 
 CHIPOTLE RULE: Any "Chipotle bowl" or "Chipotle burrito" order — regardless of the toppings, modifiers, protein, or sides the user lists — maps to the known "Chipotle bowl" or "Chipotle burrito" entry above. Do NOT call lookup_food for it and do NOT refuse. Use the known macros directly (sourced_from=known, note="Known food: Chipotle bowl"). The toppings described do not change the base known value.
+
+BRAND + FLAVOR RULE: When a KNOWN food's brand name appears with extra flavor or descriptor words (e.g. "Barebells creamy crisp", "Barebells caramel cashew", "Fairlife chocolate"), map it to the known base entry for that brand. The flavor does NOT change the macros — use the known value and set sourced_from=known. Never refuse a known brand just because a flavor word is attached.
+
+NEVER REFUSE: lookup_food searches the internet (USDA, OpenFoodFacts, and Tavily web search). For ANY food you don't already know, call lookup_food FIRST. If it returns nothing, log your best estimate with note="ESTIMATE" — never ask the user for a label, never say you can't verify, never say you can't browse the web. The user wants it logged.
 
 For a food-related message, output ONLY a JSON array with one object per item:
 [{{"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"quantity":null,"grams":null,"basis":"per_unit|per_100g|per_serving","sourced_from":"preset|known|estimate|lookup","meal":"Breakfast|Lunch|Dinner|Snack","note":"source string or ESTIMATE"}}]

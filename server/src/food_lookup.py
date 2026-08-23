@@ -273,6 +273,36 @@ _WHOLE_SERVING_QUERY = re.compile(
     re.IGNORECASE,
 )
 
+_PLAIN_CAL = re.compile(r"\b(\d{2,4})\s*cal\b", re.IGNORECASE)
+_PLAIN_PROTEIN = re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s*g\s+protein\b", re.IGNORECASE)
+_PLAIN_CARBS = re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s*g\s+(?:carbs?|net carbs)\b", re.IGNORECASE)
+_PLAIN_FAT = re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s*g\s+fat\b", re.IGNORECASE)
+
+
+def _plain_macro_line(text: str) -> dict[str, float] | None:
+    """Extract a whole-serving macro set from a plain line like
+    '650 cal | 43g protein | 46g fat'. Returns None unless calories and at
+    least one other macro are present."""
+    cal = _PLAIN_CAL.search(text)
+    if cal is None:
+        return None
+    protein = _PLAIN_PROTEIN.search(text)
+    carbs = _PLAIN_CARBS.search(text)
+    fat = _PLAIN_FAT.search(text)
+    values: dict[str, float] = {"calories": float(cal.group(1))}
+    if protein:
+        values["protein"] = float(protein.group(1))
+    if carbs:
+        values["carbs"] = float(carbs.group(1))
+    if fat:
+        values["fat"] = float(fat.group(1))
+    if len(values) < 2:  # calories alone is not enough to trust
+        return None
+    values.setdefault("protein", 0.0)
+    values.setdefault("carbs", 0.0)
+    values.setdefault("fat", 0.0)
+    return values
+
 
 def is_whole_serving_query(query: str) -> bool:
     """Whether the user explicitly requested one whole item or serving."""
@@ -349,6 +379,20 @@ def _tavily_result(query: str, result: Mapping[str, Any]) -> dict[str, Any] | No
     serving_panel = _us_serving_panel(text)
     panels = _tavily_panels(text)
     if serving_panel is None and panels is None:
+        # Plain-format fallback: "650 cal | 43g protein | 46g fat" (no per-100g
+        # or serving-size cue). Treat as one whole-serving macro line.
+        plain = _plain_macro_line(text)
+        if plain is not None:
+            url = str(result.get("url") or "").strip()
+            source_ref = url or title
+            if not source_ref:
+                return None
+            return {
+                "name": title or query,
+                "macros_per_serving": plain,
+                "basis": "serving",
+                "source": f"Tavily: {source_ref}",
+            }
         return None
 
     url = str(result.get("url") or "").strip()

@@ -7,6 +7,7 @@ struct ChatMessage: Identifiable {
     let text: String
     var widget: ChatWidget? = nil
     var showsExercisePicker = false
+    var loggedMeals: [LoggedMeal] = []
 
     enum Role { case user, assistant }
 }
@@ -85,6 +86,9 @@ struct ChatLogView: View {
                                             onSkip: { Task { await skipExercisePicker() } }
                                         )
                                     }
+                                    if message.role == .assistant, !message.loggedMeals.isEmpty {
+                                        LoggedMealsCard(meals: message.loggedMeals)
+                                    }
                                 }
                                 .id(message.id)
                             }
@@ -137,9 +141,9 @@ struct ChatLogView: View {
         }
         .onChange(of: scanFoodTrigger) { _, _ in handleScanFoodTrigger() }
         .onAppear {
-            seedGreeting()
             handleScanFoodTrigger()
         }
+        .task { await loadChatHistory() }
         .confirmationDialog("Sign out?", isPresented: $showSignOutConfirm, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { auth.signOut() }
         } message: {
@@ -211,7 +215,12 @@ struct ChatLogView: View {
         for attempt in 0...2 {
             do {
                 let response = try await store.chat(message, metrics: metrics)
-                messages.append(ChatMessage(role: .assistant, text: response.reply, widget: response.widget))
+                messages.append(ChatMessage(
+                    role: .assistant,
+                    text: response.reply,
+                    widget: response.widget,
+                    loggedMeals: response.logged ?? []
+                ))
                 // The coach can log food or write targets/plan on any turn.
                 await store.loadDay()
                 if response.hasPlan == true || response.hasTargets == true { await store.loadWorkoutData() }
@@ -417,6 +426,29 @@ struct ChatLogView: View {
         }
     }
 
+    private func loadChatHistory() async {
+        do {
+            let history = try await store.chatHistory(limit: 100)
+            guard messages.isEmpty else { return }
+            let restored = history.compactMap { item -> ChatMessage? in
+                let role: ChatMessage.Role
+                switch item.role {
+                case "user": role = .user
+                case "assistant": role = .assistant
+                default: return nil
+                }
+                return ChatMessage(role: role, text: item.content)
+            }
+            if restored.isEmpty {
+                seedGreeting()
+            } else {
+                messages = restored
+            }
+        } catch {
+            seedGreeting()
+        }
+    }
+
     private var needsOnboarding: Bool {
         if auth.freshClaim { return true }
         if let targets = store.day?.targets { return targets.calories <= 0 }
@@ -434,6 +466,31 @@ struct ChatLogView: View {
 private struct ChatBubble: View {
     let message: ChatMessage
     var body: some View { HStack { if message.role == .user { Spacer(minLength: 52) }; Text(message.text).font(.subheadline).padding(.horizontal, 14).padding(.vertical, 11).background(message.role == .user ? Theme.accentTint : Theme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous)).foregroundStyle(Theme.ink).shadow(color: message.role == .assistant ? .black.opacity(0.04) : .clear, radius: 4, y: 1); if message.role == .assistant { Spacer(minLength: 52) } } }
+}
+private struct LoggedMealsCard: View {
+    let meals: [LoggedMeal]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Logged", systemImage: "checkmark.circle.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.accent)
+            ForEach(Array(meals.enumerated()), id: \.offset) { _, meal in
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text(meal.name)
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.ink)
+                    Spacer(minLength: 12)
+                    Text("\(Int(meal.calories.rounded())) kcal")
+                        .font(.subheadline.weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.ink)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .appCard(padding: 14)
+    }
 }
 private struct TypingBubble: View {
     @State private var pulse = false

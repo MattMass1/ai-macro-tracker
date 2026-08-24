@@ -480,13 +480,28 @@ extension ChatWidget: Codable {
 }
 
 // Optionals keep decoding compatible while the coach backend rolls out the flags.
+struct ChatHistoryMessage: Codable {
+    var id: String
+    var role: String
+    var content: String
+}
+
+struct LoggedMeal: Codable {
+    var name: String
+    var calories: Double
+    var protein: Double?
+    var carbs: Double?
+    var fat: Double?
+}
+
 struct ChatReply: Codable {
     var reply: String
     var hasPlan: Bool?
     var hasTargets: Bool?
     var widget: ChatWidget?
+    var logged: [LoggedMeal]?
 
-    enum CodingKeys: String, CodingKey { case reply, hasPlan, hasTargets, widget }
+    enum CodingKeys: String, CodingKey { case reply, hasPlan, hasTargets, widget, logged }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -494,6 +509,7 @@ struct ChatReply: Codable {
         hasPlan = try container.decodeIfPresent(Bool.self, forKey: .hasPlan)
         hasTargets = try container.decodeIfPresent(Bool.self, forKey: .hasTargets)
         widget = try Self.decodeWidget(from: container)
+        logged = try container.decodeIfPresent([LoggedMeal].self, forKey: .logged)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -502,6 +518,7 @@ struct ChatReply: Codable {
         try container.encodeIfPresent(hasPlan, forKey: .hasPlan)
         try container.encodeIfPresent(hasTargets, forKey: .hasTargets)
         try container.encodeIfPresent(widget, forKey: .widget)
+        try container.encodeIfPresent(logged, forKey: .logged)
     }
 
     private static func decodeWidget(from container: KeyedDecodingContainer<CodingKeys>) throws -> ChatWidget? {

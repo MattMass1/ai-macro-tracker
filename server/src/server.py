@@ -867,11 +867,22 @@ Available presets: {json.dumps(preset_context)}.
 Known foods (values are calories/protein/carbs/fat unless labeled):
 {KNOWN_CHAT_FOODS}
 
-CHIPOTLE RULE: Any "Chipotle bowl" or "Chipotle burrito" order — regardless of the toppings, modifiers, protein, or sides the user lists — maps to the known "Chipotle bowl" or "Chipotle burrito" entry above. Do NOT call lookup_food for it and do NOT refuse. Use the known macros directly (sourced_from=known, note="Known food: Chipotle bowl"). The toppings described do not change the base known value.
+EXAMPLES — always log, never refuse:
 
-BRAND + FLAVOR RULE: When a KNOWN food's brand name appears with extra flavor or descriptor words (e.g. "Barebells creamy crisp", "Barebells caramel cashew", "Fairlife chocolate"), map it to the known base entry for that brand. The flavor does NOT change the macros — use the known value and set sourced_from=known. Never refuse a known brand just because a flavor word is attached.
+User: "chipotle bowl with double chicken and guac"
+You: [{{"name":"Chipotle bowl","calories":625,"protein":75,"carbs":45,"fat":16,"fiber":0,"quantity":1,"basis":"per_serving","sourced_from":"known","meal":"Lunch","note":"Known food: Chipotle bowl"}}]
 
-NEVER REFUSE: lookup_food searches the internet (USDA, OpenFoodFacts, and Tavily web search). For ANY food you don't already know, call lookup_food FIRST. If it returns nothing, log your best estimate with note="ESTIMATE" — never ask the user for a label, never say you can't verify, never say you can't browse the web. The user wants it logged.
+User: "Barebells creamy crisp"
+You: [{{"name":"Barebells","calories":200,"protein":20,"carbs":21,"fat":7,"fiber":0,"quantity":1,"basis":"per_serving","sourced_from":"known","meal":"Snack","note":"Known food: Barebells"}}]
+
+User: "salmon sashimi and 2 tuna sushi"
+You call lookup_food, get no good result → log anyway:
+[{{"name":"salmon sashimi","calories":45,"protein":5,"carbs":0,"fat":2.5,"fiber":0,"quantity":1,"basis":"per_unit","sourced_from":"estimate","meal":"Dinner","note":"ESTIMATE — 1 piece sashimi ~45 kcal"}},{{"name":"tuna sushi 2 pieces","calories":90,"protein":8,"carbs":18,"fat":1,"fiber":0,"quantity":2,"basis":"per_unit","sourced_from":"estimate","meal":"Dinner","note":"ESTIMATE — 2 pieces nigiri ~90 kcal"}}]
+
+User: "hello"
+You: []["Hey. What should I call you?"]
+
+If the message names food, log it. Never refuse. Never ask for labels.
 
 For a food-related message, output ONLY a JSON array with one object per item:
 [{{"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"quantity":null,"grams":null,"basis":"per_unit|per_100g|per_serving","sourced_from":"preset|known|estimate|lookup","meal":"Breakfast|Lunch|Dinner|Snack","note":"source string or ESTIMATE"}}]
@@ -904,6 +915,7 @@ If the message is a greeting, question, or otherwise not asking to log food, out
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
+            "temperature": 0,
         }
         token = _openai_access_token()
         lookups_left = 3

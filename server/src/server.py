@@ -728,7 +728,7 @@ def _normalized_food_name(name: str) -> str:
     return " ".join(name.split()).casefold()
 
 
-# Restaurant orders the parser kept refusing (no USDA/label to "verify").
+# Restaurant orders the parser kept refusing (no database/label to "verify").
 # Base macros: calories/protein/carbs/fat. Keyed by lowercase trigger phrase.
 # RESTAURANT MEALS — always short-circuit (one meal; toppings can use 'and').
 _RESTAURANT_MEALS: dict[str, dict[str, float]] = {
@@ -978,7 +978,7 @@ If the message is a greeting, question, or otherwise not asking to log food, out
         "function": {
             "name": "lookup_food",
             "description": (
-                "Look up real food macros using the USDA, OpenFoodFacts, and "
+                "Look up real food macros using the OpenFoodFacts and "
                 "Tavily cascade. Call for foods not in presets or known foods."
             ),
             "parameters": {
@@ -1231,8 +1231,8 @@ async def log_meal(
     """Log one food or meal to the nutrition log and return the day's totals.
 
     NEVER estimate or guess macros. Before calling this, look up real numbers:
-    the FDA FoodData Central entry for whole foods, or the specific brand's
-    nutrition label for packaged products. Do not guess portion sizes or weights
+    OpenFoodFacts or Tavily, or the specific brand's nutrition label for packaged
+    products. Do not guess portion sizes or weights
     either — if the amount is unclear, ask the user how much they ate.
 
     Args:
@@ -1242,7 +1242,7 @@ async def log_meal(
         carbs: Grams of carbohydrate.
         fat: Grams of fat.
         macro_source: Where these numbers came from, e.g.
-            "FDA FoodData Central: chicken breast, roasted", "Fairlife Core Power
+            "OpenFoodFacts: chicken breast, roasted", "Fairlife Core Power
             label", "user read the package". Placeholders like "estimate",
             "approx" or "guess" are rejected.
         meal: Breakfast, Lunch, Dinner, or Snack. Defaults to Snack.
@@ -1337,7 +1337,7 @@ async def save_preset(
         carbs: Grams of carbohydrate per serving.
         fat: Grams of fat per serving.
         macro_source: Where the per-serving numbers came from, e.g. "Fairlife
-            Core Power label" or "FDA FoodData Central: oats, dry". Placeholders
+            Core Power label" or "OpenFoodFacts: oats, dry". Placeholders
             like "estimate" or "guess" are rejected.
         meal: Default meal slot — Breakfast, Lunch, Dinner, or Snack.
         emoji: Single emoji shown on the app's quick-add tile.

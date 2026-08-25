@@ -368,7 +368,7 @@ async def test_write_normalizes_fields_and_records_the_source(lagging):
         protein=55,
         carbs=0,
         fat=7,
-        macro_source="FDA FoodData Central: chicken breast, roasted",
+        macro_source="OpenFoodFacts: chicken breast, roasted",
         meal="dinner",
         day_value="2026-07-20",
     )
@@ -376,7 +376,7 @@ async def test_write_normalizes_fields_and_records_the_source(lagging):
     assert row["name"] == "Chicken"
     assert row["meal"] == "Dinner"
     assert row["date"] == "2026-07-20"
-    assert row["macro_source"] == "FDA FoodData Central: chicken breast, roasted"
+    assert row["macro_source"] == "OpenFoodFacts: chicken breast, roasted"
     assert row["calories"] == 300.0 and row["protein"] == 55.0 and row["fat"] == 7.0
 
 

@@ -19,18 +19,6 @@ import server as srv  # noqa: E402
 from auth import bind_user, reset_user  # noqa: E402
 from test_coach import FakeStore, chat_request  # noqa: E402
 
-USDA_PAYLOAD = {"foods": [{
-    "fdcId": 171705,
-    "description": "Bananas, raw",
-    "foodNutrients": [
-        {"nutrientId": 1008, "value": 89.0},
-        {"nutrientId": 1003, "value": 1.09},
-        {"nutrientId": 1005, "value": 22.84},
-        {"nutrientId": 1004, "value": 0.33},
-        {"nutrientId": 1079, "value": 2.6},
-    ],
-}]}
-
 OFF_PAYLOAD = {"products": [{
     "code": "737628064502",
     "product_name": "Rice noodles",
@@ -63,7 +51,7 @@ BANANA_HIT = {
     "name": "Bananas, raw",
     "macros_per_100g": {"calories": 89.0, "protein": 1.09, "carbs": 22.84,
                         "fat": 0.33, "fiber": 2.6},
-    "source": "USDA FDC: 171705",
+    "source": "OpenFoodFacts: 4011",
 }
 
 
@@ -137,29 +125,33 @@ async def test_barcode_network_error_returns_none(monkeypatch):
     assert await food_lookup.search_openfoodfacts_by_code("737628064502") is None
 
 
-async def test_usda_hit_parses_macros_and_source(monkeypatch):
-    monkeypatch.setenv("USDA_API_KEY", "demo-key")
-
+async def test_openfoodfacts_hit_parses_macros_and_source(monkeypatch):
     def handler(request):
         assert request.method == "GET"
-        assert request.url.host == "api.nal.usda.gov"
-        assert request.url.params["api_key"] == "demo-key"
-        assert request.url.params["query"] == "banana"
-        assert request.url.params["dataType"] == "Foundation,SR Legacy"
-        return httpx.Response(200, json=USDA_PAYLOAD)
+        assert request.url.host == "world.openfoodfacts.org"
+        assert request.url.params["search_terms"] == "banana"
+        return httpx.Response(200, json={"products": [{
+            "code": "4011",
+            "product_name": "Bananas, raw",
+            "nutriments": {
+                "energy-kcal_100g": 89, "proteins_100g": 1.09,
+                "carbohydrates_100g": 22.84, "fat_100g": 0.33,
+                "fiber_100g": 2.6,
+            },
+        }]})
 
     calls = mock_transport(monkeypatch, handler)
     assert await food_lookup.resolve_food("banana") == BANANA_HIT
-    assert len(calls) == 1  # OpenFoodFacts is never contacted on a USDA hit
+    assert len(calls) == 1  # Tavily is never contacted on an OpenFoodFacts hit
 
 
 @pytest.mark.parametrize(
     ("classification", "expected"),
     [
-        ("whole", ["usda"]),
+        ("whole", ["off"]),
         ("branded", ["off"]),
         ("restaurant", ["tavily"]),
-        ("unknown", ["usda"]),
+        ("unknown", ["off"]),
     ],
 )
 async def test_classifier_routes_matching_tier_first(monkeypatch, classification, expected):
@@ -175,7 +167,6 @@ async def test_classifier_routes_matching_tier_first(monkeypatch, classification
         return fake
 
     monkeypatch.setattr(food_lookup, "classify_food", fake_classify)
-    monkeypatch.setattr(food_lookup, "search_usda", search("usda"))
     monkeypatch.setattr(food_lookup, "search_openfoodfacts", search("off"))
     monkeypatch.setattr(food_lookup, "search_tavily", search("tavily"))
 
@@ -201,12 +192,11 @@ async def test_classified_first_tier_miss_runs_complete_fallback(monkeypatch):
         return fake
 
     monkeypatch.setattr(food_lookup, "classify_food", fake_classify)
-    monkeypatch.setattr(food_lookup, "search_usda", search("usda"))
     monkeypatch.setattr(food_lookup, "search_openfoodfacts", search("off", BANANA_HIT))
     monkeypatch.setattr(food_lookup, "search_tavily", search("tavily"))
 
     assert await food_lookup.resolve_food("food") == BANANA_HIT
-    assert calls == ["tavily", "usda", "off"]
+    assert calls == ["tavily", "off"]
 
 
 async def test_classification_can_be_disabled(monkeypatch):
@@ -222,12 +212,11 @@ async def test_classification_can_be_disabled(monkeypatch):
         return fake
 
     monkeypatch.setattr(food_lookup, "classify_food", unexpected)
-    monkeypatch.setattr(food_lookup, "search_usda", search("usda"))
     monkeypatch.setattr(food_lookup, "search_openfoodfacts", search("off", BANANA_HIT))
     monkeypatch.setattr(food_lookup, "search_tavily", search("tavily"))
 
     assert await food_lookup.resolve_food("food", classify=False) == BANANA_HIT
-    assert calls == ["usda", "off"]
+    assert calls == ["off"]
 
 
 async def test_classifier_failure_uses_original_order(monkeypatch):
@@ -243,20 +232,15 @@ async def test_classifier_failure_uses_original_order(monkeypatch):
         return fake
 
     monkeypatch.setattr(food_lookup, "classify_food", failed_classify)
-    monkeypatch.setattr(food_lookup, "search_usda", search("usda"))
     monkeypatch.setattr(food_lookup, "search_openfoodfacts", search("off", BANANA_HIT))
     monkeypatch.setattr(food_lookup, "search_tavily", search("tavily"))
 
     assert await food_lookup.resolve_food("food") == BANANA_HIT
-    assert calls == ["usda", "off"]
+    assert calls == ["off"]
 
 
-async def test_usda_miss_falls_through_to_openfoodfacts(monkeypatch):
-    monkeypatch.setenv("USDA_API_KEY", "demo-key")
-
+async def test_openfoodfacts_resolves_without_tavily(monkeypatch):
     def handler(request):
-        if request.url.host == "api.nal.usda.gov":
-            return httpx.Response(200, json={"foods": []})
         assert request.url.host == "world.openfoodfacts.org"
         assert request.url.params["search_terms"] == "rice noodles"
         return httpx.Response(200, json=OFF_PAYLOAD)
@@ -269,24 +253,18 @@ async def test_usda_miss_falls_through_to_openfoodfacts(monkeypatch):
                             "fat": 1.2, "fiber": 1.8},
         "source": "OpenFoodFacts: 737628064502",
     }
-    assert [c.url.host for c in calls] == ["api.nal.usda.gov", "world.openfoodfacts.org"]
+    assert [c.url.host for c in calls] == ["world.openfoodfacts.org"]
 
 
 async def test_both_databases_missing_returns_none(monkeypatch):
-    monkeypatch.setenv("USDA_API_KEY", "demo-key")
-
-    def handler(request):
-        if request.url.host == "api.nal.usda.gov":
-            return httpx.Response(200, json={"foods": []})
+    def handler(_request):
         return httpx.Response(200, json={"products": []})
 
     mock_transport(monkeypatch, handler)
     assert await food_lookup.resolve_food("unicorn steak") is None
 
 
-async def test_missing_usda_key_skips_straight_to_openfoodfacts(monkeypatch):
-    monkeypatch.delenv("USDA_API_KEY", raising=False)
-
+async def test_openfoodfacts_requires_no_api_key(monkeypatch):
     def handler(request):
         assert request.url.host == "world.openfoodfacts.org"
         return httpx.Response(200, json=OFF_PAYLOAD)
@@ -483,13 +461,10 @@ async def test_tavily_error_or_timeout_returns_none(monkeypatch, response):
     assert await food_lookup.search_tavily("restaurant meal") is None
 
 
-async def test_cascade_reaches_tavily_only_after_usda_and_off_miss(monkeypatch):
-    monkeypatch.setenv("USDA_API_KEY", "demo-key")
+async def test_cascade_reaches_tavily_only_after_off_miss(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
 
     def handler(request):
-        if request.url.host == "api.nal.usda.gov":
-            return httpx.Response(200, json={"foods": []})
         if request.url.host == "world.openfoodfacts.org":
             return httpx.Response(200, json={"products": []})
         return httpx.Response(200, json={"results": [{
@@ -506,55 +481,34 @@ async def test_cascade_reaches_tavily_only_after_usda_and_off_miss(monkeypatch):
     assert result is not None
     assert result["source"] == "Tavily: https://example.com/bowl"
     assert [call.url.host for call in calls] == [
-        "api.nal.usda.gov", "world.openfoodfacts.org", "api.tavily.com"
+        "world.openfoodfacts.org", "api.tavily.com"
     ]
 
 
-@pytest.mark.parametrize("usda_body, off_body", [
-    # Nutrients are a string, not a list of dicts.
-    ({"foods": [{"fdcId": 1, "description": "x", "foodNutrients": "garbage"}]},
-     {"products": [{"code": "1", "product_name": "y",
-                    "nutriments": {"energy-kcal_100g": "abc"}}]}),
-    # Wrong top-level shapes.
-    ({"foods": ["not-a-dict"]}, {"products": [{"nutriments": None}]}),
-    ({"totalHits": 0}, {}),
-    # Negative and absurd per-100g values are rejected.
-    ({"foods": [{"fdcId": 2, "description": "x",
-                 "foodNutrients": [{"nutrientId": 1008, "value": -5}]}]},
-     {"products": [{"code": "2", "product_name": "y",
-                    "nutriments": {"energy-kcal_100g": 99999}}]}),
-    # Valid macros but no source id — must not persist "USDA FDC: None" /
-    # "OpenFoodFacts: " as macro_source.
-    ({"foods": [{"description": "Bananas, raw",
-                 "foodNutrients": USDA_PAYLOAD["foods"][0]["foodNutrients"]}]},
-     {"products": [{"code": "  ", "product_name": "Rice noodles",
-                    "nutriments": OFF_PAYLOAD["products"][0]["nutriments"]}]}),
+@pytest.mark.parametrize("off_body", [
+    {"products": [{"code": "1", "product_name": "y",
+                   "nutriments": {"energy-kcal_100g": "abc"}}]},
+    {"products": [{"nutriments": None}]},
+    {},
+    {"products": [{"code": "2", "product_name": "y",
+                   "nutriments": {"energy-kcal_100g": 99999}}]},
+    # Valid macros but no source id must not persist an empty macro_source.
+    {"products": [{"code": "  ", "product_name": "Rice noodles",
+                   "nutriments": OFF_PAYLOAD["products"][0]["nutriments"]}]},
 ])
-async def test_malformed_payloads_degrade_to_none(monkeypatch, usda_body, off_body):
-    monkeypatch.setenv("USDA_API_KEY", "demo-key")
-
-    def handler(request):
-        body = usda_body if request.url.host == "api.nal.usda.gov" else off_body
-        return httpx.Response(200, json=body)
-
-    mock_transport(monkeypatch, handler)
+async def test_malformed_payloads_degrade_to_none(monkeypatch, off_body):
+    mock_transport(monkeypatch, lambda _request: httpx.Response(200, json=off_body))
     assert await food_lookup.resolve_food("banana") is None
 
 
 async def test_http_errors_and_non_json_degrade_to_none(monkeypatch):
-    monkeypatch.setenv("USDA_API_KEY", "demo-key")
-
-    def handler(request):
-        if request.url.host == "api.nal.usda.gov":
-            return httpx.Response(500)
-        return httpx.Response(200, text="<html>not json</html>")
-
-    mock_transport(monkeypatch, handler)
+    mock_transport(monkeypatch, lambda _request: httpx.Response(
+        200, text="<html>not json</html>"
+    ))
     assert await food_lookup.resolve_food("banana") is None
 
 
 async def test_blank_query_makes_no_network_calls(monkeypatch):
-    monkeypatch.setenv("USDA_API_KEY", "demo-key")
     calls = mock_transport(monkeypatch, lambda _request: httpx.Response(500))
     assert await food_lookup.resolve_food("   ") is None
     assert calls == []
@@ -565,7 +519,7 @@ def test_portion_from_grams_scales_database_macros():
     factor = 150 / 100.0
     assert macros == {key: round(value * factor, 2)
                       for key, value in BANANA_HIT["macros_per_100g"].items()}
-    assert source == "USDA FDC: 171705 — Bananas, raw, 150 g"
+    assert source == "OpenFoodFacts: 4011 — Bananas, raw, 150 g"
 
 
 def test_portion_from_grams_rejects_unusable_input():
@@ -615,7 +569,7 @@ async def test_parser_unknown_food_calls_lookup_and_stamps_verified_source(monke
                 "name": "sunchoke", "calories": 110, "protein": 3,
                 "carbs": 26, "fat": 0, "fiber": 2, "quantity": 1,
                 "grams": 150, "basis": "per_100g", "sourced_from": "lookup",
-                "meal": "Lunch", "note": "USDA FDC: 170002",
+                "meal": "Lunch", "note": "OpenFoodFacts: 170002",
             }]),
         }),
     ]
@@ -626,7 +580,7 @@ async def test_parser_unknown_food_calls_lookup_and_stamps_verified_source(monke
 
     async def fake_resolve(name):
         assert name == "sunchoke"
-        return {**BANANA_HIT, "source": "USDA FDC: 170002"}
+        return {**BANANA_HIT, "source": "OpenFoodFacts: 170002"}
 
     monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
     monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
@@ -635,8 +589,8 @@ async def test_parser_unknown_food_calls_lookup_and_stamps_verified_source(monke
 
     assert len(calls) == 2
     assert calls[1][-1]["role"] == "tool"
-    assert json.loads(calls[1][-1]["content"])["source"] == "USDA FDC: 170002"
-    assert items[0]["note"] == "USDA FDC: 170002"
+    assert json.loads(calls[1][-1]["content"])["source"] == "OpenFoodFacts: 170002"
+    assert items[0]["note"] == "OpenFoodFacts: 170002"
 
 
 async def test_parser_lookup_miss_forces_estimate_source(monkeypatch):
@@ -654,7 +608,7 @@ async def test_parser_lookup_miss_forces_estimate_source(monkeypatch):
             "role": "assistant",
             "content": '[{"name":"mystery","calories":200,"protein":5,'
                        '"carbs":20,"fat":10,"fiber":1,"sourced_from":"lookup",'
-                       '"meal":"Snack","note":"USDA FDC: fabricated"}]',
+                       '"meal":"Snack","note":"OpenFoodFacts: fabricated"}]',
         }),
     ]
 
@@ -688,11 +642,11 @@ async def test_parser_lookup_source_is_bound_to_the_item_that_triggered_it(monke
                 {"name": "sunchoke", "calories": 110, "protein": 3,
                  "carbs": 26, "fat": 0, "fiber": 2, "grams": 150,
                  "basis": "per_100g", "sourced_from": "lookup",
-                 "meal": "Lunch", "note": "USDA FDC: 170002"},
+                 "meal": "Lunch", "note": "OpenFoodFacts: 170002"},
                 {"name": "mystery stew", "calories": 300, "protein": 12,
                  "carbs": 35, "fat": 12, "fiber": 4,
                  "basis": "per_serving", "sourced_from": "lookup",
-                 "meal": "Lunch", "note": "USDA FDC: 170002"},
+                 "meal": "Lunch", "note": "OpenFoodFacts: 170002"},
             ]),
         }),
     ]
@@ -701,14 +655,14 @@ async def test_parser_lookup_source_is_bound_to_the_item_that_triggered_it(monke
         return responses.pop(0)
 
     async def fake_resolve(_name):
-        return {**BANANA_HIT, "source": "USDA FDC: 170002"}
+        return {**BANANA_HIT, "source": "OpenFoodFacts: 170002"}
 
     monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
     monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
 
     items, _, _ = await srv.parse_chat_message("150g sunchoke and mystery stew")
 
-    assert items[0]["note"] == "USDA FDC: 170002"
+    assert items[0]["note"] == "OpenFoodFacts: 170002"
     assert items[1]["note"] == "ESTIMATE"
 
 
@@ -786,7 +740,7 @@ async def test_coach_lookup_food_tool_returns_hit_and_not_found(monkeypatch):
 
     token = bind_user(uuid4())
     try:
-        assert (await handler({"query": "greek yogurt"}))["source"] == "USDA FDC: 171705"
+        assert (await handler({"query": "greek yogurt"}))["source"] == "OpenFoodFacts: 4011"
 
         async def fake_miss(_query):
             return None
@@ -933,20 +887,6 @@ async def test_food_path_upgrades_whole_item_from_serving_panel(monkeypatch):
                  "grams": None, "quantity": 1, "meal": "Lunch",
                  "basis": "per_serving", "sourced_from": "cascade"}], None
 
-    async def fake_usda(query):
-        lookup_queries.append(("usda", query))
-        return {
-            "name": "Barebells Protein Bar",
-            "macros_per_100g": {
-                "calories": 364,
-                "protein": 36,
-                "carbs": 33,
-                "fat": 15,
-                "fiber": 5,
-            },
-            "source": "USDA FDC: 123456",
-        }
-
     async def fake_off(query):
         lookup_queries.append(("off", query))
         return None
@@ -972,7 +912,6 @@ async def test_food_path_upgrades_whole_item_from_serving_panel(monkeypatch):
         return {"totals": {"calories": 700}, "targets": {"calories": 2000}}
 
     monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
-    monkeypatch.setattr(food_lookup, "search_usda", fake_usda)
     monkeypatch.setattr(food_lookup, "search_openfoodfacts", fake_off)
     monkeypatch.setattr(food_lookup, "search_tavily", fake_tavily)
     monkeypatch.setattr(srv, "write_meal", fake_write_meal)
@@ -1116,7 +1055,7 @@ async def test_food_path_weightless_preset_grams_use_cascade(monkeypatch):
                 "calories": 120, "protein": 8, "carbs": 10,
                 "fat": 5, "fiber": 3,
             },
-            "source": "USDA FDC: 999999",
+            "source": "OpenFoodFacts: 999999",
         }
 
     async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
@@ -1140,7 +1079,7 @@ async def test_food_path_weightless_preset_grams_use_cascade(monkeypatch):
     assert seen == {
         "calories": 120.0, "protein": 8.0, "carbs": 10.0, "fat": 5.0,
         "fiber": 3.0,
-        "macro_source": "USDA FDC: 999999 — Chili with beans, 100 g",
+        "macro_source": "OpenFoodFacts: 999999 — Chili with beans, 100 g",
     }
 
 
@@ -1173,7 +1112,6 @@ def test_query_variants_ladder_covers_brand_flavor_and_generic():
 
 async def test_branded_flavor_query_resolves_via_generic_variant(monkeypatch):
     # Full brand+flavor phrase misses OpenFoodFacts; the generic variant hits.
-    monkeypatch.delenv("USDA_API_KEY", raising=False)
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
     def handler(request):
@@ -1195,7 +1133,6 @@ async def test_branded_flavor_query_resolves_via_generic_variant(monkeypatch):
 async def test_branded_flavor_query_resolves_via_tavily_per_slice_panel(monkeypatch):
     # OpenFoodFacts misses everywhere; a Tavily "per slice (26g)" web panel
     # is parsed instead of being rejected.
-    monkeypatch.delenv("USDA_API_KEY", raising=False)
     monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
 
     def handler(request):

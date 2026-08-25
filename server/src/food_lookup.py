@@ -1,4 +1,4 @@
-"""Food lookups: USDA FoodData Central, OpenFoodFacts, then Tavily search.
+"""Food lookups: OpenFoodFacts, then Tavily search.
 
 The cascade resolves unknown foods through free databases before any paid LLM
 path spends credits on lookup. Every call is read-only with a short
@@ -18,7 +18,6 @@ TIMEOUT = 5.0
 # OpenFoodFacts requires an identifying User-Agent; the default python-httpx
 # one gets rejected/throttled.
 USER_AGENT = "MacroCoach/1.0 (ai-macro-tracker; contact@biz21.com)"
-USDA_SEARCH_URL = "https://api.nal.usda.gov/fdc/v1/foods/search"
 OFF_SEARCH_URL = "https://world.openfoodfacts.org/cgi/search.pl"
 OFF_PRODUCT_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
@@ -26,8 +25,6 @@ OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 MACRO_KEYS = ("calories", "protein", "carbs", "fat", "fiber")
 FOOD_CLASSES = {"whole", "branded", "restaurant", "unknown"}
 
-# FDC nutrient numbers -> macro keys. Foundation and SR Legacy report per 100 g.
-_FDC_NUTRIENTS = {1008: "calories", 1003: "protein", 1005: "carbs", 1004: "fat", 1079: "fiber"}
 _OFF_NUTRIMENTS = {"energy-kcal_100g": "calories", "proteins_100g": "protein",
                    "carbohydrates_100g": "carbs", "fat_100g": "fat", "fiber_100g": "fiber"}
 _OFF_SERVING_NUTRIMENTS = {
@@ -115,38 +112,6 @@ def _macros(values: Mapping[str, Any]) -> dict[str, float] | None:
     if macros["calories"] <= 0:
         return None
     return macros
-
-
-async def search_usda(query: str) -> dict[str, Any] | None:
-    """Best USDA FoodData Central match, or None (also when no key is configured)."""
-    api_key = os.environ.get("USDA_API_KEY", "").strip()
-    text = (query or "").strip()
-    if not api_key or not text:
-        return None
-    try:
-        data = await _get_json(USDA_SEARCH_URL, {
-            "query": text, "pageSize": 3,
-            "dataType": "Foundation,SR Legacy", "api_key": api_key,
-        })
-        for food in (data.get("foods") or [])[:3]:
-            if not isinstance(food, dict):
-                continue
-            values: dict[str, Any] = {}
-            for nutrient in food.get("foodNutrients") or []:
-                if not isinstance(nutrient, dict):
-                    continue
-                key = _FDC_NUTRIENTS.get(nutrient.get("nutrientId"))
-                if key and key not in values:
-                    values[key] = nutrient.get("value")
-            macros = _macros(values)
-            name = str(food.get("description") or "").strip()
-            fdc_id = str(food.get("fdcId") or "").strip()
-            if macros and name and fdc_id:
-                return {"name": name, "macros_per_100g": macros,
-                        "source": f"USDA FDC: {fdc_id}"}
-    except Exception:
-        return None
-    return None
 
 
 async def search_openfoodfacts(query: str) -> dict[str, Any] | None:
@@ -530,14 +495,14 @@ async def resolve_food(
     query: str, classify: bool = True, *, whole_item: bool = False
 ) -> dict[str, Any] | None:
     """Resolve food with a classified first tier and a complete fallback cascade."""
-    searches = [search_usda, search_openfoodfacts, search_tavily]
+    searches = [search_openfoodfacts, search_tavily]
     if classify:
         try:
             classification = await classify_food(query)
         except Exception:
             classification = "unknown"
         preferred = {
-            "whole": search_usda,
+            "whole": search_openfoodfacts,
             "branded": search_openfoodfacts,
             "restaurant": search_tavily,
         }.get(classification)

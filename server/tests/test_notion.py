@@ -101,7 +101,7 @@ async def test_create_page_parents_a_data_source():
     await client.create_page(
         "ds-1",
         meal_properties("Chicken", "Dinner", 300, 55, 0, 7, 0, date(2026, 7, 25)),
-        children=[notion_api.paragraph_block("Macro source: FDA FoodData Central")],
+        children=[notion_api.paragraph_block("Macro source: OpenFoodFacts")],
     )
     request = seen[0]
     assert request.method == "POST"

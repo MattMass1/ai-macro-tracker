@@ -728,7 +728,7 @@ async def test_food_message_goes_through_parser_not_coach(monkeypatch):
         seen["parsed"] = True
         return ([{"name": "eggs", "calories": 140, "protein": 12, "carbs": 1, "fat": 10, "fiber": 0,
                    "quantity": 2, "grams": None, "basis": "per_unit", "sourced_from": "lookup",
-                   "meal": "Breakfast", "note": "USDA: egg, whole, cooked"}], None, [])
+                   "meal": "Breakfast", "note": "OpenFoodFacts: egg-cooked"}], None, [])
 
     async def unexpected_run_agent(*args, **kw):
         pytest.fail("food logging must go through the parser fast-path, never the coach loop")
@@ -794,7 +794,7 @@ async def test_per_serving_without_per_100g_logs_parser_finals_as_is(monkeypatch
         {"name": "apple slices", "macros_per_100g": APPLE_PER_100G,
          "grams": 500, "quantity": None, "basis": "per_100g",
          "calories": 260, "protein": 1.5, "carbs": 69, "fat": 1, "fiber": 12,
-         "sourced_from": "lookup", "meal": "Snack", "note": "USDA FDC: 171688"},
+         "sourced_from": "lookup", "meal": "Snack", "note": "OpenFoodFacts: 171688"},
     ])
 
     response = await srv.api_chat(chat_request({"message": "stew and 500g apple slices"}))
@@ -803,7 +803,7 @@ async def test_per_serving_without_per_100g_logs_parser_finals_as_is(monkeypatch
     assert written[0]["calories"] == 300
     assert written[0]["source"] == "ESTIMATE"
     assert written[1]["calories"] == 260.0  # 52 × 5 — stated weight wins
-    assert written[1]["source"] == "USDA FDC: 171688"
+    assert written[1]["source"] == "OpenFoodFacts: 171688"
 
 
 def test_chat_quota_window_rolls_at_4am_not_midnight():
@@ -896,7 +896,7 @@ FOOD_HIT = {
     "name": "Egg, whole, cooked",
     "macros_per_100g": {"calories": 155, "protein": 13, "carbs": 1.1,
                         "fat": 11, "fiber": 0},
-    "source": "USDA FDC: 171705",
+    "source": "OpenFoodFacts: 171705",
 }
 
 
@@ -918,7 +918,7 @@ async def test_coach_logs_food_through_lookup_and_meal_tools(monkeypatch):
             return tool_response(tool_call("log-1", "log_meal", {
                 "name": "2 eggs", "meal_type": "Breakfast",
                 "calories": 144, "protein": 12.6, "carbs": 0.7, "fat": 9.5,
-                "fiber": 0, "macro_source": "USDA FDC: 171705",
+                "fiber": 0, "macro_source": "OpenFoodFacts: 171705",
             }))
         return text_response("Logged 2 eggs, 144 kcal.")
 
@@ -951,7 +951,7 @@ async def test_coach_logs_food_through_lookup_and_meal_tools(monkeypatch):
         "logged": {"name": "2 eggs", "calories": 144}
     }
     assert reply == "Logged 2 eggs, 144 kcal."
-    assert written == {"name": "2 eggs", "macro_source": "USDA FDC: 171705",
+    assert written == {"name": "2 eggs", "macro_source": "OpenFoodFacts: 171705",
                        "allow_estimate": False, "meal": "Breakfast"}
 
 
@@ -963,7 +963,7 @@ async def test_chat_returns_meals_logged_by_coach(monkeypatch):
         "calories": 144, "protein": 12.6, "carbs": 0.7, "fat": 9.5,
         "fiber": 0, "date": domain.effective_date().isoformat(),
         "created_time": "2026-08-23T12:00:00Z",
-        "macro_source": "USDA FDC: 171705",
+        "macro_source": "OpenFoodFacts: 171705",
     }
 
     async def fake_parse(_message):

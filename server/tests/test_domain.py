@@ -192,7 +192,7 @@ def test_validate_name():
 @pytest.mark.parametrize(
     "source",
     [
-        "FDA FoodData Central: chicken breast, roasted",
+        "OpenFoodFacts: chicken breast, roasted",
         "Fairlife Core Power label",
         "user provided from package",
         "ESTIMATE — 6 pieces sushi, typical values",
@@ -209,7 +209,7 @@ def test_validate_macro_source_accepts_real_sources(source):
 def test_validate_macro_source_rejects_placeholders(source):
     with pytest.raises(MacroError) as excinfo:
         validate_macro_source(source)
-    assert "FDA FoodData Central" in str(excinfo.value)
+    assert "source" in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------- #

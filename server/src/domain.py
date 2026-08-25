@@ -199,14 +199,14 @@ def validate_macro_source(macro_source: str) -> str:
     text = (macro_source or "").strip()
     if not text:
         raise MacroError(
-            "macro_source is required — look up the product label or the FDA "
-            "FoodData Central entry first, then pass where the numbers came from "
-            '(e.g. "FDA FoodData Central: chicken breast, roasted").'
+            "macro_source is required — look up the product label or a food "
+            "database entry first, then pass where the numbers came from "
+            '(e.g. "OpenFoodFacts: chicken breast, roasted").'
         )
     if text.lower().strip(" .!") in PLACEHOLDER_SOURCES:
         raise MacroError(
             f"macro_source {text!r} is a placeholder, not a source. Cite the "
-            "nutrition label or the FDA FoodData Central entry when one exists "
+            "nutrition label or lookup source when one exists "
             "(e.g. \"Fairlife Core Power label\"); if nothing resolves, log a "
             "flagged estimate that says what you assumed "
             "(e.g. \"ESTIMATE — 6 pieces sushi, typical values\") — do not refuse."

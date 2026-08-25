@@ -157,6 +157,54 @@ async def test_log_meal_response_includes_the_row_it_just_wrote(lagging):
     assert "warning" not in payload
 
 
+async def test_write_meal_rejects_calories_without_macros(lagging):
+    with pytest.raises(srv.MacroError, match="data-integrity failure"):
+        await srv.write_meal(
+            name="chicken",
+            calories=410,
+            protein=0,
+            carbs=0,
+            fat=0,
+            macro_source="Food parser",
+            meal="Dinner",
+            day_value=None,
+        )
+
+    assert lagging.inserted == []
+
+
+async def test_write_meal_allows_zero_macro_food(lagging):
+    payload = await srv.write_meal(
+        name="vodka soda",
+        calories=100,
+        protein=0,
+        carbs=0,
+        fat=0,
+        macro_source="Drink label",
+        meal="Snack",
+        day_value=None,
+    )
+
+    assert payload["logged"]["name"] == "vodka soda"
+    assert lagging.inserted[-1]["calories"] == 100.0
+
+
+async def test_write_meal_still_allows_calories_with_macros(lagging):
+    payload = await srv.write_meal(
+        name="chicken",
+        calories=410,
+        protein=45,
+        carbs=2,
+        fat=18,
+        macro_source="Food parser",
+        meal="Dinner",
+        day_value=None,
+    )
+
+    assert payload["logged"]["protein"] == 45.0
+    assert len(lagging.inserted) == 1
+
+
 async def test_barcode_route_returns_product_and_404(monkeypatch, lagging):
     async def hit(code):
         assert code == "12345678905"  # leading GTIN padding is harmless

@@ -43,7 +43,38 @@ import food_lookup  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+_ZERO_MACRO_FOODS = (
+    "alcohol",
+    "vodka",
+    "tequila",
+    "whiskey",
+    "gin",
+    "rum",
+    "wine",
+    "beer",
+    "old fashioned",
+    "margarita",
+    "seltzer",
+    "hard seltzer",
+    "vodka soda",
+    "diet soda",
+    "coke zero",
+    "diet coke",
+    "sparkling water",
+    "seltzer water",
+    "black coffee",
+    "espresso",
+    "americano",
+    "plain tea",
+)
+
 _client: Store | None = None
+
+
+def _is_zero_macro_food(name: str) -> bool:
+    """Return whether a food name is allowlisted to carry calories without macros."""
+    normalized_name = name.casefold()
+    return any(food in normalized_name for food in _ZERO_MACRO_FOODS)
 
 
 def store_client() -> Store:
@@ -660,6 +691,16 @@ async def write_meal(
     """Validate, write one row, and return the day's corrected numbers."""
     clean_name = domain.validate_name(name)
     macros = domain.validate_macros(calories, protein, carbs, fat, fiber)
+    if (
+        macros["calories"] > 0
+        and sum(macros[key] for key in ("protein", "carbs", "fat", "fiber")) == 0
+        and not _is_zero_macro_food(clean_name)
+    ):
+        raise MacroError(
+            "food entry has calories but no macros — this is a data-integrity "
+            "failure; the parser must provide protein/carbs/fat (or the food "
+            "must be on the zero-macro allowlist)"
+        )
     source = (macro_source or "").strip() if allow_estimate else domain.validate_macro_source(macro_source)
     if not source:
         source = "Chat & Log"

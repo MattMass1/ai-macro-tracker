@@ -148,9 +148,11 @@ async def fetch_workouts_history(
     exercise: str | None, limit: int
 ) -> list[dict[str, Any]]:
     """Return the authenticated user's workout history, newest first."""
-    clean_exercise = (
-        domain.validate_name(exercise, "exercise") if exercise is not None else None
-    )
+    # Treat empty/whitespace exercise as "no filter" — the iOS client sends
+    # `exercise=` (empty string) even when the user didn't pick an exercise.
+    clean_exercise = None
+    if exercise is not None and exercise.strip():
+        clean_exercise = domain.validate_name(exercise, "exercise")
     workouts = await store_client().fetch_workouts(
         start=None, end=None, exercise=clean_exercise
     )

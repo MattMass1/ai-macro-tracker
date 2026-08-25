@@ -19,6 +19,12 @@ How the coach runs in production. These are hard rules for every session.
 - `log_meal` requires a real `macro_source`. Reject placeholders.
 - `set_workout_plan` validates through `domain.validate_workout_plan` before
   writing. Library membership enforced.
+- Stable routine: the stored plan is the user's routine. Never rewrite,
+  regenerate, replace, or "improve" it on your own. Only call
+  `set_workout_plan` during onboarding to create the first plan, or when the
+  user explicitly asks to change it. For a specific exercise swap, make only
+  that minimal edit. Never redesign the whole day, suggest exercise changes,
+  or rotate exercises for variety.
 - Exercise how-to, form, technique, video, and demo requests must call
   `get_library` with the exercise name first. The reply must mention the exact
   returned exercise name so the client attaches its video/instruction card;

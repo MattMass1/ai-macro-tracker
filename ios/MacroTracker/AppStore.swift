@@ -6,6 +6,8 @@ final class AppStore: ObservableObject {
     @Published var day: DayPayload?
     @Published var presets: [Preset] = []
     @Published var workouts: [WorkoutEntry] = []
+    @Published var workoutHistoryEntries: [WorkoutHistoryEntry] = []
+    @Published var trendsPayload: TrendsPayload?
     @Published var exercises: [KnownExercise] = []
     @Published var plan: WorkoutPlanPayload?
     @Published var stats: WorkoutStatsPayload?
@@ -80,6 +82,24 @@ final class AppStore: ObservableObject {
         }
     }
 
+    func workoutHistory(exercise: String? = nil, limit: Int = 200) async {
+        let session = sessionGeneration
+        do {
+            let payload = try await api.workoutHistory(exercise: exercise, limit: limit)
+            guard !Task.isCancelled, session == sessionGeneration else { return }
+            workoutHistoryEntries = payload.workouts
+        } catch { present(error, session: session) }
+    }
+
+    func trends(days: Int) async {
+        let session = sessionGeneration
+        do {
+            let payload = try await api.trends(days: days)
+            guard !Task.isCancelled, session == sessionGeneration else { return }
+            trendsPayload = payload
+        } catch { present(error, session: session) }
+    }
+
     func moveDay(by value: Int) async {
         guard let newDate = Calendar.current.date(byAdding: .day, value: value, to: selectedDate), newDate <= Date() else { return }
         selectedDate = newDate
@@ -137,6 +157,7 @@ final class AppStore: ObservableObject {
             workouts.insert(logged, at: 0)
             showToast("Workout logged")
             if let updatedStats = try? await api.workoutStats(), session == sessionGeneration { stats = updatedStats }
+            await workoutHistory()
             return true
         } catch { present(error, session: session); return false }
     }
@@ -147,8 +168,10 @@ final class AppStore: ObservableObject {
             _ = try await api.deleteWorkout(id)
             guard session == sessionGeneration else { return }
             workouts.removeAll { $0.id == id }
+            workoutHistoryEntries.removeAll { $0.id == id }
             showToast("Workout deleted")
             if let updatedStats = try? await api.workoutStats(), session == sessionGeneration { stats = updatedStats }
+            await workoutHistory()
         } catch { present(error, session: session) }
     }
 
@@ -177,7 +200,7 @@ final class AppStore: ObservableObject {
     func reset() {
         sessionGeneration += 1
         selectedDate = Date()
-        day = nil; presets = []; workouts = []; exercises = []; plan = nil; stats = nil; brief = nil
+        day = nil; presets = []; workouts = []; workoutHistoryEntries = []; trendsPayload = nil; exercises = []; plan = nil; stats = nil; brief = nil
         isLoadingDay = true; isLoadingWorkouts = false
         errorMessage = nil; toast = nil
         WorkoutSessionCompletions.removeAll()

@@ -100,6 +100,51 @@ struct WorkoutEntry: Codable, Identifiable, Equatable {
     var createdTime: String?
 }
 
+struct WorkoutHistoryEntry: Codable, Identifiable, Equatable {
+    let id: String
+    var exercise: String
+    var workoutType: [String]
+    var muscleGroup: [String]
+    var sets: [WorkoutSet]
+    var date: String
+    var createdTime: String
+}
+
+struct WorkoutHistoryPayload: Codable {
+    var workouts: [WorkoutHistoryEntry]
+}
+
+struct TrendsPayload: Codable {
+    var days: [TrendDay]
+    var weekly: [TrendWeek]
+    var weight: TrendWeight
+}
+
+struct TrendDay: Codable, Identifiable {
+    var id: String { date }
+    var date: String
+    var dayLabel: String
+    var calories: Double
+    var protein: Double
+    var carbs: Double
+    var fat: Double
+    var targetCalories: Double
+    var targetProtein: Double
+}
+
+struct TrendWeek: Codable, Identifiable {
+    var id: String { weekStart }
+    var weekStart: String
+    var avgCalories: Double
+    var avgProtein: Double
+    var daysLogged: Double
+}
+
+struct TrendWeight: Codable {
+    var currentKg: Double
+    var goalKg: Double
+}
+
 struct KnownExercise: Codable, Identifiable, Hashable {
     var id: String { name }
     var name: String

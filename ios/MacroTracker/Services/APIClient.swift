@@ -68,11 +68,15 @@ final class APIClient {
     func savePlan(_ body: WorkoutPlanWrite) async throws -> SavePlanPayload { try await send("api/plan", body: body) }
     func workoutStats() async throws -> WorkoutStatsPayload { try await get("api/workout-stats") }
     func workouts(_ date: String) async throws -> WorkoutsPayload { try await get("api/workouts/\(encoded(date))") }
+    func workoutHistory(exercise: String? = nil, limit: Int = 200) async throws -> WorkoutHistoryPayload {
+        try await get("api/workouts/history?exercise=\(encoded(exercise ?? ""))&limit=\(limit)")
+    }
     func lastWorkout(_ exercise: String) async throws -> LastWorkoutPayload { try await get("api/workouts/last?exercise=\(encoded(exercise))") }
     func logWorkout(_ body: LogWorkoutBody) async throws -> WorkoutEntry { try await send("api/workout", body: body) }
     func deleteWorkout(_ id: String) async throws -> DeletedPayload { try await delete("api/workout/\(encoded(id))") }
     func brief(_ date: String? = nil) async throws -> BriefPayload { try await get("api/brief\(date.map { "?date=\(encoded($0))" } ?? "")") }
     func saveBrief(_ text: String, date: String? = nil) async throws -> BriefPayload { try await send("api/brief", body: BriefRequest(text: text, date: date)) }
+    func trends(days: Int) async throws -> TrendsPayload { try await get("api/trends?days=\(days)") }
 
     private func get<T: Decodable>(_ path: String) async throws -> T { try await request(path, method: "GET", body: Optional<Data>.none) }
     private func delete<T: Decodable>(_ path: String) async throws -> T { try await request(path, method: "DELETE", body: Optional<Data>.none) }

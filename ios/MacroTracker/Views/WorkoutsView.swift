@@ -5,6 +5,7 @@ struct WorkoutsView: View {
     @State private var loggerSelection: WorkoutLoggerSelection?
     @State private var librarySelection: WorkoutLoggerSelection?
     @State private var showLibrary = false
+    @State private var historyScope = 0
     var body: some View {
         ZStack { Theme.canvas.ignoresSafeArea()
             ScrollView {
@@ -24,10 +25,24 @@ struct WorkoutsView: View {
                     if let plan = store.plan, (plan.hasPlan != true || !store.isToday) {
                         WorkoutPlanCard(plan: plan)
                     }
-                    WorkoutHistory(workouts: store.workouts) { id in Task { await store.deleteWorkout(id) } }
+                    Picker("History range", selection: $historyScope) {
+                        Text("Today").tag(0)
+                        Text("All").tag(1)
+                    }
+                    .pickerStyle(.segmented)
+                    if historyScope == 0 {
+                        WorkoutHistory(workouts: store.workouts) { id in Task { await store.deleteWorkout(id) } }
+                    } else {
+                        AggregateWorkoutHistory(workouts: store.workoutHistoryEntries) { id in Task { await store.deleteWorkout(id) } }
+                    }
                 }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 96)
-            }.refreshable { await store.loadWorkoutData() }
+            }.refreshable {
+                async let selectedDay: Void = store.loadWorkoutData()
+                async let fullHistory: Void = store.workoutHistory()
+                _ = await (selectedDay, fullHistory)
+            }
         }
+        .task { await store.workoutHistory() }
         .navigationBarHidden(true)
         .sheet(item: $loggerSelection) { selection in
             WorkoutLoggerView(initialType: selection.type, initialExercise: selection.exercise)
@@ -512,6 +527,69 @@ private struct WorkoutHistory: View {
             }
         }
     }
+}
+
+private struct AggregateWorkoutHistory: View {
+    let workouts: [WorkoutHistoryEntry]
+    let onDelete: (String) -> Void
+
+    private var groups: [(date: String, workouts: [WorkoutHistoryEntry])] {
+        Dictionary(grouping: workouts, by: \.date)
+            .map { (date: $0.key, workouts: $0.value) }
+            .sorted { $0.date > $1.date }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionLabel(text: "History")
+            if workouts.isEmpty {
+                EmptyState(icon: "clock.arrow.circlepath", title: "No workout history", message: "Your logged training will appear here.")
+            }
+            ForEach(groups, id: \.date) { group in
+                SectionLabel(text: dayLabel(group.date))
+                VStack(spacing: 0) {
+                    ForEach(Array(group.workouts.enumerated()), id: \.element.id) { index, workout in
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(systemName: "dumbbell.fill")
+                                .foregroundStyle(Theme.accent)
+                                .frame(width: 28, height: 28)
+                                .background(Theme.accentTint, in: Circle())
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(workout.exercise).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.ink)
+                                Text(setSummary(workout.sets)).font(.caption.monospacedDigit()).foregroundStyle(Theme.muted)
+                                Text(workout.workoutType.joined(separator: " · ").uppercased())
+                                    .font(.caption2.weight(.bold)).tracking(1).foregroundStyle(Theme.accent)
+                            }
+                            Spacer()
+                            Menu {
+                                Button("Delete workout", systemImage: "trash", role: .destructive) { onDelete(workout.id) }
+                            } label: { Image(systemName: "ellipsis").foregroundStyle(Theme.muted) }
+                        }
+                        .padding(.vertical, 12)
+                        if index < group.workouts.count - 1 { Divider() }
+                    }
+                }
+                .appCard(padding: 14)
+            }
+        }
+    }
+
+    private func setSummary(_ sets: [WorkoutSet]) -> String {
+        sets.map { $0.weight > 0 ? "\($0.weight.formatted())×\($0.reps)" : "\($0.reps) reps" }.joined(separator: "  ·  ")
+    }
+
+    private func dayLabel(_ date: String) -> String {
+        guard let parsed = Self.dateFormatter.date(from: date) else { return date }
+        return parsed.formatted(.dateTime.weekday(.wide).month(.abbreviated).day()).uppercased()
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
 }
 
 struct WorkoutLoggerView: View {

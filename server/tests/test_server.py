@@ -10,6 +10,8 @@ normalization and provenance recorded on the way into the store.
 
 import json
 import os
+from datetime import date
+from decimal import Decimal
 from uuid import uuid4
 
 import httpx
@@ -376,3 +378,66 @@ async def test_write_normalizes_fields_and_records_the_source(lagging):
     assert row["date"] == "2026-07-20"
     assert row["macro_source"] == "FDA FoodData Central: chicken breast, roasted"
     assert row["calories"] == 300.0 and row["protein"] == 55.0 and row["fat"] == 7.0
+
+
+async def test_fetch_workouts_history_normalizes_filter_and_caps_results(monkeypatch):
+    class WorkoutStore:
+        async def fetch_workouts(self, start=None, end=None, exercise=None):
+            assert start is None and end is None
+            assert exercise == "Bench Press"
+            return [{"id": str(index)} for index in range(4)]
+
+    monkeypatch.setattr(srv, "_client", WorkoutStore())
+
+    result = await srv.fetch_workouts_history("  Bench Press  ", 2)
+
+    assert result == [{"id": "0"}, {"id": "1"}]
+
+
+async def test_fetch_trends_builds_daily_weekly_and_weight_payload(monkeypatch):
+    class TrendsPool:
+        async def fetch(self, query, user_id, start, end):
+            assert "LEFT JOIN LATERAL" in query
+            assert user_id == "user-1"
+            assert start <= end
+            return [
+                {"date": date(2026, 8, 23), "calories": Decimal("2055"),
+                 "protein": Decimal("199"), "carbs": Decimal("207"),
+                 "fat": Decimal("58"), "target_calories": Decimal("2400"),
+                 "target_protein": Decimal("180")},
+                {"date": date(2026, 8, 24), "calories": Decimal("1746"),
+                 "protein": Decimal("141.4"), "carbs": Decimal("190"),
+                 "fat": Decimal("49"), "target_calories": Decimal("2400"),
+                 "target_protein": Decimal("180")},
+            ]
+
+        async def fetchrow(self, query, user_id):
+            assert "user_metrics" in query and user_id == "user-1"
+            return {"weight_kg": Decimal("88.5"), "goal_weight_kg": Decimal("80")}
+
+    class TrendsStore:
+        async def connect(self):
+            return TrendsPool()
+
+    monkeypatch.setattr(srv, "_client", TrendsStore())
+    monkeypatch.setattr(srv, "current_user_id", lambda: "user-1")
+
+    result = await srv.fetch_trends(30)
+
+    assert result["days"][0] == {
+        "date": "2026-08-23",
+        "day_label": "Sunday, August 23",
+        "calories": 2055.0,
+        "protein": 199.0,
+        "carbs": 207.0,
+        "fat": 58.0,
+        "target_calories": 2400.0,
+        "target_protein": 180.0,
+    }
+    assert result["weekly"] == [
+        {"week_start": "2026-08-17", "avg_calories": 2055.0,
+         "avg_protein": 199.0, "days_logged": 1},
+        {"week_start": "2026-08-24", "avg_calories": 1746.0,
+         "avg_protein": 141.4, "days_logged": 1},
+    ]
+    assert result["weight"] == {"current_kg": 88.5, "goal_kg": 80.0}

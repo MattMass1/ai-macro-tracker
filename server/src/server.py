@@ -144,6 +144,88 @@ async def fetch_workouts_in_range(start: _date, end: _date) -> list[dict[str, An
     return await store_client().fetch_workouts(start, end)
 
 
+async def fetch_workouts_history(
+    exercise: str | None, limit: int
+) -> list[dict[str, Any]]:
+    """Return the authenticated user's workout history, newest first."""
+    clean_exercise = (
+        domain.validate_name(exercise, "exercise") if exercise is not None else None
+    )
+    workouts = await store_client().fetch_workouts(
+        start=None, end=None, exercise=clean_exercise
+    )
+    return workouts[:limit]
+
+
+async def fetch_trends(days: int) -> dict[str, Any]:
+    """Return logged nutrition days, weekly averages, and current weight goals."""
+    end = domain.effective_date()
+    start = end - timedelta(days=days - 1)
+    pool = await store_client().connect()
+    user_id = current_user_id()
+    rows, metrics = await asyncio.gather(
+        pool.fetch(
+            "SELECT d.date,d.calories,d.protein,d.carbs,d.fat,"
+            "COALESCE(t.calories,0) AS target_calories,"
+            "COALESCE(t.protein,0) AS target_protein "
+            "FROM days d LEFT JOIN LATERAL ("
+            "SELECT calories,protein FROM macro_targets "
+            "WHERE user_id=d.user_id AND effective_date <= d.date "
+            "ORDER BY effective_date DESC,created_at DESC LIMIT 1"
+            ") t ON TRUE WHERE d.user_id=$1 AND d.date BETWEEN $2 AND $3 "
+            "ORDER BY d.date",
+            user_id,
+            start,
+            end,
+        ),
+        pool.fetchrow(
+            "SELECT weight_kg,goal_weight_kg FROM user_metrics WHERE user_id=$1",
+            user_id,
+        ),
+    )
+
+    daily: list[dict[str, Any]] = []
+    weeks: dict[_date, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        day = _as_day(row["date"])
+        if day is None:
+            continue
+        item = {
+            "date": day.isoformat(),
+            "day_label": domain.day_label(day),
+            "calories": float(row["calories"] or 0),
+            "protein": float(row["protein"] or 0),
+            "carbs": float(row["carbs"] or 0),
+            "fat": float(row["fat"] or 0),
+            "target_calories": float(row["target_calories"] or 0),
+            "target_protein": float(row["target_protein"] or 0),
+        }
+        daily.append(item)
+        weeks[day - timedelta(days=day.weekday())].append(item)
+
+    weekly = [
+        {
+            "week_start": week_start.isoformat(),
+            "avg_calories": round(
+                sum(item["calories"] for item in items) / len(items), 1
+            ),
+            "avg_protein": round(
+                sum(item["protein"] for item in items) / len(items), 1
+            ),
+            "days_logged": len(items),
+        }
+        for week_start, items in sorted(weeks.items())
+    ]
+    return {
+        "days": daily,
+        "weekly": weekly,
+        "weight": {
+            "current_kg": float(metrics["weight_kg"] or 0) if metrics else 0,
+            "goal_kg": float(metrics["goal_weight_kg"] or 0) if metrics else 0,
+        },
+    }
+
+
 async def fetch_last_workout(exercise: str) -> dict[str, Any] | None:
     """Most recent Fitness Tracker row matching an exercise exactly."""
     clean_exercise = domain.validate_name(exercise, "exercise")
@@ -2592,6 +2674,31 @@ async def api_last_workout(request: Request) -> Any:
         "date": row["date"],
         "workout_type": row["workout_type"],
     }
+
+
+@api_route("/api/workouts/history", methods=["GET"])
+async def api_workouts_history(request: Request) -> Any:
+    try:
+        limit = int(request.query_params.get("limit", "200"))
+    except ValueError:
+        raise MacroError("limit must be an integer") from None
+    if limit < 1:
+        raise MacroError("limit must be at least 1")
+    exercise = request.query_params.get("exercise")
+    return {
+        "workouts": await fetch_workouts_history(exercise, min(limit, 500))
+    }
+
+
+@api_route("/api/trends", methods=["GET"])
+async def api_trends(request: Request) -> Any:
+    try:
+        days = int(request.query_params.get("days", "30"))
+    except ValueError:
+        raise MacroError("days must be an integer") from None
+    if days < 1:
+        raise MacroError("days must be at least 1")
+    return await fetch_trends(min(days, 90))
 
 
 @api_route("/api/workouts/{date}", methods=["GET"])

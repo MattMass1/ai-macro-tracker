@@ -232,6 +232,14 @@ class Store:
             raise StoreError("Authenticated user was not found")
         return {"display_name": str(stored)}
 
+    async def get_display_name(self) -> str | None:
+        """Return the authenticated user's stored display name, if any."""
+        pool = await self.connect()
+        stored = await pool.fetchval(
+            "SELECT display_name FROM users WHERE id=$1", current_user_id()
+        )
+        return str(stored) if stored is not None else None
+
     async def get_metrics(self) -> dict[str, Any] | None:
         """Return measurements for the authenticated user."""
         pool = await self.connect()

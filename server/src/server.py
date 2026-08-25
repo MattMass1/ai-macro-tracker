@@ -2126,6 +2126,8 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
         return await store_client().put_display_name(
             domain.validate_display_name(args.get("name"))
         )
+    async def get_display_name_tool(_args):
+        return {"display_name": await store_client().get_display_name()}
     async def set_metrics_tool(args):
         return {"metrics": await store_client().put_metrics(domain.validate_metrics(args))}
     async def get_metrics_tool(_args):
@@ -2334,7 +2336,8 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
         except (httpx.HTTPError, ValueError):
             context["whoop_status"] = "temporarily_unavailable"
         return context
-    return {"set_display_name": set_display_name_tool, "set_metrics": set_metrics_tool,
+    return {"set_display_name": set_display_name_tool,
+            "get_display_name": get_display_name_tool, "set_metrics": set_metrics_tool,
             "get_metrics": get_metrics_tool,
             "request_metrics_form": request_metrics_form_tool,
             "get_today": get_today_tool, "get_day": get_day_tool,
@@ -2533,8 +2536,8 @@ async def api_chat(request: Request) -> Any:
                 pass  # The food-path error is the one worth surfacing.
             raise
 
-    plan, has_targets = await asyncio.gather(
-        client.fetch_workout_plan(), client.has_macro_targets()
+    plan, has_targets, display_name = await asyncio.gather(
+        client.fetch_workout_plan(), client.has_macro_targets(), client.get_display_name()
     )
     onboarding = plan is None or not has_targets
     async def record_usage(usage: Mapping[str, Any]) -> None:
@@ -2549,6 +2552,7 @@ async def api_chat(request: Request) -> Any:
         reply, tool_results = await run_agent(
             history=[{"role": row["role"], "content": row["content"]} for row in history],
             message=agent_message, onboarding=onboarding,
+            display_name=display_name,
             handlers=handlers, record_usage=record_usage,
             max_rounds=12, max_tool_calls=24,
         )

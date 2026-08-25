@@ -430,7 +430,7 @@ async def test_usage_is_recorded_per_api_call_and_never_fatal(monkeypatch):
 
 class FakeStore:
     def __init__(self, today_count=0, plan=None, has_targets=False, chat_messages=None,
-                 library=None):
+                 library=None, display_name=None):
         self.today_count = today_count
         self.plan = plan
         self.targets = has_targets
@@ -438,6 +438,7 @@ class FakeStore:
         self.usage = []
         self.saved_presets = []
         self.display_names = []
+        self.display_name = display_name
         self.metrics = []
         self.chat_messages = chat_messages or []
         self.history_day_start = None
@@ -467,7 +468,11 @@ class FakeStore:
 
     async def put_display_name(self, name):
         self.display_names.append(name)
+        self.display_name = name
         return {"display_name": name}
+
+    async def get_display_name(self):
+        return self.display_name
 
     async def put_metrics(self, values):
         self.metrics.append(dict(values))
@@ -590,7 +595,7 @@ async def test_gym_chat_uses_coach_and_reports_onboarding(monkeypatch):
         "widget": None,
     }
     assert seen["onboarding"] is True  # no plan + no targets → interview mode
-    assert len(seen["tools"]) == 22
+    assert len(seen["tools"]) == 23
     assert [row[0] for row in fake.inserted] == ["user", "assistant"]
     assert fake.usage == [("gpt-5.6-luna", 10, 5)]
 
@@ -624,6 +629,32 @@ async def test_chat_history_is_current_coaching_day_only_and_onboarding_persists
     assert fake.history_day_start == day_start
     assert seen["history"] == [{"role": "assistant", "content": "today plan"}]
     assert seen["onboarding"] is False
+
+
+async def test_new_day_chat_injects_stored_name_for_onboarded_user(monkeypatch):
+    fake = FakeStore(plan={"version": 1}, has_targets=True, display_name="Ana")
+    monkeypatch.setattr(srv, "_client", fake)
+    seen = {}
+
+    async def fake_parse(_message):
+        return [], None
+
+    async def fake_run_agent(**kwargs):
+        seen.update(kwargs)
+        return "Good to see you, Ana.", []
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+
+    response = await srv.api_chat(chat_request({"message": "test"}))
+
+    assert response.status_code == 200
+    assert seen["history"] == []
+    assert seen["onboarding"] is False
+    assert seen["display_name"] == "Ana"
+    prompt = system_prompt(seen["onboarding"], seen["display_name"])
+    assert "Current user: Ana (already onboarded)" in prompt
+    assert "NEVER ask for their name again" in prompt
 
 
 async def test_chat_records_user_message_before_the_agent_loop(monkeypatch):
@@ -1737,6 +1768,7 @@ async def test_chat_text_metrics_fallback_still_saves(monkeypatch):
 def test_onboarding_tools_are_declared_with_required_fields():
     tools = {tool["name"]: tool for tool in TOOLS}
     assert tools["set_display_name"]["input_schema"]["required"] == ["name"]
+    assert tools["get_display_name"]["input_schema"]["required"] == []
     assert tools["set_metrics"]["input_schema"]["required"] == [
         "height_cm", "weight_kg", "goal_weight_kg"
     ]
@@ -1750,6 +1782,8 @@ class ProfilePool:
 
     async def fetchval(self, sql, *args):
         self.calls.append((sql, args))
+        if sql.startswith("SELECT display_name"):
+            return "Ana"
         return args[0]
 
     async def fetchrow(self, sql, *args):
@@ -1796,6 +1830,7 @@ async def test_profile_store_writes_and_reads_only_bound_user():
     token = bind_user(user_id)
     try:
         assert await store.put_display_name("Ana") == {"display_name": "Ana"}
+        assert await store.get_display_name() == "Ana"
         await store.put_metrics({"height_cm": 178, "weight_kg": 80,
                                  "goal_weight_kg": 75})
         metrics = await store.get_metrics()
@@ -1803,10 +1838,11 @@ async def test_profile_store_writes_and_reads_only_bound_user():
         reset_user(token)
 
     assert pool.calls[0][1] == ("Ana", user_id)
-    assert pool.calls[1][1][0] == user_id
-    assert pool.calls[2][1] == (user_id,)
+    assert pool.calls[1][1] == (user_id,)
+    assert pool.calls[2][1][0] == user_id
+    assert pool.calls[3][1] == (user_id,)
     assert metrics["height_cm"] == 178
-    assert all("user_id" in sql or "WHERE id=$2" in sql for sql, _args in pool.calls)
+    assert all("user_id" in sql or "WHERE id=$" in sql for sql, _args in pool.calls)
 
 
 async def test_store_rejects_unsourced_presets():

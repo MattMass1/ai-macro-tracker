@@ -30,6 +30,7 @@ S = {"type": "string"}
 MACROS = {key: N for key in ("calories", "protein", "carbs", "fat", "fiber")}
 TOOLS = [
     _schema("set_display_name", "Save what the user wants the coach to call them.", {"name": S}, ("name",)),
+    _schema("get_display_name", "Read the user's saved display name.", {}),
     _schema("set_metrics", """Save the user's structured body measurements. ALWAYS echo back in the USER's units: if they gave feet/inches or pounds, store as cm/kg (convert) but CONFIRM in their units ("5'10\", 300 lb, goal 250 lb"). Never reply in metric when the user speaks imperial. Never misread the goal: if the stated goal contradicts the direction (e.g. goal higher than current weight while they said lose fat), ASK to confirm before storing.""", {
         "height_cm": {"type": "number", "minimum": 100, "maximum": 250},
         "weight_kg": {"type": "number", "minimum": 30, "maximum": 300},
@@ -80,7 +81,7 @@ RULES (non-negotiable):
 - No lectures, no explanations, no 'here's why'. No bullet lists in chat.
 - EXERCISE DEMOS: When the user asks how to perform an exercise or requests a video/demo, call get_library with the exercise name FIRST. Reply in 1-2 sentences and mention the exact returned exercise name so the client attaches the video + instruction card. Never say you cannot embed or show videos; the card handles it.
 - Gather information quietly, then come to conclusions. Confirm data in one line, ask the next single question, stop.
-- Onboarding: ask name first (set_display_name), then goal, experience, days per week + equipment, then metrics — ONE per turn. BEFORE asking for metrics, call get_metrics; if metrics exist, never ask again. Otherwise CALL request_metrics_form and let the client render the card. Never ask for weight, height, or measurements in plain chat. If the user already typed measurements, save them with set_metrics.
+- Onboarding: ask "What should I call you?" only when the name is not known from context or get_display_name, then save it with set_display_name. If a name is stored, greet the user by it and NEVER ask for their name again. Then ask goal, experience, days per week + equipment, then metrics — ONE per turn. BEFORE asking for metrics, call get_metrics; if metrics exist, never ask again. Otherwise CALL request_metrics_form and let the client render the card. Never ask for weight, height, or measurements in plain chat. If the user already typed measurements, save them with set_metrics.
 - HARD COMPLETION RULE: Once you have display name, goal, experience level, days per week + equipment, and metrics (from get_metrics or set_metrics), you have ENOUGH. Do not ask anything more. Immediately search the library, then call set_targets + set_workout_plan. The plan does not need training days of the week, injuries, or additional detail.
 - CRITICAL: read the conversation history. Never ask for something the user already provided in this conversation or that exists in data from get_metrics or get_workout_plan. Re-asking is a failure. If the user answers a question already asked, acknowledge it in one line and move FORWARD.
 
@@ -89,9 +90,17 @@ For training recommendations use get_readiness. Users without WHOOP still receiv
 You are the ONLY agent. Every message is yours. Log food with lookup_food + log_meal, log workouts with log_workout, keep the rotation correct with get_today_session/complete_today_session. Never say you can't do something another system does — you ARE the system."""
 
 
-def system_prompt(onboarding: bool) -> str:
+def system_prompt(onboarding: bool, display_name: str | None = None) -> str:
     """Full system prompt: SOUL.md persona + onboarding context."""
-    return _load_persona() + f"\n\nSystem context: onboarding={str(onboarding).lower()}."
+    state = f"System context: onboarding={str(onboarding).lower()}."
+    if display_name:
+        state += (
+            f" Current user: {display_name} (already onboarded). "
+            "Greet them by name when appropriate. NEVER ask for their name again."
+        )
+    else:
+        state += " Current user's display name is not known."
+    return _load_persona() + f"\n\n{state}"
 
 
 async def post_openai(token: str, payload: dict[str, Any]) -> httpx.Response:
@@ -124,7 +133,7 @@ async def run_agent(
     *, history: list[dict[str, str]], message: str, onboarding: bool,
     handlers: Mapping[str, ToolHandler], post: PostMessages = post_openai,
     record_usage: RecordUsage | None = None, max_rounds: int = 8,
-    max_tool_calls: int = 16,
+    max_tool_calls: int = 16, display_name: str | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run one bounded Chat Completions tool loop and return text plus tool audit."""
     token = os.environ.get("OPENAI_ACCESS_TOKEN", "").strip()
@@ -147,7 +156,7 @@ async def run_agent(
         messages[-1]["content"] = f"{messages[-1]['content']}\n\n{message}"
     else:
         messages.append({"role": "user", "content": message})
-    system = system_prompt(onboarding)
+    system = system_prompt(onboarding, display_name)
     available_tools = [
         {
             "type": "function",

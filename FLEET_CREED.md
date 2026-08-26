@@ -47,41 +47,78 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 - Food logging requires a real `macro_source` — the domain layer rejects
   estimate/guess placeholders.
 
-## Roles — who builds what (no stepping on each other)
+## Roles — lean fleet (no stepping on each other)
 
-| Role | Agent | Owns | Never touches |
+| Role | Agent | Owns | Boundaries |
 |---|---|---|---|
-| **Orchestrator** | Hermes | Planning, triage, dispatch, review aggregation, deploy | Writing feature code directly |
-| **UI Builder** | Claude Code (Mac) + Sol/Grok (VM) | `ios/` SwiftUI: screens, theme, components, Keychain | Backend logic, schema |
-| **Backend Builder** | Sol (Codex) | `server/`: store, auth, coach tools, schema | SwiftUI files |
-| **Writer** | Luna (Codex) | Tests, migrations, backfill scripts, mechanical code | Architecture decisions |
-| **Design Reviewer** | Fable (Claude) | Design/architecture review, Swift idioms, taste | Writing feature code |
-| **Correctness Reviewer** | Grok (Cursor) | Edge cases, race conditions, data-loss hunting | Writing feature code |
+| **Orchestrator and Incident Commander** | Hermes/Sol | Briefs, scope and routing, review aggregation, evidence tracking, and deploy coordination | Never implements features or self-approves |
+| **Primary Builder** | Sol/Codex | Backend, API, auth, database, and complex Swift logic | Does not approve its own work |
+| **Design and Architecture Specialist** | Fable/Claude | SwiftUI and Apple-native design, architecture review, and high-risk cross-family review | Used on demand, not for mechanical work; does not approve its own work |
+| **Mechanical Worker** | Luna/Codex | Tests, fixtures, safe scripts, dry-run reports, pre/post counts, and release-checklist collection | Cannot independently approve destructive work or make architecture decisions |
+| **Quality and Data Safety Reviewer** | Dynamic cross-family assignment | Tenancy, canonical account identity, idempotency, duplicate detection, data integrity, migrations/backfills, and rollback assertions | Sol-written work is reviewed by Fable; Fable-written work by Sol; Luna/Grok work by Sol or Fable |
+| **Release and Operations Verifier** | Independent closer: Luna for routine verification; Sol for high-risk account, migration, or destructive releases | Deployed commit, correct immutable account ID, production smoke tests, cron/model/config drift, TestFlight/device evidence, and final go/no-go | Must be independent of the work being verified; alone may close an incident |
+| **Research and Overflow** | Grok/Cursor | Research, adversarial edge-case brainstorming, and overflow | Not a permanent correctness reviewer and cannot review its own work |
+| **Contract Owner** | Temporary designation on one existing builder | Canonical contract decisions and fixture coordination for a cross-surface task | Not a separate agent or standing role |
 
 ### Work rules
 
-- The UI Builder does not write backend logic. The Backend Builder does not
-  restyle screens. If you see a problem in another role's territory, report it
-  to the orchestrator — do not fix it yourself.
-- Writing Swift files does NOT require Xcode — only the final build does. When
-  the Mac UI Builder (Claude Code) is not actively running, the orchestrator
-  may route SwiftUI writing to Sol/Grok on the VM. The Mac is only required
-  for the final xcodebuild/Play step.
+- Each brief has exactly one writer. If ownership changes, the orchestrator
+  records an explicit handoff before the new writer proceeds.
+- Backend and iOS feature work use separate briefs and separate commits.
+- If you see a problem outside your assigned paths or role, report it to the
+  orchestrator; do not fix it uninvited.
+- Writing Swift files does NOT require Xcode, but the final build and device
+  verification require the appropriate Apple tooling.
 - Reviewers review, they don't rewrite. If a fix is needed, the orchestrator
   routes it back to the owning builder.
+- A writer never reviews or approves its own work. Cross-family review is
+  mandatory as defined in the roles table.
 - Any agent may refuse a task that violates the creed — but the orchestrator
   (Hermes) resolves role assignments per Matt's direction, and its routing
   decisions update this creed.
 
 ## Build flow (the loop)
 
-1. **Hermes** writes the brief (what + constraints + who owns it).
-2. **Owning builder** implements (Claude Code on Mac for UI, Sol for backend).
-3. **Reviewers** inspect: Fable (design/idioms) + Grok (edge cases), and Sol
-   for contract when backend touched. Independent, parallel.
-4. **Hermes** aggregates findings, routes fixes back to the owner.
-5. **Re-review** until approved. Then commit + push.
-6. **Hermes** verifies the deploy (or the Mac build) and reports to Matt.
+1. **Brief and scope gate:** the orchestrator records the goal, one writer,
+   allowed and forbidden paths, impacts, reviewers, verification target, and
+   rollback method. Use `docs/FLEET_CHANGE_BRIEF.md`.
+2. **One writer:** the owning writer implements within the brief.
+3. **Automated verification:** the writer runs the relevant full checks and
+   records evidence without claiming production or device success.
+4. **Independent Quality and Data Safety review:** the assigned cross-family
+   reviewer checks the diff, contract, tenancy, and any data-safety concerns.
+5. **Optional Fable design review:** add this gate for SwiftUI, Apple-native
+   design, architecture, or other high-risk cross-family concerns.
+6. **Owning writer fixes:** findings return to the same writer.
+7. **Original reviewer rechecks:** the reviewer who raised each blocker must
+   explicitly verify that it is resolved.
+8. **Commit, push, and deploy/build candidate:** create the exact production
+   deploy or TestFlight/device build to be verified, but do not close.
+9. **Release/Ops verification:** an independent verifier checks the deployed
+   commit or exact TestFlight/device build and makes the go/no-go decision.
+10. **Close incident:** only after production or device evidence exists. Only
+    the Release and Operations Verifier may close an incident.
+
+## Hard fleet gates
+
+- One writer per brief. Ownership changes require an explicit, recorded
+  handoff.
+- Writers cannot review or approve their own work.
+- Backend and iOS feature work must remain in separate briefs and commits.
+- Account verification uses immutable user IDs, never display names.
+- Every data change requires a backup or baseline, a dry run, demonstrated
+  idempotency, before/after invariants, rollback evidence, and second-agent
+  approval. Destructive work cannot be approved by Luna alone.
+- Status follows this ladder: **implemented → automated-verified →
+  production-verified/device-verified → fixed**. Nothing is **fixed** without
+  production or real-device evidence.
+- External facts must be re-read from an authoritative live source before
+  they are used or reported.
+- Model, provider, prompt, environment, or cron changes require a before/after
+  inventory, pinned jobs, a canary run, and a check for unrelated-job drift.
+- API contract changes require one canonical fixture exercised by both server
+  serialization and Swift decoding.
+- Only the independent Release and Operations Verifier may close an incident.
 
 ## Guardrails (non-negotiable)
 

@@ -995,7 +995,11 @@ You: []["Hey. What should I call you?"]
 
 If the message names food, log it. Never refuse. Never ask for labels.
 
-For a food-related message, output ONLY a JSON array with one object per item:
+For a food-related message, output ONLY a JSON array. Foods eaten together in one
+message are one composite item by default: look up each component, sum the final
+macros, and preserve every component and quantity in the composite name. Return
+multiple items only when the user explicitly asks for separate entries or names
+distinct meal slots/dates. Each object has this shape:
 [{{"name":"...","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"quantity":null,"grams":null,"basis":"per_unit|per_100g|per_serving","sourced_from":"preset|known|estimate|lookup","meal":"Breakfast|Lunch|Dinner|Snack","note":"source string or ESTIMATE"}}]
 The macros MUST be the FINAL TOTALS for exactly the portion the user stated. You own all portion arithmetic: "2 bananas" means return the macros for both bananas, and "200g sweet potato" means return the macros for 200g. Never return a per-unit or per-100g value when the user asked for a multiple or weighted portion. Set basis to per_unit for whole countable items, per_100g for foods sized from a weight-based value, or per_serving for a complete stated serving such as a bar, bowl, or saved preset. Set sourced_from to preset only when the name exactly identifies an available preset, known only when it exactly identifies a listed known food, lookup when you used lookup_food, or estimate when the macros are your fallback estimate. Prefer an exact available preset over a known-food match when both have the same name. Presets are per serving and have no serving weight: use them for whole servings only. When the user states grams for a preset, call lookup_food and scale its per-100g result instead; if lookup fails, keep your portion estimate labeled ESTIMATE. Use a matching preset or known-food value when possible. Infer the meal from context and time; default to Snack. Set quantity to the number of that item the user states ("1 bar" -> 1, "two cookies" -> 2, "a banana" -> 1); otherwise leave quantity null. Set grams only when the user states the portion weight ("100g chicken" -> 100, "3 oz venison" -> 85, converting oz/lb to grams); leave grams null when no weight is stated — never guess it. For an ambiguous or unknown food, make a reasonable final macro estimate. Coffee without stated additions is 5 kcal with zero macros. Never add commentary around a food JSON array.
 If a food is not an exact available preset or exact known food, call lookup_food with its name BEFORE choosing macros. Use the returned per-100g or per-serving values to calculate final macros for the stated portion, set sourced_from to lookup, and copy its source string exactly into note. Never invent a source or macros for a real food while lookup_food is available. If lookup_food fails, returns not found, or the lookup limit is reached, proceed with a reasonable estimate and set note to exactly ESTIMATE.
@@ -1026,6 +1030,8 @@ If the message is a greeting, question, or otherwise not asking to log food, out
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
+            "reasoning_effort": "none",
+            "max_completion_tokens": 1200,
             "temperature": 0,
         }
         token = _openai_access_token()
@@ -2339,6 +2345,158 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
             "get_readiness": readiness_tool}
 
 
+_SEPARATE_ENTRY_RE = re.compile(
+    r"\b(?:separate(?:ly)?|individual(?:ly)?|each as (?:a )?separate|"
+    r"split (?:them|these|it) up|each one on its own|as its own entry)\b",
+    re.IGNORECASE,
+)
+
+
+def _group_food_turn(message: str) -> bool:
+    """Whether food named in this user turn belongs in one nutrition row."""
+    if _SEPARATE_ENTRY_RE.search(message):
+        return False
+    if len(set(re.findall(r"\b\d{4}-\d{2}-\d{2}\b", message))) > 1:
+        return False
+    # A slot word in narration ("skipped breakfast") is not an assignment.
+    assigned = re.findall(
+        r"(?:\bfor\s+|(?:^|[,;])\s*)(breakfast|lunch|dinner|snack)\s*:?",
+        message, re.IGNORECASE,
+    )
+    return len({slot.casefold() for slot in assigned}) < 2
+
+
+def _food_turn_name(message: str, components: list[dict[str, Any]]) -> str:
+    """Return a concise food phrase instead of storing conversational filler."""
+    text = re.sub(r"^\s*(?:please\s+)?(?:log|add|track)\s+", "", message,
+                  flags=re.IGNORECASE).strip(" .")
+    text = re.sub(r"^\s*i\s+(?:skipped|didn['’]t have)\s+"
+                  r"(?:breakfast|lunch|dinner|snack)\s*[,;]\s*", "", text,
+                  flags=re.IGNORECASE)
+    text = re.sub(r"^(?:please\s+)?(?:log|add|track)\s+", "", text,
+                  flags=re.IGNORECASE)
+    text = re.sub(r"\s+for\s+(?:breakfast|lunch|dinner|snack)\s*$", "", text,
+                  flags=re.IGNORECASE).strip(" ,;.")
+    if not text or len(text) > 200:
+        text = ", ".join(str(item["name"]).strip() for item in components)
+    return domain.validate_name(text[:200])
+
+
+_FOOD_NAME_STOPWORDS = {
+    "a", "an", "and", "as", "for", "i", "of", "please", "the", "to", "with",
+    "add", "ate", "had", "log", "track", "entry", "meal",
+    "breakfast", "lunch", "dinner", "snack",
+}
+
+
+def _food_name_tokens(value: str) -> set[str]:
+    """Return stable significant tokens for conservative aggregate recognition."""
+    return {
+        token for token in re.findall(r"[a-z0-9]+", value.casefold())
+        if token not in _FOOD_NAME_STOPWORDS
+    }
+
+
+def _is_full_meal_aggregate(
+    message: str, candidate: Mapping[str, Any], prior: list[dict[str, Any]],
+) -> bool:
+    """Recognize a final whole-turn correction without mistaking a component for it."""
+    if len(prior) < 2:
+        return False
+    candidate_tokens = _food_name_tokens(str(candidate["name"]))
+    prior_tokens = set().union(
+        *(_food_name_tokens(str(item["name"])) for item in prior)
+    )
+    turn_tokens = _food_name_tokens(_food_turn_name(message, prior))
+    if not prior_tokens or not prior_tokens <= candidate_tokens:
+        return False
+    # The name must also describe the original turn. This deliberately prefers
+    # retaining components when conversational filler makes recognition unclear.
+    if turn_tokens and not turn_tokens <= candidate_tokens:
+        return False
+    prior_calories = sum(float(item["calories"]) for item in prior)
+    candidate_calories = float(candidate["calories"])
+    return prior_calories == 0 or candidate_calories >= prior_calories * 0.8
+
+
+def _composite_meal(
+    message: str, components: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Aggregate staged component rows while retaining names and provenance."""
+    component_names = [str(item["name"]).strip() for item in components]
+    name = _food_turn_name(message, components)
+    sources = list(dict.fromkeys(str(item["macro_source"]) for item in components))
+    macros = {
+        key: round(sum(float(item[key]) for item in components), 2)
+        for key in domain.MACRO_KEYS
+    }
+    return {
+        "name": name,
+        **macros,
+        "meal": _food_turn_meal(message, components),
+        "macro_source": "Composite: " + "; ".join(sources),
+    }
+
+
+def _food_turn_meal(message: str, components: list[dict[str, Any]]) -> str:
+    """Choose the explicit user slot, otherwise a stable component slot."""
+    explicit = re.findall(
+        r"\bfor\s+(breakfast|lunch|dinner|snack)\b", message, re.IGNORECASE
+    )
+    if explicit:
+        return domain.normalize_meal(explicit[-1])
+    return domain.normalize_meal(components[0]["meal"])
+
+
+async def _persist_staged_meals(
+    message: str, staged: list[dict[str, Any]], day_value: str | None = None,
+) -> list[dict[str, Any]]:
+    """Persist a coach turn only after all meal tool calls have validated."""
+    if not staged:
+        return []
+    rows = staged
+    if len(staged) > 1 and _group_food_turn(message):
+        rows = [_composite_meal(message, staged)]
+    if len(rows) == 1:
+        row = rows[0]
+        result = await write_meal(
+            row["name"], row["calories"], row["protein"], row["carbs"],
+            row["fat"], row["macro_source"], row["meal"], day_value,
+            allow_estimate=True, fiber=row["fiber"],
+        )
+        return [result["logged"]]
+
+    # Validate the complete operation before the store opens its transaction.
+    day = domain.resolve_date(day_value)
+    validated_rows = []
+    for row in rows:
+        macros = domain.validate_macros(*(row.get(key) for key in domain.MACRO_KEYS))
+        clean_name = domain.validate_name(str(row.get("name") or ""))
+        source = str(row.get("macro_source") or "").strip()
+        if not source:
+            raise MacroError("macro_source is required")
+        if (
+            macros["calories"] > 0
+            and sum(macros[key] for key in ("protein", "carbs", "fat", "fiber")) == 0
+            and not _is_zero_macro_food(clean_name)
+        ):
+            raise MacroError("food entry has calories but no macros")
+        validated_rows.append({
+            "name": clean_name,
+            "meal": domain.normalize_meal(row.get("meal")),
+            "macro_source": source,
+            "day": day,
+            **macros,
+        })
+    stored = await store_client().insert_meals(validated_rows)
+    return [{
+        "id": row.get("id", ""), "name": values["name"],
+        "meal": values["meal"], **{key: values[key] for key in domain.MACRO_KEYS},
+        "date": day.isoformat(), "created_time": row.get("created_time", ""),
+        "macro_source": values["macro_source"],
+    } for row, values in zip(stored, validated_rows)]
+
+
 @api_route("/api/chat", methods=["POST"])
 async def api_chat(request: Request) -> Any:
     body = await _json_body(request)
@@ -2417,7 +2575,7 @@ async def api_chat(request: Request) -> Any:
                      basis, sourced_from, note)
                 )
 
-            logged: list[dict[str, Any]] = []
+            prepared: list[dict[str, Any]] = []
             preset_by_name = {
                 _normalized_food_name(str(preset["name"])): preset
                 for preset in presets
@@ -2499,12 +2657,14 @@ async def api_chat(request: Request) -> Any:
                             *(_FALLBACK_ESTIMATE[key] for key in domain.MACRO_KEYS)
                         )
                         source = "ESTIMATE"
-                result = await write_meal(
-                    clean_name, macros["calories"], macros["protein"], macros["carbs"],
-                    macros["fat"], source, meal_name, day.isoformat(), allow_estimate=True,
-                    fiber=macros["fiber"],
-                )
-                logged.append(result["logged"])
+                prepared.append({
+                    "name": clean_name, **macros, "macro_source": source,
+                    "meal": meal_name,
+                })
+
+            logged = await _persist_staged_meals(
+                text, prepared, day.isoformat()
+            )
 
             current = await day_payload(day, ensure=logged)
             names = ", ".join(f'{item["name"]} {item["calories"]:g} kcal ✓' for item in logged)
@@ -2532,6 +2692,61 @@ async def api_chat(request: Request) -> Any:
         )
 
     handlers = _coach_tool_handlers()
+    # Reconcile validated calls by food identity. Distinct components accumulate;
+    # exact-name corrections replace; a conservatively recognized whole-turn
+    # aggregate replaces the accumulated components.
+    staged_coach_meals: list[dict[str, Any]] = []
+    staged_meal_audit_statuses: list[str] = []
+    staged_meal_call_indexes: dict[str, int] = {}
+
+    async def stage_coach_meal(args: Mapping[str, Any]) -> dict[str, Any]:
+        macros = domain.validate_macros(
+            *(args.get(key) for key in domain.MACRO_KEYS)
+        )
+        candidate = {
+            "name": domain.validate_name(str(args.get("name") or "")),
+            **macros,
+            "macro_source": domain.validate_macro_source(
+                str(args.get("macro_source") or "")
+            ),
+            "meal": domain.normalize_meal(str(args.get("meal_type") or "")),
+        }
+        key = _normalized_food_name(candidate["name"])
+        prior_index = next(
+            (index for index, item in enumerate(staged_coach_meals)
+             if _normalized_food_name(item["name"]) == key),
+            None,
+        )
+        status = "included_in_final_food_operation"
+        if prior_index is not None:
+            staged_coach_meals[prior_index] = candidate
+            previous_call = staged_meal_call_indexes[key]
+            staged_meal_audit_statuses[previous_call] = "superseded_by_correction"
+        elif _is_full_meal_aggregate(text, candidate, staged_coach_meals):
+            for call_index, prior_status in enumerate(staged_meal_audit_statuses):
+                if prior_status == "included_in_final_food_operation":
+                    staged_meal_audit_statuses[call_index] = (
+                        "superseded_by_full_aggregate"
+                    )
+            staged_coach_meals[:] = [candidate]
+            staged_meal_call_indexes.clear()
+        else:
+            staged_coach_meals.append(candidate)
+        staged_meal_call_indexes[key] = len(staged_meal_audit_statuses)
+        staged_meal_audit_statuses.append(status)
+        return {"staged": True, "name": candidate["name"],
+                "replaces_prior_attempt": prior_index is not None}
+
+    async def staging_aware_undo(_args: Mapping[str, Any]) -> dict[str, Any]:
+        if staged_coach_meals:
+            raise MacroError(
+                "A food write is staged in this turn. Correct it with log_meal; "
+                "undo_last_meal cannot delete an earlier persisted meal yet."
+            )
+        return await _coach_tool_handlers()["undo_last_meal"]({})
+
+    handlers["log_meal"] = stage_coach_meal
+    handlers["undo_last_meal"] = staging_aware_undo
     if structured_metrics is not None:
         handlers.pop("set_metrics")
     try:
@@ -2550,6 +2765,31 @@ async def api_chat(request: Request) -> Any:
         except Exception:
             pass  # The loop's error is the one worth surfacing.
         raise
+    try:
+        fallback_logged = await _persist_staged_meals(text, staged_coach_meals)
+    except Exception as exc:
+        try:
+            await client.insert_chat_message(
+                "assistant", "Sorry, I couldn't log that. Try again."
+            )
+        except Exception:
+            pass
+        if isinstance(exc, (MacroError, StoreError)):
+            raise
+        raise StoreError("The meal could not be saved. Try again.") from exc
+    if fallback_logged:
+        meal_audits = [
+            result for result in tool_results
+            if result.get("tool") == "log_meal" and result.get("ok")
+        ]
+        for index, result in enumerate(meal_audits):
+            result.pop("result", None)
+            result["staged"] = True
+            result["result"] = {"status": staged_meal_audit_statuses[index]}
+        tool_results.append({
+            "tool": "persist_food_turn", "input": {"grouped": len(fallback_logged) == 1},
+            "ok": True, "result": {"logged": fallback_logged},
+        })
     await client.insert_chat_message("assistant", reply, tool_results or None)
     current = await day_payload(domain.effective_date())
     widget = ({"type": "metrics_form", "fields": [
@@ -2564,7 +2804,7 @@ async def api_chat(request: Request) -> Any:
             ]}
     if widget is None:
         widget = exercise_card_widget(reply, tool_results)
-    logged = [
+    logged = fallback_logged or [
         dict(result["result"]["logged"])
         for result in tool_results
         if result.get("tool") == "log_meal"

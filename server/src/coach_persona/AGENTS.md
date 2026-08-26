@@ -17,6 +17,10 @@ How the coach runs in production. These are hard rules for every session.
 - Tool errors return as `is_error` results for the model to self-correct;
   never crash the loop.
 - `log_meal` requires a real `macro_source`. Reject placeholders.
+- One food message is one composite `log_meal` write by default. Look up each
+  component first, aggregate macros, and preserve component quantities in its
+  name. Separate writes require an explicit request or distinct meal slots/dates.
+  `meal_type` is only Breakfast, Lunch, Dinner, or Snack, never "meal".
 - `set_workout_plan` validates through `domain.validate_workout_plan` before
   writing. Library membership enforced.
 - Stable routine: the stored plan is the user's routine. Never rewrite,

@@ -462,6 +462,15 @@ class FakeStore:
         self.meals.append(dict(kwargs))
         return {"id": "m1", "created_time": "", **kwargs}
 
+    async def insert_meals(self, rows):
+        if not hasattr(self, "meals"):
+            self.meals = []
+        self.meals.extend(dict(row) for row in rows)
+        return [
+            {"id": f"m{index}", "created_time": "", **row}
+            for index, row in enumerate(rows, 1)
+        ]
+
     async def save_preset(self, values, existing_id=None):
         self.saved_presets.append((dict(values), existing_id))
         return {"id": existing_id or "new", **values}
@@ -802,10 +811,20 @@ def _fast_path_env(monkeypatch, items):
                         "source": source, "meal": meal})
         return {"logged": {"name": name, "calories": calories}}
 
+    async def fake_insert_meals(rows):
+        for row in rows:
+            written.append({
+                "name": row["name"], **{key: row[key] for key in domain.MACRO_KEYS},
+                "source": row["macro_source"], "meal": row["meal"],
+            })
+        return [{"id": f"m{index}", "created_time": ""}
+                for index, _row in enumerate(rows, 1)]
+
     monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
     monkeypatch.setattr(srv, "run_agent", unexpected_run_agent)
     monkeypatch.setattr(srv, "day_payload", fake_day_payload)
     monkeypatch.setattr(srv, "write_meal", fake_write_meal)
+    fake.insert_meals = fake_insert_meals
     return written
 
 
@@ -831,10 +850,335 @@ async def test_per_serving_without_per_100g_logs_parser_finals_as_is(monkeypatch
     response = await srv.api_chat(chat_request({"message": "stew and 500g apple slices"}))
 
     assert response.status_code == 200
-    assert written[0]["calories"] == 300
-    assert written[0]["source"] == "ESTIMATE"
-    assert written[1]["calories"] == 260.0  # 52 × 5 — stated weight wins
-    assert written[1]["source"] == "OpenFoodFacts: 171688"
+    assert len(written) == 1
+    assert written[0]["calories"] == 560
+    assert written[0]["name"] == "stew and 500g apple slices"
+    assert written[0]["source"] == (
+        "Composite: ESTIMATE; OpenFoodFacts: 171688"
+    )
+
+
+async def test_exact_composite_food_message_persists_one_aggregate(monkeypatch):
+    message = "6 oz chicken 3 oz sweet potatoes 3 oz green beans, 5 oz brown rice"
+    written = _fast_path_env(monkeypatch, [
+        {"name": "6 oz chicken", "calories": 280, "protein": 52, "carbs": 0,
+         "fat": 6, "fiber": 0, "meal": "Dinner", "note": "USDA chicken"},
+        {"name": "3 oz sweet potatoes", "calories": 80, "protein": 1,
+         "carbs": 19, "fat": 0, "fiber": 3, "meal": "Dinner", "note": "USDA sweet potato"},
+        {"name": "3 oz green beans", "calories": 30, "protein": 1,
+         "carbs": 7, "fat": 0, "fiber": 3, "meal": "Dinner", "note": "USDA green beans"},
+        {"name": "5 oz brown rice", "calories": 220, "protein": 0,
+         "carbs": 43, "fat": 8, "fiber": 2, "meal": "Dinner", "note": "USDA brown rice"},
+    ])
+
+    response = await srv.api_chat(chat_request({"message": message}))
+    payload = json.loads(response.body)
+
+    assert len(written) == 1
+    assert len(payload["logged"]) == 1
+    assert written[0]["name"] == message
+    assert {key: written[0][key] for key in domain.MACRO_KEYS} == {
+        "calories": 610.0, "protein": 54.0, "carbs": 69.0,
+        "fat": 14.0, "fiber": 8.0,
+    }
+
+
+async def test_explicit_separate_food_entries_remain_separate(monkeypatch):
+    written = _fast_path_env(monkeypatch, [
+        {"name": "chicken", "calories": 200, "protein": 40, "carbs": 0,
+         "fat": 4, "fiber": 0, "meal": "Dinner", "note": "USDA chicken"},
+        {"name": "rice", "calories": 200, "protein": 4, "carbs": 42,
+         "fat": 1, "fiber": 2, "meal": "Dinner", "note": "USDA rice"},
+    ])
+
+    response = await srv.api_chat(chat_request({
+        "message": "log chicken and rice as separate entries"
+    }))
+
+    assert response.status_code == 200
+    assert len(written) == 2
+    assert len(json.loads(response.body)["logged"]) == 2
+
+
+async def test_parser_failure_batches_coach_component_calls(monkeypatch):
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
+    monkeypatch.setattr(srv, "_client", fake)
+    writes = []
+
+    async def failed_parse(_message):
+        raise MacroError("parser transport failed")
+
+    components = [
+        ("6 oz chicken", 280, 52, 0, 6, 0),
+        ("3 oz sweet potatoes", 80, 1, 19, 0, 3),
+        ("3 oz green beans", 30, 1, 7, 0, 3),
+        ("5 oz brown rice", 220, 0, 43, 8, 2),
+    ]
+
+    async def fake_run_agent(**kwargs):
+        handler = kwargs["handlers"]["log_meal"]
+        with pytest.raises(MacroError):
+            await handler({"name": "chicken", "meal_type": "meal",
+                           "calories": 1, "protein": 1, "carbs": 1,
+                           "fat": 1, "fiber": 1, "macro_source": "USDA"})
+        audit = []
+        for name, calories, protein, carbs, fat, fiber in components:
+            args = {"name": name, "meal_type": "Dinner", "calories": calories,
+                    "protein": protein, "carbs": carbs, "fat": fat,
+                    "fiber": fiber, "macro_source": f"USDA: {name}"}
+            await handler(args)
+            audit.append({"tool": "log_meal", "input": args, "ok": True})
+        return "Logged your meal.", audit
+
+    async def fake_write(name, calories, protein, carbs, fat, source, meal,
+                         day, allow_estimate=False, fiber=0):
+        writes.append({"name": name, "calories": calories, "protein": protein,
+                       "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal})
+        return {"logged": writes[-1]}
+
+    async def fake_day(_day, **_kwargs):
+        return {"totals": {"calories": 610}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", failed_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    monkeypatch.setattr(srv, "write_meal", fake_write)
+    monkeypatch.setattr(srv, "day_payload", fake_day)
+
+    response = await srv.api_chat(chat_request({
+        "message": "6 oz chicken 3 oz sweet potatoes 3 oz green beans, 5 oz brown rice"
+    }))
+
+    assert response.status_code == 200
+    assert len(writes) == 1
+    assert writes[0]["calories"] == 610
+    assert len(json.loads(response.body)["logged"]) == 1
+    persisted_audit = fake.inserted[-1][2]
+    assert [item["result"]["status"] for item in persisted_audit[:4]] == [
+        "included_in_final_food_operation",
+        "included_in_final_food_operation",
+        "included_in_final_food_operation",
+        "included_in_final_food_operation",
+    ]
+
+
+async def test_coach_full_aggregate_replaces_components_without_double_count(monkeypatch):
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
+    monkeypatch.setattr(srv, "_client", fake)
+
+    async def failed_parse(_message):
+        return ([], None, [])
+
+    components = [
+        {"name": "chicken", "calories": 280, "protein": 52, "carbs": 0,
+         "fat": 6, "fiber": 0},
+        {"name": "sweet potato", "calories": 80, "protein": 1, "carbs": 19,
+         "fat": 0, "fiber": 3},
+        {"name": "green beans", "calories": 30, "protein": 1, "carbs": 7,
+         "fat": 0, "fiber": 3},
+        {"name": "brown rice", "calories": 220, "protein": 0, "carbs": 43,
+         "fat": 8, "fiber": 2},
+    ]
+
+    async def fake_run_agent(**kwargs):
+        log = kwargs["handlers"]["log_meal"]
+        audit = []
+        for component in components:
+            args = {**component, "meal_type": "Dinner", "macro_source": "USDA"}
+            await log(args)
+            audit.append({"tool": "log_meal", "input": args, "ok": True})
+        aggregate = {
+            "name": "chicken sweet potato green beans brown rice",
+            "meal_type": "Dinner", "calories": 610, "protein": 54,
+            "carbs": 69, "fat": 14, "fiber": 8, "macro_source": "Composite: USDA",
+        }
+        await log(aggregate)
+        audit.append({"tool": "log_meal", "input": aggregate, "ok": True})
+        return "Logged your meal.", audit
+
+    async def fake_day(_day, **_kwargs):
+        return {"totals": {"calories": 610}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", failed_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    monkeypatch.setattr(srv, "day_payload", fake_day)
+    response = await srv.api_chat(chat_request({
+        "message": "log chicken sweet potato green beans brown rice"
+    }))
+
+    assert response.status_code == 200
+    assert len(fake.meals) == 1
+    assert fake.meals[0]["calories"] == 610
+    audit = fake.inserted[-1][2]
+    assert [item["result"]["status"] for item in audit[:5]] == [
+        "superseded_by_full_aggregate",
+        "superseded_by_full_aggregate",
+        "superseded_by_full_aggregate",
+        "superseded_by_full_aggregate",
+        "included_in_final_food_operation",
+    ]
+
+
+async def test_coach_same_name_correction_replaces_staged_values(monkeypatch):
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
+    monkeypatch.setattr(srv, "_client", fake)
+
+    async def failed_parse(_message):
+        return ([], None, [])
+
+    async def fake_run_agent(**kwargs):
+        log = kwargs["handlers"]["log_meal"]
+        base = {"name": "oatmeal", "meal_type": "Breakfast", "protein": 8,
+                "carbs": 40, "fat": 5, "fiber": 4, "macro_source": "USDA"}
+        first = {**base, "calories": 220}
+        corrected = {**base, "calories": 260}
+        await log(first)
+        await log(corrected)
+        return "Logged oatmeal.", [
+            {"tool": "log_meal", "input": first, "ok": True},
+            {"tool": "log_meal", "input": corrected, "ok": True},
+        ]
+
+    async def fake_day(_day, **_kwargs):
+        return {"totals": {"calories": 260}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", failed_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    monkeypatch.setattr(srv, "day_payload", fake_day)
+    response = await srv.api_chat(chat_request({"message": "log oatmeal"}))
+
+    assert response.status_code == 200
+    assert len(fake.meals) == 1
+    assert fake.meals[0]["calories"] == 260
+    audit = fake.inserted[-1][2]
+    assert [item["result"]["status"] for item in audit[:2]] == [
+        "superseded_by_correction", "included_in_final_food_operation",
+    ]
+
+
+async def test_coach_explicit_separate_calls_stay_atomic_with_truthful_audit(monkeypatch):
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
+    monkeypatch.setattr(srv, "_client", fake)
+
+    async def fake_parse(_message):
+        return ([], None, [])
+
+    async def fake_run_agent(**kwargs):
+        log = kwargs["handlers"]["log_meal"]
+        calls = [
+            {"name": "chicken", "meal_type": "Dinner", "calories": 200,
+             "protein": 40, "carbs": 0, "fat": 4, "fiber": 0,
+             "macro_source": "USDA"},
+            {"name": "chicken", "meal_type": "Dinner", "calories": 210,
+             "protein": 42, "carbs": 0, "fat": 4, "fiber": 0,
+             "macro_source": "USDA corrected"},
+            {"name": "rice", "meal_type": "Dinner", "calories": 200,
+             "protein": 4, "carbs": 42, "fat": 1, "fiber": 2,
+             "macro_source": "USDA"},
+        ]
+        for call in calls:
+            await log(call)
+        return "Logged separately.", [
+            {"tool": "log_meal", "input": call, "ok": True} for call in calls
+        ]
+
+    async def fake_day(_day, **_kwargs):
+        return {"totals": {"calories": 410}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    monkeypatch.setattr(srv, "day_payload", fake_day)
+    response = await srv.api_chat(chat_request({
+        "message": "log chicken and rice as separate entries"
+    }))
+
+    assert response.status_code == 200
+    assert [meal["name"] for meal in fake.meals] == ["chicken", "rice"]
+    assert [meal["calories"] for meal in fake.meals] == [210, 200]
+    audit = fake.inserted[-1][2]
+    assert [item["result"]["status"] for item in audit[:3]] == [
+        "superseded_by_correction", "included_in_final_food_operation",
+        "included_in_final_food_operation",
+    ]
+
+
+async def test_mid_stage_undo_cannot_delete_prior_persisted_meal(monkeypatch):
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
+    deleted = []
+    fake.delete = lambda *_args: deleted.append(_args)
+    monkeypatch.setattr(srv, "_client", fake)
+
+    async def fake_parse(_message):
+        return ([], None, [])
+
+    async def fake_run_agent(**kwargs):
+        await kwargs["handlers"]["log_meal"]({
+            "name": "eggs", "meal_type": "Breakfast", "calories": 140,
+            "protein": 12, "carbs": 1, "fat": 10, "fiber": 0,
+            "macro_source": "USDA",
+        })
+        with pytest.raises(MacroError, match="staged"):
+            await kwargs["handlers"]["undo_last_meal"]({})
+        return "Logged eggs.", []
+
+    async def fake_day(_day, **_kwargs):
+        return {"totals": {"calories": 140}, "targets": {"calories": 2000}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    monkeypatch.setattr(srv, "day_payload", fake_day)
+    response = await srv.api_chat(chat_request({"message": "log eggs then undo"}))
+    assert response.status_code == 200
+    assert deleted == []
+
+
+async def test_deferred_persistence_failure_records_apology_without_success(monkeypatch):
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
+    monkeypatch.setattr(srv, "_client", fake)
+
+    async def fake_parse(_message):
+        return ([], None, [])
+
+    async def fake_run_agent(**kwargs):
+        await kwargs["handlers"]["log_meal"]({
+            "name": "eggs", "meal_type": "Breakfast", "calories": 140,
+            "protein": 12, "carbs": 1, "fat": 10, "fiber": 0,
+            "macro_source": "USDA",
+        })
+        return "Logged eggs.", [{"tool": "log_meal", "ok": True}]
+
+    async def fail_insert(**_kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    fake.insert_meal = fail_insert
+    response = await srv.api_chat(chat_request({"message": "log eggs"}))
+    assert response.status_code == 502
+    assert [(role, content) for role, content, _tools in fake.inserted] == [
+        ("user", "log eggs"),
+        ("assistant", "Sorry, I couldn't log that. Try again."),
+    ]
+
+
+@pytest.mark.parametrize("phrase", [
+    "split it up", "each one on its own", "chicken as its own entry",
+])
+def test_expanded_separate_phrasings(phrase):
+    assert srv._group_food_turn(f"log chicken and rice, {phrase}") is False
+
+
+def test_incidental_breakfast_does_not_split_lunch_composite():
+    message = "I skipped breakfast, log chicken and rice for lunch"
+    rows = [
+        {"name": "chicken", "meal": "Breakfast", "macro_source": "USDA",
+         "calories": 200, "protein": 40, "carbs": 0, "fat": 4, "fiber": 0},
+        {"name": "rice", "meal": "Dinner", "macro_source": "USDA",
+         "calories": 200, "protein": 4, "carbs": 42, "fat": 1, "fiber": 2},
+    ]
+    assert srv._group_food_turn(message) is True
+    composite = srv._composite_meal(message, rows)
+    assert composite["meal"] == "Lunch"
+    assert composite["name"] == "chicken and rice"
 
 
 def test_chat_quota_window_rolls_at_4am_not_midnight():
@@ -902,6 +1246,80 @@ async def test_store_connect_applies_schema_before_first_query(monkeypatch):
     assert "CREATE TABLE IF NOT EXISTS session_day_state" in executed[0]
     assert await store.connect() is pool  # pool caches; schema applies once
     assert len(executed) == 1
+
+
+async def test_store_meal_batch_rolls_back_when_second_insert_fails():
+    committed = []
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, _exc, _tb):
+            if exc_type is None:
+                committed.extend(connection.pending)
+            connection.pending.clear()
+
+    class Connection:
+        def __init__(self):
+            self.pending = []
+            self.nutrition_inserts = 0
+
+        def transaction(self):
+            return Transaction()
+
+        async def execute(self, *_args):
+            return None
+
+        async def fetchval(self, sql, *_args):
+            if "INSERT INTO meals" in sql:
+                return "meal-id"
+            return domain.effective_date()
+
+        async def fetchrow(self, sql, *_args):
+            if "INSERT INTO nutrition_entries" not in sql:
+                return None
+            self.nutrition_inserts += 1
+            if self.nutrition_inserts == 2:
+                raise RuntimeError("second insert failed")
+            self.pending.append("first-row")
+            return {
+                "id": "entry-1", "name": "chicken", "meal": "Dinner",
+                "calories": 100, "protein": 10, "carbs": 10, "fat": 2,
+                "fiber": 1, "day": domain.effective_date(),
+                "created_at": datetime.now(domain.LOCAL_TZ),
+            }
+
+    class Acquire:
+        async def __aenter__(self):
+            return connection
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    connection = Connection()
+    store = Store("postgresql://unused/unused")
+    store.pool = Pool()
+    day = domain.effective_date()
+    rows = [
+        {"name": name, "meal": "Dinner", "calories": 100, "protein": 10,
+         "carbs": 10, "fat": 2, "fiber": 1, "day": day,
+         "macro_source": "USDA"}
+        for name in ("chicken", "rice")
+    ]
+    token = bind_user(uuid4())
+    try:
+        with pytest.raises(RuntimeError, match="second insert"):
+            await store.insert_meals(rows)
+    finally:
+        reset_user(token)
+
+    assert committed == []
+    assert connection.pending == []
 
 
 async def test_coach_save_preset_requires_a_real_macro_source(monkeypatch):
@@ -1041,6 +1459,9 @@ def test_food_guidance_never_refuses_and_allows_flagged_estimates():
     resolves, a clearly-flagged estimate when nothing does — never a label ask."""
     log_meal = next(tool for tool in TOOLS if tool["name"] == "log_meal")
     description = log_meal["description"]
+    assert log_meal["input_schema"]["properties"]["meal_type"]["enum"] == [
+        "Breakfast", "Lunch", "Dinner", "Snack"
+    ]
     assert "Never refuse" in description
     assert "ESTIMATE" in description
     assert "Never estimate" not in description

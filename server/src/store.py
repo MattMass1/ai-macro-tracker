@@ -289,6 +289,53 @@ class Store:
             await self._refresh_rollups(conn, user_id, day)
         return meal_row(row)
 
+    async def insert_meals(self, rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """Insert one validated food turn atomically for the authenticated user.
+
+        Callers must supply rows for one day. The day lock serializes rollup
+        refreshes, every nutrition row shares the transaction, and rollups are
+        refreshed once after the final insert.
+        """
+        if not rows:
+            return []
+        days = {row["day"] for row in rows}
+        if len(days) != 1:
+            raise ValueError("a meal batch must belong to one day")
+        day = next(iter(days))
+        pool = await self.connect()
+        user_id = current_user_id()
+        inserted = []
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "INSERT INTO days(user_id,date) VALUES($1,$2) "
+                "ON CONFLICT(user_id,date) DO NOTHING", user_id, day,
+            )
+            await conn.fetchval(
+                "SELECT date FROM days WHERE user_id=$1 AND date=$2 FOR UPDATE",
+                user_id, day,
+            )
+            meal_ids: dict[str, Any] = {}
+            for row in rows:
+                meal_name = str(row["meal"])
+                if meal_name not in meal_ids:
+                    meal_ids[meal_name] = await conn.fetchval(
+                        "INSERT INTO meals(id,user_id,day,meal_type) VALUES($1,$2,$3,$4) "
+                        "ON CONFLICT(user_id,day,meal_type) DO UPDATE SET "
+                        "meal_type=EXCLUDED.meal_type RETURNING id",
+                        str(uuid4()), user_id, day, meal_name,
+                    )
+                stored = await conn.fetchrow(
+                    "INSERT INTO nutrition_entries(id,user_id,name,meal,calories,protein,"
+                    "carbs,fat,fiber,day,meal_id,macro_source) VALUES($1,$2,$3,$4,$5,$6,"
+                    "$7,$8,$9,$10,$11,$12) RETURNING *",
+                    str(uuid4()), user_id, row["name"], meal_name, row["calories"],
+                    row["protein"], row["carbs"], row["fat"], row["fiber"], day,
+                    meal_ids[meal_name], row["macro_source"],
+                )
+                inserted.append(meal_row(stored))
+            await self._refresh_rollups(conn, user_id, day)
+        return inserted
+
     @staticmethod
     async def _refresh_rollups(conn: asyncpg.Connection, user_id: UUID, day: date) -> None:
         await conn.fetchval("SELECT date FROM days WHERE user_id=$1 AND date=$2 FOR UPDATE", user_id, day)

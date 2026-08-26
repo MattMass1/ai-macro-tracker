@@ -717,6 +717,9 @@ async def test_parser_known_food_skips_lookup(monkeypatch):
 
     items, _, _ = await srv.parse_chat_message("a banana")
     assert captured["model"] == "gpt-5.6-luna"
+    assert captured["reasoning_effort"] == "none"
+    assert captured["max_completion_tokens"] == 1200
+    assert "max_tokens" not in captured
     assert captured["tools"][0]["function"]["name"] == "lookup_food"
     assert items[0]["sourced_from"] == "known"
 
@@ -1049,15 +1052,12 @@ async def test_food_path_derives_sources_from_exact_real_data_matches(monkeypatc
     response = await srv.api_chat(chat_request({"message": "a Barebells and a banana"}))
     assert response.status_code == 200
     assert lookup_queries == [("bareBELLS", False)]
-    assert seen == [
-        ("ESTIMATE", 200.0, 20.0, 21.0, 7.0, 0.0),
-        ("Known food: Banana", 210.0, 2.0, 54.0, 0.0, 6.0),
-        ("Known food: sweet potato", 172.0, 3.2, 40.2, 0.2, 6.0),
-        ("Known food: 93/7 ground beef", 340.0, 44.0, 0.0, 17.6, 0.0),
-        ("ESTIMATE", 200.0, 8.0, 24.0, 8.0, 1.0),
-        ("ESTIMATE", 200.0, 8.0, 24.0, 8.0, 1.0),
-        ("ESTIMATE", 300.0, 12.0, 30.0, 14.0, 1.0),
-    ]
+    assert len(seen) == 1
+    source, calories, protein, carbs, fat, fiber = seen[0]
+    assert source.startswith("Composite: ESTIMATE; Known food: Banana")
+    assert (calories, protein, carbs, fat, fiber) == (
+        1622.0, 97.2, 193.2, 54.8, 15.0
+    )
 
 
 async def test_food_path_weightless_preset_grams_use_cascade(monkeypatch):

@@ -27,6 +27,7 @@ def _schema(name: str, description: str, properties: dict[str, Any], required=()
 
 N = {"type": "number", "minimum": 0}
 S = {"type": "string"}
+MEAL_SLOT = {"type": "string", "enum": ["Breakfast", "Lunch", "Dinner", "Snack"]}
 MACROS = {key: N for key in ("calories", "protein", "carbs", "fat", "fiber")}
 TOOLS = [
     _schema("set_display_name", "Save what the user wants the coach to call them.", {"name": S}, ("name",)),
@@ -44,7 +45,7 @@ TOOLS = [
     _schema("get_day", "Read a specific day.", {"date": S}, ("date",)),
     _schema("get_range_summary", "Read macro totals over an inclusive range.", {"start": S, "end": S}, ("start", "end")),
     _schema("lookup_food", "Look up real macros for a food using OpenFoodFacts, then Tavily search. When a food is not a saved preset or known food and macros are needed, call this FIRST, then cite the returned source string as macro_source. Returns macros per 100 g when available; scale to the portion eaten.", {"query": S}, ("query",)),
-    _schema("log_meal", "Log food. Use a preset, known food, or lookup_food macros when available; otherwise log a clearly-flagged estimate with macro_source like 'ESTIMATE — 6 pieces sushi, typical values'. Never refuse or ask for a label — the user wants it logged.", {"name": S, "meal_type": S, **MACROS, "macro_source": S}, ("name", "meal_type", *MACROS, "macro_source")),
+    _schema("log_meal", "Log one nutrition entry. For one message listing foods eaten together, look up every component, sum all macros, preserve component quantities in the name, then call log_meal exactly once. Only make separate calls when explicitly requested or for distinct meal slots/dates. meal_type must be Breakfast, Lunch, Dinner, or Snack. Never refuse or ask for a label; use a clearly flagged ESTIMATE when lookup fails.", {"name": S, "meal_type": MEAL_SLOT, **MACROS, "macro_source": S}, ("name", "meal_type", *MACROS, "macro_source")),
     _schema("log_preset", "Log a saved preset.", {"preset_name": S, "servings": N, "meal": S}, ("preset_name", "servings", "meal")),
     _schema("save_preset", "Save a verified reusable meal preset. macro_source must cite where the macros came from (a nutrition label or lookup source); placeholders like 'estimate' are rejected.", {"values": {"type": "object"}, "macro_source": S}, ("values", "macro_source")),
     _schema("undo_last_meal", "Delete the most recent meal entry today.", {}),
@@ -73,7 +74,7 @@ def _load_persona() -> str:
         return SYSTEM_PROMPT
 
 
-SYSTEM_PROMPT = """You are Macro Coach, a concise, practical nutrition and strength coach with hands: use tools whenever reading or changing user data. Never claim a write succeeded unless its tool result says so. Prefer real macros: use a saved preset or known food when one matches; otherwise call lookup_food FIRST and use its macros, citing the returned source as macro_source. For common foods with standard portions (eggs, bread, fruit, rice, chicken, etc.), lookup_food will find them — use standard portion sizes (large egg = 50g, a slice of bread = 28-30g, a medium apple = 180g) when the user doesn't give a weight. When lookup_food finds nothing, log a clearly-flagged estimate (macro_source like 'ESTIMATE — typical serving'); never ask for a label and never refuse to log. Log the whole meal — do not log one item and leave the rest unlogged; when a message lists several foods, call lookup_food/log_meal for EACH.
+SYSTEM_PROMPT = """You are Macro Coach, a concise, practical nutrition and strength coach with hands: use tools whenever reading or changing user data. Never claim a write succeeded unless its tool result says so. Prefer real macros: use a saved preset or known food when one matches; otherwise call lookup_food FIRST and use its macros, citing the returned source as macro_source. For common foods with standard portions (eggs, bread, fruit, rice, chicken, etc.), lookup_food will find them — use standard portion sizes (large egg = 50g, a slice of bread = 28-30g, a medium apple = 180g) when the user doesn't give a weight. When lookup_food finds nothing, log a clearly-flagged estimate (macro_source like 'ESTIMATE — typical serving'); never ask for a label and never refuse to log. One message listing foods eaten together is one composite entry: look up each component, sum its macros, preserve all component quantities in the name, and call log_meal exactly once. Separate entries are allowed only when explicitly requested or when the user identifies distinct meal slots or dates. meal_type is only Breakfast, Lunch, Dinner, or Snack, never "meal".
 
 RULES (non-negotiable):
 - MAX 2 SENTENCES PER REPLY. One short message, then stop. No exceptions.

@@ -1,4 +1,4 @@
-"""Food lookups: OpenFoodFacts, then Tavily search.
+"""Food lookups: curated restaurants, OpenFoodFacts, then Tavily search.
 
 The cascade resolves unknown foods through free databases before any paid LLM
 path spends credits on lookup. Every call is read-only with a short
@@ -13,6 +13,8 @@ import re
 from typing import Any, Mapping
 
 import httpx
+
+from restaurant_menu import restaurant_lookup
 
 TIMEOUT = 5.0
 # OpenFoodFacts requires an identifying User-Agent; the default python-httpx
@@ -501,7 +503,10 @@ def _query_variants(query: str) -> list[str]:
 async def resolve_food(
     query: str, classify: bool = True, *, whole_item: bool = False
 ) -> dict[str, Any] | None:
-    """Resolve food with a classified first tier and a complete fallback cascade."""
+    """Resolve food with curated restaurants before the external cascade."""
+    curated = restaurant_lookup(query)
+    if curated is not None:
+        return curated
     searches = [search_openfoodfacts, search_tavily]
     if classify:
         try:

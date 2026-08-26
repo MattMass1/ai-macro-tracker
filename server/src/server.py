@@ -769,15 +769,6 @@ def _normalized_food_name(name: str) -> str:
     return " ".join(name.split()).casefold()
 
 
-# Restaurant orders the parser kept refusing (no database/label to "verify").
-# Base macros: calories/protein/carbs/fat. Keyed by lowercase trigger phrase.
-# RESTAURANT MEALS — always short-circuit (one meal; toppings can use 'and').
-_RESTAURANT_MEALS: dict[str, dict[str, float]] = {
-    "chipotle bowl": {"calories": 625, "protein": 75, "carbs": 45, "fat": 16},
-    "chipotle burrito": {"calories": 945, "protein": 83, "carbs": 100, "fat": 24},
-    "cfa lunch": {"calories": 710, "protein": 62, "carbs": 45, "fat": 31},
-    "chick-fil-a lunch": {"calories": 710, "protein": 62, "carbs": 45, "fat": 31},
-}
 # BRANDED ITEMS — short-circuit only when it's a single food (no 'and').
 _BRAND_ITEMS: dict[str, dict[str, float]] = {
     "barebells": {"calories": 200, "protein": 20, "carbs": 21, "fat": 7},
@@ -786,12 +777,11 @@ _BRAND_ITEMS: dict[str, dict[str, float]] = {
 
 
 def _short_circuit_known_food(message: str) -> dict[str, Any] | None:
-    """Deterministically match a restaurant meal or known brand to its base
-    macros. Returns a parser-style item dict, or None when nothing matches.
+    """Deterministically match a known brand to its base macros.
 
-    Restaurant meals always match (toppings may be joined by 'and'). Branded
-    items match only for single-food messages, so the parser handles mixed
-    meals like 'a Barebells and a banana'.
+    Branded items match only for single-food messages, so the parser handles
+    mixed meals like ``a Barebells and a banana``. Restaurant matches now live
+    in :mod:`restaurant_menu` and run at the start of the lookup cascade.
     """
     lowered = " ".join(message.split()).casefold()
 
@@ -810,10 +800,6 @@ def _short_circuit_known_food(message: str) -> dict[str, Any] | None:
             "meal": "Snack",
             "note": f"Known food: {name}",
         }
-
-    for phrase, macros in _RESTAURANT_MEALS.items():
-        if phrase in lowered:
-            return _item(phrase, macros)
 
     has_multi = re.search(r"\b(?:and|plus)\b", lowered) is not None
     if not has_multi:

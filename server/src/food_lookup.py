@@ -278,7 +278,7 @@ def is_whole_serving_query(query: str) -> bool:
 
 
 def _tavily_panels(text: str) -> list[tuple[float, dict[str, float]]] | None:
-    """Parse complete nutrient panels, keeping every value with its own basis."""
+    """Parse nutrient panels with calories required and missing macros zeroed."""
     cues = list(_TAVILY_BASIS.finditer(text))
     if not cues:
         return None
@@ -291,9 +291,12 @@ def _tavily_panels(text: str) -> list[tuple[float, dict[str, float]]] | None:
         end = cues[index + 1].start() if index + 1 < len(cues) else len(text)
         block = text[cue.end():end]
         values = {key: _nutrition_value(block, key) for key in MACRO_KEYS}
-        if any(value is None for value in values.values()):
+        if values["calories"] is None:
             return None
-        panels.append((weight, values))  # type: ignore[arg-type]
+        panels.append((weight, {
+            key: value if value is not None else 0.0
+            for key, value in values.items()
+        }))
     return panels
 
 
@@ -306,7 +309,7 @@ def _panels_agree(left: Mapping[str, float], right: Mapping[str, float]) -> bool
 
 
 def _us_serving_panel(text: str) -> tuple[str, float | None, dict[str, float]] | None:
-    """Parse a US single-column serving label and its following nutrient values."""
+    """Parse a serving panel with calories required and missing macros zeroed."""
     cue = _US_SERVING.search(text)
     if cue is None:
         return None
@@ -314,15 +317,19 @@ def _us_serving_panel(text: str) -> tuple[str, float | None, dict[str, float]] |
     next_basis = _TAVILY_BASIS.search(text, cue.end())
     block = text[cue.end():next_basis.start() if next_basis else len(text)]
     values = {key: _nutrition_value(block, key) for key in MACRO_KEYS}
-    if any(value is None for value in values.values()):
+    if values["calories"] is None:
         return None
+    complete_values = {
+        key: value if value is not None else 0.0
+        for key, value in values.items()
+    }
     weights = _GRAM_WEIGHT.findall(serving)
     if len(weights) > 1:
         return None
     weight = float(weights[0]) if weights else None
     if weight is not None and not 0 < weight <= 5000:
         return None
-    return serving, weight, values  # type: ignore[return-value]
+    return serving, weight, complete_values
 
 
 def _tavily_result(query: str, result: Mapping[str, Any]) -> dict[str, Any] | None:

@@ -433,6 +433,34 @@ def test_tavily_per_100g_panel_is_accepted_as_is():
     }
 
 
+def test_tavily_partial_weighted_panel_zeroes_missing_macros():
+    result = food_lookup._tavily_result("Egg White Grill", {
+        "title": "Egg White Grill Nutrition",
+        "url": "https://example.com/egg-white-grill",
+        "content": "Per 100g: Calories 300, Protein 27g.",
+    })
+
+    assert result is not None
+    assert result["macros_per_100g"] == {
+        "calories": 300.0, "protein": 27.0, "carbs": 0.0,
+        "fat": 0.0, "fiber": 0.0,
+    }
+
+
+def test_tavily_partial_serving_panel_zeroes_missing_macros():
+    result = food_lookup._tavily_result("Egg White Grill", {
+        "title": "Egg White Grill Nutrition",
+        "url": "https://example.com/egg-white-grill",
+        "content": "Serving size 1 sandwich, Calories 300, Protein 27g.",
+    })
+
+    assert result is not None
+    assert result["macros_per_serving"] == {
+        "calories": 300.0, "protein": 27.0, "carbs": 0.0,
+        "fat": 0.0, "fiber": 0.0,
+    }
+
+
 def test_tavily_ambiguous_panel_without_basis_returns_none():
     assert food_lookup._tavily_result("Niche Cafe Bowl", {
         "title": "Niche Cafe Bowl nutrition",

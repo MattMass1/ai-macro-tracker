@@ -784,7 +784,7 @@ async def test_coach_lookup_food_tool_returns_hit_and_not_found(monkeypatch):
 
 
 async def test_food_path_does_not_repeat_parser_lookup(monkeypatch):
-    fake = FakeStore()
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
     monkeypatch.setattr(srv, "_client", fake)
     seen = {}
 
@@ -823,7 +823,7 @@ async def test_food_path_does_not_repeat_parser_lookup(monkeypatch):
 
 
 async def test_food_path_gram_portion_takes_precedence_over_quantity(monkeypatch):
-    fake = FakeStore()
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
     monkeypatch.setattr(srv, "_client", fake)
     seen = {}
 
@@ -861,7 +861,7 @@ async def test_food_path_gram_portion_takes_precedence_over_quantity(monkeypatch
 
 
 async def test_food_path_labels_unsourced_lookup_miss_as_estimate(monkeypatch):
-    fake = FakeStore()
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
     monkeypatch.setattr(srv, "_client", fake)
     seen = {}
     lookups = []
@@ -907,7 +907,7 @@ async def test_food_path_labels_unsourced_lookup_miss_as_estimate(monkeypatch):
 
 
 async def test_food_path_upgrades_whole_item_from_serving_panel(monkeypatch):
-    fake = FakeStore()
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
     monkeypatch.setattr(srv, "_client", fake)
     seen = {}
     lookup_queries = []
@@ -995,7 +995,7 @@ async def test_whole_item_per_100g_only_keeps_flagged_estimate(monkeypatch):
 
 
 async def test_food_path_derives_sources_from_exact_real_data_matches(monkeypatch):
-    fake = FakeStore()
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
     monkeypatch.setattr(srv, "_client", fake)
     seen = []
 
@@ -1061,7 +1061,9 @@ async def test_food_path_derives_sources_from_exact_real_data_matches(monkeypatc
 
 
 async def test_food_path_weightless_preset_grams_use_cascade(monkeypatch):
-    monkeypatch.setattr(srv, "_client", FakeStore())
+    monkeypatch.setattr(
+        srv, "_client", FakeStore(plan={"version": 1}, has_targets=True)
+    )
     seen = {}
 
     async def fake_parse(_message):
@@ -1407,7 +1409,9 @@ async def test_parser_question_without_question_mark_is_not_forced(
 
 
 async def test_food_path_zero_macro_item_is_rescued_by_lookup(monkeypatch):
-    monkeypatch.setattr(srv, "_client", FakeStore())
+    monkeypatch.setattr(
+        srv, "_client", FakeStore(plan={"version": 1}, has_targets=True)
+    )
     seen = {}
 
     async def fake_parse(_message):
@@ -1448,7 +1452,9 @@ async def test_food_path_zero_macro_item_is_rescued_by_lookup(monkeypatch):
 
 
 async def test_food_path_zero_macro_item_without_lookup_gets_default_estimate(monkeypatch):
-    monkeypatch.setattr(srv, "_client", FakeStore())
+    monkeypatch.setattr(
+        srv, "_client", FakeStore(plan={"version": 1}, has_targets=True)
+    )
     seen = {}
 
     async def fake_parse(_message):
@@ -1483,7 +1489,9 @@ async def test_food_path_zero_macro_item_without_lookup_gets_default_estimate(mo
 
 
 async def test_food_path_zero_calorie_foods_keep_their_zeros(monkeypatch):
-    monkeypatch.setattr(srv, "_client", FakeStore())
+    monkeypatch.setattr(
+        srv, "_client", FakeStore(plan={"version": 1}, has_targets=True)
+    )
     seen = {}
 
     async def fake_parse(_message):

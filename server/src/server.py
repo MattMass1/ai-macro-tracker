@@ -2535,7 +2535,12 @@ async def api_chat(request: Request) -> Any:
     if validated_metrics is not None:
         await client.put_metrics(validated_metrics)
 
-    if structured_metrics is not None:
+    plan, has_targets, display_name = await asyncio.gather(
+        client.fetch_workout_plan(), client.has_macro_targets(), client.get_display_name()
+    )
+    onboarding = plan is None or not has_targets
+
+    if structured_metrics is not None or onboarding:
         raw_items = []
     else:
         # ── Deterministic restaurant-order short-circuit (before the LLM) ──
@@ -2682,10 +2687,6 @@ async def api_chat(request: Request) -> Any:
                 pass  # The food-path error is the one worth surfacing.
             raise
 
-    plan, has_targets, display_name = await asyncio.gather(
-        client.fetch_workout_plan(), client.has_macro_targets(), client.get_display_name()
-    )
-    onboarding = plan is None or not has_targets
     async def record_usage(usage: Mapping[str, Any]) -> None:
         await client.insert_coach_usage(
             str(usage["model"]), int(usage["input_tokens"]), int(usage["output_tokens"])

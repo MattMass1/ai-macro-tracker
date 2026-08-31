@@ -609,6 +609,64 @@ async def test_gym_chat_uses_coach_and_reports_onboarding(monkeypatch):
     assert fake.usage == [("gpt-5.6-luna", 10, 5)]
 
 
+async def test_chat_reports_plan_and_targets_created_by_agent_in_same_response(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+
+    async def fake_run_agent(**kwargs):
+        assert kwargs["onboarding"] is True
+        fake.plan = {"version": 1}
+        fake.targets = True
+        return "You're all set.", []
+
+    async def fake_day_payload(_day):
+        return {"totals": {"calories": 0}}
+
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+
+    response = await srv.api_chat(chat_request({"message": "Finish my setup"}))
+
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert payload["has_plan"] is True
+    assert payload["has_targets"] is True
+
+
+async def test_fresh_account_name_bypasses_food_parser_and_starts_intake(monkeypatch):
+    fake = FakeStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    seen = {}
+
+    async def unexpected_parse(_message):
+        pytest.fail("onboarding turns must bypass the food parser")
+
+    async def unexpected_insert_meal(**_kwargs):
+        pytest.fail("onboarding turns must not persist parser meals")
+
+    async def fake_run_agent(**kwargs):
+        seen.update(kwargs)
+        return "Nice to meet you, Jack. What are your goals?", []
+
+    async def fake_day_payload(_day):
+        return {"totals": {"calories": 0}}
+
+    monkeypatch.setattr(srv, "parse_chat_message", unexpected_parse)
+    monkeypatch.setattr(srv, "run_agent", fake_run_agent)
+    monkeypatch.setattr(srv, "day_payload", fake_day_payload)
+    fake.insert_meal = unexpected_insert_meal
+
+    response = await srv.api_chat(chat_request({"message": "Jack"}))
+
+    assert response.status_code == 200
+    assert seen["message"] == "Jack"
+    assert seen["onboarding"] is True
+    assert json.loads(response.body)["reply"] == (
+        "Nice to meet you, Jack. What are your goals?"
+    )
+    assert not hasattr(fake, "meals")
+
+
 async def test_chat_history_is_current_coaching_day_only_and_onboarding_persists(monkeypatch):
     day_start, _ = domain.effective_day_window()
     fake = FakeStore(
@@ -709,7 +767,7 @@ async def test_chat_failure_persists_user_and_synthetic_assistant(monkeypatch):
 async def test_every_message_routes_to_coach_without_parser(monkeypatch):
     """Split models (Matt's call): NON-food messages reach the coach; the
     parser fast-path only handles food and is not invoked for coaching."""
-    fake = FakeStore()
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
     monkeypatch.setattr(srv, "_client", fake)
     seen = {}
 
@@ -760,7 +818,7 @@ async def test_coach_error_keeps_friendly_fallback_without_parser(monkeypatch):
 async def test_food_message_goes_through_parser_not_coach(monkeypatch):
     """Split models (Matt's call): a food message goes to the gpt-4o-mini
     parser fast-path; the coach loop must not run for food."""
-    fake = FakeStore()
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
     monkeypatch.setattr(srv, "_client", fake)
     seen = {}
 
@@ -791,7 +849,7 @@ async def test_food_message_goes_through_parser_not_coach(monkeypatch):
 
 def _fast_path_env(monkeypatch, items):
     """Wire the food fast-path with a canned parser result; return the writes."""
-    fake = FakeStore()
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
     monkeypatch.setattr(srv, "_client", fake)
     written = []
 

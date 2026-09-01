@@ -39,6 +39,18 @@ struct SectionLabel: View {
     }
 }
 
+struct FatSecretAttribution: View {
+    var body: some View {
+        if let destination = URL(string: "https://platform.fatsecret.com") {
+            Link("Powered by fatsecret Platform API", destination: destination)
+                .font(.caption2)
+                .foregroundStyle(Theme.muted)
+                .underline(color: Theme.muted.opacity(0.5))
+                .accessibilityHint("Opens the fatsecret Platform website")
+        }
+    }
+}
+
 struct EmptyState: View {
     let icon: String
     let title: String

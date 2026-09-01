@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 
+import FatSecretAttribution from "@/components/FatSecretAttribution";
+
 /** Passcode screen. A lock on a personal app — one code, no accounts. */
 export default function LockPage() {
   const [passcode, setPasscode] = useState("");
@@ -66,6 +68,10 @@ export default function LockPage() {
           </p>
         )}
       </form>
+
+      <div className="text-center text-[0.65rem] text-muted underline decoration-muted/50 underline-offset-2">
+        <FatSecretAttribution />
+      </div>
     </main>
   );
 }

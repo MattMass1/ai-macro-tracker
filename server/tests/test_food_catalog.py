@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from uuid import uuid4
 
 import pytest
+import httpx
 
 import food_lookup
 import migrations
@@ -84,6 +85,165 @@ async def test_fatsecret_requires_credentials_and_explicit_attribution_gate(monk
     assert calls == []
 
 
+def test_fatsecret_oauth1_signing_is_deterministic_and_rfc3986_encoded():
+    form = food_lookup._fatsecret_oauth1_data(
+        {"method": "foods.search", "search_expression": "fish & chips", "max_results": 5},
+        "consumer key", "secret/value", nonce="fixed-nonce", timestamp=1700000000,
+    )
+    assert form["oauth_consumer_key"] == "consumer key"
+    assert form["oauth_nonce"] == "fixed-nonce"
+    assert form["oauth_signature_method"] == "HMAC-SHA1"
+    assert form["oauth_timestamp"] == "1700000000"
+    assert form["oauth_version"] == "1.0"
+    assert form["oauth_signature"] == "wGObnUqO+b3lEmVrhkD5s5uqEIg="
+
+
+@pytest.mark.parametrize(
+    ("consumer_key", "consumer_secret", "client_id", "client_secret", "expected"),
+    [
+        ("key", "secret", "id", "client-secret", "oauth1"),
+        ("key", "secret", "", "", "oauth1"),
+        ("", "", "id", "client-secret", "oauth2"),
+        ("key", "", "", "", None),
+        ("", "secret", "", "", None),
+        ("", "", "id", "", None),
+        ("", "", "", "client-secret", None),
+    ],
+)
+def test_fatsecret_provider_selection_rejects_partial_pairs(
+    monkeypatch, consumer_key, consumer_secret, client_id, client_secret, expected,
+):
+    monkeypatch.setenv("FATSECRET_ATTRIBUTION_ENABLED", "true")
+    monkeypatch.setenv("FATSECRET_CONSUMER_KEY", consumer_key)
+    monkeypatch.setenv("FATSECRET_CONSUMER_SECRET", consumer_secret)
+    monkeypatch.setenv("FATSECRET_CLIENT_ID", client_id)
+    monkeypatch.setenv("FATSECRET_CLIENT_SECRET", client_secret)
+    assert food_lookup._fatsecret_provider_mode() == expected
+
+
+async def test_fatsecret_oauth1_request_is_preferred_without_token_call(monkeypatch):
+    calls = []
+
+    class Response:
+        def json(self): return {"ok": True}
+
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+
+    async def request(_client, method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return Response()
+
+    async def unexpected_token(*_args):
+        pytest.fail("OAuth2 token endpoint must not run when OAuth1 is configured")
+
+    monkeypatch.setenv("FATSECRET_ATTRIBUTION_ENABLED", "true")
+    monkeypatch.setenv("FATSECRET_CONSUMER_KEY", "consumer")
+    monkeypatch.setenv("FATSECRET_CONSUMER_SECRET", "consumer-secret")
+    monkeypatch.setenv("FATSECRET_CLIENT_ID", "premier")
+    monkeypatch.setenv("FATSECRET_CLIENT_SECRET", "premier-secret")
+    monkeypatch.setattr(food_lookup, "_client", Client)
+    monkeypatch.setattr(food_lookup, "_request_with_backoff", request)
+    monkeypatch.setattr(food_lookup, "_fatsecret_token", unexpected_token)
+
+    assert await food_lookup._fatsecret_request({"method": "foods.search"}) == {"ok": True}
+    method, url, kwargs = calls[0]
+    assert (method, url) == ("POST", food_lookup.FATSECRET_API_URL)
+    form = kwargs["request_kwargs_factory"]()["data"]
+    assert form["oauth_consumer_key"] == "consumer"
+    assert "Authorization" not in kwargs.get("headers", {})
+
+
+async def test_fatsecret_oauth1_retry_regenerates_nonce_and_signature(monkeypatch):
+    attempts = []
+    nonces = iter(("nonce-one", "nonce-two"))
+
+    class Response:
+        def __init__(self, status_code):
+            self.status_code = status_code
+            self.headers = {}
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError(
+                    "provider error", request=httpx.Request("POST", food_lookup.FATSECRET_API_URL),
+                    response=httpx.Response(self.status_code),
+                )
+
+        def json(self): return {"ok": True}
+
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+        async def request(self, _method, _url, **kwargs):
+            attempts.append(kwargs["data"])
+            return Response(500 if len(attempts) == 1 else 200)
+
+    async def no_sleep(_delay): return None
+
+    monkeypatch.setenv("FATSECRET_ATTRIBUTION_ENABLED", "true")
+    monkeypatch.setenv("FATSECRET_CONSUMER_KEY", "consumer")
+    monkeypatch.setenv("FATSECRET_CONSUMER_SECRET", "consumer-secret")
+    monkeypatch.setattr(food_lookup, "_client", Client)
+    monkeypatch.setattr(food_lookup.secrets, "token_hex", lambda _size: next(nonces))
+    monkeypatch.setattr(food_lookup.asyncio, "sleep", no_sleep)
+
+    assert await food_lookup._fatsecret_request({"method": "foods.search"}) == {"ok": True}
+    assert [form["oauth_nonce"] for form in attempts] == ["nonce-one", "nonce-two"]
+    assert attempts[0]["oauth_signature"] != attempts[1]["oauth_signature"]
+
+
+async def test_fatsecret_oauth1_non_retryable_4xx_makes_one_attempt(monkeypatch):
+    attempts = []
+
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+        async def request(self, method, url, **kwargs):
+            attempts.append(kwargs["data"])
+            return httpx.Response(400, request=httpx.Request(method, url))
+
+    monkeypatch.setenv("FATSECRET_ATTRIBUTION_ENABLED", "true")
+    monkeypatch.setenv("FATSECRET_CONSUMER_KEY", "consumer")
+    monkeypatch.setenv("FATSECRET_CONSUMER_SECRET", "consumer-secret")
+    monkeypatch.setattr(food_lookup, "_client", Client)
+
+    assert await food_lookup._fatsecret_request({"method": "foods.search"}) is None
+    assert len(attempts) == 1
+
+
+async def test_fatsecret_oauth2_fallback_uses_bearer_token(monkeypatch):
+    calls = []
+
+    class Response:
+        def json(self): return {"ok": True}
+
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+
+    async def token(_client, client_id, secret):
+        assert (client_id, secret) == ("premier", "premier-secret")
+        return "test-token"
+
+    async def request(_client, method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return Response()
+
+    monkeypatch.setenv("FATSECRET_ATTRIBUTION_ENABLED", "true")
+    monkeypatch.delenv("FATSECRET_CONSUMER_KEY", raising=False)
+    monkeypatch.delenv("FATSECRET_CONSUMER_SECRET", raising=False)
+    monkeypatch.setenv("FATSECRET_CLIENT_ID", "premier")
+    monkeypatch.setenv("FATSECRET_CLIENT_SECRET", "premier-secret")
+    monkeypatch.setattr(food_lookup, "_client", Client)
+    monkeypatch.setattr(food_lookup, "_fatsecret_token", token)
+    monkeypatch.setattr(food_lookup, "_request_with_backoff", request)
+
+    assert await food_lookup._fatsecret_request({"method": "foods.search"}) == {"ok": True}
+    assert calls[0][2]["headers"] == {"Authorization": "Bearer test-token"}
+
+
 def test_schema_and_catalog_queries_accept_internal_curated_without_calling_it_official():
     migration = (Path(__file__).parents[1] / "migrations" / "001_food_catalog.sql").read_text()
     store_source = (Path(__file__).parents[1] / "src" / "store.py").read_text()
@@ -96,6 +256,8 @@ def test_fatsecret_attribution_gate_defaults_false_in_deployment_examples():
     assert "FATSECRET_ATTRIBUTION_ENABLED=false" in (server / ".env.example").read_text()
     render = (server / "render.yaml").read_text()
     assert "key: FATSECRET_ATTRIBUTION_ENABLED\n        value: \"false\"" in render
+    assert "FATSECRET_CONSUMER_KEY=" in (server / ".env.example").read_text()
+    assert "key: FATSECRET_CONSUMER_KEY\n        sync: false" in render
 
 
 async def test_catalog_is_first_and_provider_errors_are_isolated(monkeypatch):

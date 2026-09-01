@@ -19,6 +19,10 @@ services:
         generateValue: true
       - key: OPENAI_ACCESS_TOKEN
         sync: false
+      - key: FATSECRET_CONSUMER_KEY
+        sync: false
+      - key: FATSECRET_CONSUMER_SECRET
+        sync: false
       - key: FATSECRET_CLIENT_ID
         sync: false
       - key: FATSECRET_CLIENT_SECRET

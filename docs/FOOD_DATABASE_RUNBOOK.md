@@ -4,6 +4,18 @@ This change is additive. It does not delete or rewrite legacy nutrition values o
 `macro_source` text. Run these commands only against an approved restored or
 throwaway database before any reviewed deployment.
 
+Keep FatSecret credentials and provider enablement off until the required
+attribution surfaces are deployed. If the app is published in the Apple App
+Store or Google Play, its listing description must include the exact phrase
+`Powered by fatsecret nutrition API` (`www.fatsecret.com`).
+
+On Render, FatSecret Basic uses OAuth 1.0 signed requests because Basic OAuth2
+requires individual IP allowlisting while Render egress uses a CIDR pool. Set
+both `FATSECRET_CONSUMER_KEY` and `FATSECRET_CONSUMER_SECRET`; the existing
+Premier `FATSECRET_CLIENT_ID` and `FATSECRET_CLIENT_SECRET` pair remains an
+OAuth2 fallback. Either path also requires `FATSECRET_ATTRIBUTION_ENABLED=true`.
+FatSecret caching remains disabled (`FATSECRET_CACHE_ALLOWED=false`).
+
 Use the restored database URL explicitly in every command and save each output
 as release evidence. Do not run these commands against production during review.
 

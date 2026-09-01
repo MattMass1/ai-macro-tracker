@@ -58,6 +58,7 @@ struct PasscodeView: View {
                 if auth.hasPasscode {
                     Button("Unlock with Face ID", systemImage: "faceid") { Task { await auth.unlockWithBiometrics() } }.frame(maxWidth: .infinity)
                 }
+                FatSecretAttribution().frame(maxWidth: .infinity)
                 Spacer().frame(height: 36)
             }.padding(24)
         }.onAppear { focused = true; if auth.hasPasscode { Task { await auth.unlockWithBiometrics() } } }

@@ -6,6 +6,7 @@ import useSWR from "swr";
 import DailyBrief from "@/components/DailyBrief";
 import ChatLog from "@/components/ChatLog";
 import DayHeader from "@/components/DayHeader";
+import FatSecretAttribution from "@/components/FatSecretAttribution";
 import MacroRings from "@/components/MacroRings";
 import MealList from "@/components/MealList";
 import PresetGrid from "@/components/PresetGrid";
@@ -369,6 +370,10 @@ export default function TodayPage() {
             pending={pendingMeals}
             onDelete={deleteMeal}
           />
+
+          <div className="self-center text-[0.65rem] text-muted underline decoration-muted/50 underline-offset-2">
+            <FatSecretAttribution />
+          </div>
 
           <p className="pt-2 text-center text-[0.7rem] text-muted">
             Day rolls over at 4am. Use Chat &amp; Log for anything that isn&rsquo;t a preset.

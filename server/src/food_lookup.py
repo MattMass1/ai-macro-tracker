@@ -1,8 +1,9 @@
 """Catalog, curated menu, FatSecret, and OpenFoodFacts food lookup."""
 from __future__ import annotations
 
-import asyncio, base64, hashlib, json, math, os, re, time
-from typing import Any, Mapping
+import asyncio, base64, hashlib, hmac, json, math, os, re, secrets, time
+from typing import Any, Callable, Mapping
+from urllib.parse import quote
 import httpx
 from food_catalog import normalize_food_name
 from restaurant_menu import restaurant_lookup
@@ -23,15 +24,62 @@ _OFF_SERVING = {"energy-kcal_serving":"calories", "proteins_serving":"protein",
 _TOKEN: tuple[str, float, str, str] | None = None
 
 
+def _rfc3986(value: Any) -> str:
+    """Percent-encode an OAuth value according to RFC 3986."""
+    return quote(str(value), safe="~-._")
+
+
+def _fatsecret_provider_mode() -> str | None:
+    """Return the configured FatSecret auth mode, preferring Basic OAuth1."""
+    if os.environ.get("FATSECRET_ATTRIBUTION_ENABLED", "false").strip().casefold() != "true":
+        return None
+    consumer = tuple(os.environ.get(key, "").strip() for key in
+        ("FATSECRET_CONSUMER_KEY", "FATSECRET_CONSUMER_SECRET"))
+    premier = tuple(os.environ.get(key, "").strip() for key in
+        ("FATSECRET_CLIENT_ID", "FATSECRET_CLIENT_SECRET"))
+    if all(consumer):
+        return "oauth1"
+    if all(premier):
+        return "oauth2"
+    return None
+
+
+def _fatsecret_oauth1_data(
+    data: Mapping[str, Any], consumer_key: str, consumer_secret: str, *,
+    nonce: str | None = None, timestamp: int | None = None,
+) -> dict[str, str]:
+    """Build a signed OAuth 1.0 POST form for the FatSecret REST endpoint."""
+    parameters = {str(key): str(value) for key, value in data.items()}
+    parameters.update({
+        "format": "json",
+        "oauth_consumer_key": consumer_key,
+        "oauth_nonce": nonce or secrets.token_hex(16),
+        "oauth_signature_method": "HMAC-SHA1",
+        "oauth_timestamp": str(int(time.time()) if timestamp is None else timestamp),
+        "oauth_version": "1.0",
+    })
+    encoded = sorted((_rfc3986(key), _rfc3986(value)) for key, value in parameters.items())
+    normalized = "&".join(f"{key}={value}" for key, value in encoded)
+    signature_base = "&".join(("POST", _rfc3986(FATSECRET_API_URL), _rfc3986(normalized)))
+    signing_key = f"{_rfc3986(consumer_secret)}&"
+    digest = hmac.new(signing_key.encode(), signature_base.encode(), hashlib.sha1).digest()
+    parameters["oauth_signature"] = base64.b64encode(digest).decode()
+    return parameters
+
+
 def _client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=httpx.Timeout(TIMEOUT), headers={"User-Agent": USER_AGENT})
 
 
-async def _request_with_backoff(client, method: str, url: str, **kwargs):
+async def _request_with_backoff(
+    client, method: str, url: str, *,
+    request_kwargs_factory: Callable[[], dict[str, Any]] | None = None, **kwargs,
+):
     """Retry only transport, 429, and 5xx failures with bounded sleeps."""
     for attempt in range(3):
         try:
-            response = await client.request(method, url, **kwargs)
+            attempt_kwargs = request_kwargs_factory() if request_kwargs_factory else kwargs
+            response = await client.request(method, url, **attempt_kwargs)
             if response.status_code != 429 and response.status_code < 500:
                 response.raise_for_status(); return response
         except (httpx.TransportError, httpx.TimeoutException):
@@ -64,15 +112,23 @@ async def _fatsecret_token(client, client_id: str, secret: str) -> str:
 
 
 async def _fatsecret_request(data: dict[str, Any]) -> Any:
-    client_id, secret = (os.environ.get(key, "").strip() for key in
-        ("FATSECRET_CLIENT_ID", "FATSECRET_CLIENT_SECRET"))
-    attribution_enabled = os.environ.get("FATSECRET_ATTRIBUTION_ENABLED", "false").strip().casefold() == "true"
-    if not client_id or not secret or not attribution_enabled: return None
+    mode = _fatsecret_provider_mode()
+    if mode is None: return None
     try:
         async with _client() as client:
-            token = await _fatsecret_token(client, client_id, secret)
-            response = await _request_with_backoff(client, "POST", FATSECRET_API_URL,
-                data={**data, "format":"json"}, headers={"Authorization": f"Bearer {token}"})
+            if mode == "oauth1":
+                consumer_key, consumer_secret = (os.environ[key].strip() for key in
+                    ("FATSECRET_CONSUMER_KEY", "FATSECRET_CONSUMER_SECRET"))
+                response = await _request_with_backoff(
+                    client, "POST", FATSECRET_API_URL,
+                    request_kwargs_factory=lambda: {"data": _fatsecret_oauth1_data(
+                        data, consumer_key, consumer_secret)})
+            else:
+                client_id, secret = (os.environ[key].strip() for key in
+                    ("FATSECRET_CLIENT_ID", "FATSECRET_CLIENT_SECRET"))
+                token = await _fatsecret_token(client, client_id, secret)
+                response = await _request_with_backoff(client, "POST", FATSECRET_API_URL,
+                    data={**data, "format":"json"}, headers={"Authorization": f"Bearer {token}"})
             return response.json()
     except (httpx.HTTPError, KeyError, TypeError, ValueError):
         return None
@@ -233,11 +289,7 @@ async def resolve_food(query: str, classify: bool = True, *, whole_item: bool = 
         except Exception: pass
     curated = restaurant_lookup(query)
     if curated: return curated
-    fatsecret_enabled = (
-        os.environ.get("FATSECRET_CLIENT_ID", "").strip()
-        and os.environ.get("FATSECRET_CLIENT_SECRET", "").strip()
-        and os.environ.get("FATSECRET_ATTRIBUTION_ENABLED", "false").strip().casefold() == "true"
-    )
+    fatsecret_enabled = _fatsecret_provider_mode() is not None
     providers = [search_fatsecret, search_openfoodfacts] if fatsecret_enabled else [search_openfoodfacts]
     for variant in _query_variants(query):
         for provider in providers:

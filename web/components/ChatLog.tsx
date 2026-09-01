@@ -2,6 +2,7 @@
 
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 
+import FatSecretAttribution from "@/components/FatSecretAttribution";
 import type { ChatPayload, VisionPayload } from "@/lib/types";
 
 type ChatMessage = { id: number; role: "user" | "assistant"; text: string };
@@ -282,6 +283,10 @@ export default function ChatLog({ onLogged }: { onLogged: () => void | Promise<v
                 </div>
               )}
               <div ref={endRef} />
+            </div>
+
+            <div className="mb-2 self-center text-[0.65rem] text-muted underline decoration-muted/50 underline-offset-2">
+              <FatSecretAttribution />
             </div>
 
             <form onSubmit={send} className="flex gap-2 border-t border-line pt-3">

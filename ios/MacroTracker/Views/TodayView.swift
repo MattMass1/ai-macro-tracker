@@ -17,6 +17,7 @@ struct TodayView: View {
                     else if let day = store.day {
                         MacroRingsView(totals: day.totals, targets: day.targets, remaining: day.remaining)
                         MealListView(meals: day.meals, onDelete: { id in Task { await store.deleteMeal(id) } }, onAdd: { selectedTab = 1 })
+                        FatSecretAttribution().frame(maxWidth: .infinity)
                         if let warning = day.warning { Label(warning, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(Theme.calories).appCard() }
                         BriefCard(text: $note) { Task { await persistCurrentNote() } }
                         PresetGridView(presets: store.presets) { preset in Task { await store.logPreset(preset) } }

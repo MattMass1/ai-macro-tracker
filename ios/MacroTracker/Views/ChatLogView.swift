@@ -39,6 +39,7 @@ struct ChatLogView: View {
                         }.padding(16)
                     }.onChange(of: messages.count) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
                 }
+                FatSecretAttribution().padding(.vertical, 6)
                 composer
             }
         }

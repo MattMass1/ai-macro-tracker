@@ -863,7 +863,8 @@ def _fast_path_env(monkeypatch, items):
         return {"totals": {"calories": 0}, "targets": {"calories": 2000}}
 
     async def fake_write_meal(name, calories, protein, carbs, fat, source,
-                              meal, _day, allow_estimate=False, fiber=0):
+                              meal, _day, allow_estimate=False, fiber=0,
+                              component_metadata=None):
         written.append({"name": name, "calories": calories, "protein": protein,
                         "carbs": carbs, "fat": fat, "fiber": fiber,
                         "source": source, "meal": meal})
@@ -989,7 +990,7 @@ async def test_parser_failure_batches_coach_component_calls(monkeypatch):
         return "Logged your meal.", audit
 
     async def fake_write(name, calories, protein, carbs, fat, source, meal,
-                         day, allow_estimate=False, fiber=0):
+                         day, allow_estimate=False, fiber=0, component_metadata=None):
         writes.append({"name": name, "calories": calories, "protein": protein,
                        "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal})
         return {"logged": writes[-1]}
@@ -1237,6 +1238,7 @@ def test_incidental_breakfast_does_not_split_lunch_composite():
     composite = srv._composite_meal(message, rows)
     assert composite["meal"] == "Lunch"
     assert composite["name"] == "chicken and rice"
+    assert [item["name"] for item in composite["component_metadata"]] == ["chicken", "rice"]
 
 
 def test_chat_quota_window_rolls_at_4am_not_midnight():
@@ -1284,26 +1286,33 @@ async def test_store_fetch_chat_messages_since_excludes_prior_day():
     assert pool.args == (user_id, day_start, 20)
 
 
-async def test_store_connect_applies_schema_before_first_query(monkeypatch):
-    """Deploys run no migration step: connect() must apply schema.sql so a
-    table added by a release (coach_usage, session_day_state) exists on live
-    before the first query can 500 with UndefinedTableError."""
-    executed = []
+async def test_store_connect_verifies_migrations_without_schema_writes(monkeypatch):
+    """Normal request startup checks compatibility but never reapplies schema.sql."""
+    checked = []
 
     class SchemaPool:
-        async def execute(self, sql, *args):
-            executed.append(sql)
+        def acquire(self):
+            return self
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return None
+        async def close(self):
+            return None
 
     async def fake_create_pool(url, min_size, max_size):
         return SchemaPool()
 
     monkeypatch.setattr("store.asyncpg.create_pool", fake_create_pool)
+    async def compatible(_conn):
+        checked.append(True)
+        return {"compatible": True, "pending": [], "drift": [], "unknown": []}
+    monkeypatch.setattr("store.migration_status", compatible)
     store = Store("postgresql://unused/unused")
 
     pool = await store.connect()
-    assert "CREATE TABLE IF NOT EXISTS session_day_state" in executed[0]
-    assert await store.connect() is pool  # pool caches; schema applies once
-    assert len(executed) == 1
+    assert await store.connect() is pool
+    assert checked == [True]
 
 
 async def test_store_meal_batch_rolls_back_when_second_insert_fails():
@@ -1434,7 +1443,8 @@ async def test_coach_logs_food_through_lookup_and_meal_tools(monkeypatch):
         return FOOD_HIT
 
     async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
-                              meal, day_value, allow_estimate=False, fiber=0):
+                              meal, day_value, allow_estimate=False, fiber=0,
+                              component_metadata=None):
         written.update(name=name, macro_source=macro_source,
                        allow_estimate=allow_estimate, meal=meal)
         return {"logged": {"name": name, "calories": calories}}

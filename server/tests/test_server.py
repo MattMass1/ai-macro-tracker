@@ -80,7 +80,8 @@ class FakeStore:
         return dict(TARGETS_ROW)
 
     async def insert_meal(
-        self, *, name, meal, calories, protein, carbs, fat, fiber, day, macro_source
+        self, *, name, meal, calories, protein, carbs, fat, fiber, day, macro_source,
+        component_metadata=None
     ):
         row = {
             **meal_row(
@@ -121,6 +122,22 @@ def barcode_request(payload, token="device-token"):
         "path": "/api/food/barcode",
         "headers": [(b"authorization", f"Bearer {token}".encode())],
     }, receive)
+
+
+def log_request(payload, token="device-token", idempotency_key=None):
+    request = barcode_request(payload, token)
+    headers = list(request.scope["headers"])
+    if idempotency_key is not None:
+        headers.append((b"idempotency-key", idempotency_key.encode()))
+    request.scope["path"] = "/api/log"
+    request.scope["headers"] = headers
+    return request
+
+
+def get_request(path, token=None):
+    headers = [] if token is None else [(b"authorization", f"Bearer {token}".encode())]
+    return Request({"type":"http", "method":"GET", "path":path,
+                    "headers":headers, "query_string":b""})
 
 
 @pytest.fixture
@@ -218,6 +235,8 @@ async def test_barcode_route_returns_product_and_404(monkeypatch, lagging):
             "serving_size": "1 bar (55 g)",
             "macros_per_serving": {"calories": 200.0, "protein": 20.0,
                                    "carbs": 18.0, "fat": 8.0, "fiber": 3.0},
+            "attribution": {"provider":"OpenFoodFacts", "license":"ODbL",
+                            "attribution_text":"Data from OpenFoodFacts"},
         }
 
     monkeypatch.setattr(srv.food_lookup, "resolve_by_barcode", hit)
@@ -227,6 +246,7 @@ async def test_barcode_route_returns_product_and_404(monkeypatch, lagging):
     assert payload["calories"] == 364.0
     assert payload["serving_size"] == "1 bar (55 g)"
     assert payload["macros_per_serving"]["calories"] == 200.0
+    assert payload["attribution"]["license"] == "ODbL"
 
     async def miss(_code):
         return None
@@ -245,6 +265,51 @@ async def test_barcode_route_rejects_invalid_code(monkeypatch, lagging):
     response = await srv.api_food_barcode(barcode_request({"code": "ABC-123"}))
     assert response.status_code == 400
     assert json.loads(response.body) == {"error": "code must contain 8 to 14 digits"}
+
+
+async def test_readiness_is_authenticated_reports_status_and_leaks_no_secret(monkeypatch):
+    class ReadyStore:
+        async def resolve_device(self, token): return uuid4() if token == "device-token" else None
+        async def migration_readiness(self):
+            return {"database":"connected", "migrations":{"compatible":False,
+                "pending":["001_food_catalog.sql"], "drift":[], "unknown":[]}}
+    monkeypatch.setattr(srv, "_client", ReadyStore())
+    unauthenticated = await srv.readiness(get_request("/api/readiness"))
+    assert unauthenticated.status_code == 401
+    response = await srv.readiness(get_request("/api/readiness", "device-token"))
+    assert response.status_code == 503
+    payload = json.loads(response.body)
+    assert payload["status"] == "not_ready"
+    assert payload["database"] == "connected"
+    serialized = response.body.decode()
+    assert "postgresql://" not in serialized and "device-token" not in serialized
+
+
+async def test_api_log_optional_idempotency_key_and_conflict_status(monkeypatch):
+    class IdempotentStore:
+        async def resolve_device(self, token): return uuid4()
+        async def insert_meal_idempotent(self, key, request_hash, **values):
+            if key == "conflict":
+                raise srv.IdempotencyConflict("Idempotency key was already used for a different request")
+            assert key == "retry-key" and len(request_hash) == 64
+            assert values["name"] == "Banana"
+            return {"logged":{"id":"one", "name":"Banana"}, "date":values["day"].isoformat()}
+    monkeypatch.setattr(srv, "_client", IdempotentStore())
+    body = {"name":"Banana","calories":105,"protein":1,"carbs":27,"fat":0,
+            "fiber":3,"macro_source":"Known food: Banana","meal":"Snack"}
+    response = await srv.api_log(log_request(body, idempotency_key="retry-key"))
+    assert response.status_code == 200
+    assert json.loads(response.body)["logged"]["id"] == "one"
+    conflict = await srv.api_log(log_request(body, idempotency_key="conflict"))
+    assert conflict.status_code == 409
+
+
+async def test_api_log_without_idempotency_header_remains_backward_compatible(lagging):
+    body = {"name":"Banana","calories":105,"protein":1,"carbs":27,"fat":0,
+            "fiber":3,"macro_source":"Known food: Banana","meal":"Snack"}
+    response = await srv.api_log(log_request(body))
+    assert response.status_code == 200
+    assert json.loads(response.body)["logged"]["name"] == "Banana"
 
 
 def test_library_search_uses_structured_fields_and_knee_preference():

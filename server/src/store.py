@@ -4,19 +4,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 from datetime import date, datetime
 from decimal import Decimal
-from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 from uuid import UUID, uuid4
 
 import asyncpg
 
-SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
-
 from auth import current_user_id
 from domain import effective_day_window, validate_macro_source
+from food_catalog import evidence_hash, normalize_food_name, provenance_state
+from migrations import MigrationError, migration_status
 
 
 class StoreError(RuntimeError):
@@ -33,6 +33,13 @@ class InviteAlreadyClaimed(StoreError):
 
 class ChatQuotaExceeded(StoreError):
     """The user's daily chat message quota is exhausted."""
+
+
+class IdempotencyConflict(StoreError):
+    """An idempotency key was reused with a different request body."""
+
+
+MAX_COMPONENT_METADATA_BYTES = 16 * 1024
 
 
 def hash_device_token(token: str) -> str:
@@ -52,6 +59,18 @@ def _value(value: Any) -> Any:
 
 def _dict(row: asyncpg.Record | None) -> dict[str, Any] | None:
     return None if row is None else {key: _value(value) for key, value in row.items()}
+
+
+def _component_metadata_json(value: Any) -> str | None:
+    """Serialize bounded component provenance before opening a transaction."""
+    if value is None:
+        return None
+    serialized = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    if len(serialized.encode("utf-8")) > MAX_COMPONENT_METADATA_BYTES:
+        raise ValueError(
+            f"component_metadata exceeds {MAX_COMPONENT_METADATA_BYTES} serialized bytes"
+        )
+    return serialized
 
 
 def meal(row: asyncpg.Record) -> dict[str, Any]:
@@ -79,20 +98,20 @@ class Store:
         self._connect_lock = asyncio.Lock()
 
     async def connect(self) -> asyncpg.Pool:
-        """Create the pool once, applying schema.sql before the first query.
-
-        Deploys run no migration step, so a release that adds a table would
-        otherwise 500 on live until someone applies the schema by hand. The
-        schema is idempotent (IF NOT EXISTS / guarded DO blocks) and already
-        reapplied freely by the scripts/ migrations.
-        """
+        """Create the pool once and fail cleanly when migrations are incompatible."""
         if self.pool is None:
             async with self._connect_lock:
                 if self.pool is None:
                     try:
                         pool = await asyncpg.create_pool(self.database_url, min_size=1, max_size=10)
-                        await pool.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
+                        async with pool.acquire() as conn:
+                            status = await migration_status(conn)
+                        if not status["compatible"]:
+                            await pool.close()
+                            raise StoreError("Database migrations are not compatible; run the prestart migration command")
                     except asyncpg.PostgresError as exc:
+                        raise StoreError(str(exc)) from exc
+                    except MigrationError as exc:
                         raise StoreError(str(exc)) from exc
                     self.pool = pool
         return self.pool
@@ -273,21 +292,36 @@ class Store:
         )
         return [_dict(row) or {} for row in rows]
 
-    async def insert_meal(self, *, name, meal, calories, protein, carbs, fat, fiber, day, macro_source):
-        pool = await self.connect(); entry_id = str(uuid4()); user_id = current_user_id()
+    async def insert_meal(self, *, name, meal, calories, protein, carbs, fat, fiber, day,
+                          macro_source, component_metadata=None):
+        metadata_json = _component_metadata_json(component_metadata)
+        pool = await self.connect(); user_id = current_user_id()
         async with pool.acquire() as conn, conn.transaction():
-            await conn.execute("INSERT INTO days(user_id,date) VALUES($1,$2) ON CONFLICT(user_id,date) DO NOTHING", user_id, day)
-            await conn.fetchval("SELECT date FROM days WHERE user_id=$1 AND date=$2 FOR UPDATE", user_id, day)
-            meal_id = await conn.fetchval(
-                "INSERT INTO meals(id,user_id,day,meal_type) VALUES($1,$2,$3,$4) "
-                "ON CONFLICT(user_id,day,meal_type) DO UPDATE SET meal_type=EXCLUDED.meal_type RETURNING id",
-                str(uuid4()), user_id, day, meal)
-            row = await conn.fetchrow(
-                "INSERT INTO nutrition_entries(id,user_id,name,meal,calories,protein,carbs,fat,fiber,day,meal_id,macro_source) "
-                "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *",
-                entry_id, user_id, name, meal, calories, protein, carbs, fat, fiber, day, meal_id, macro_source)
+            row = await self._insert_meal_conn(conn, user_id=user_id, name=name, meal=meal,
+                calories=calories, protein=protein, carbs=carbs, fat=fat, fiber=fiber,
+                day=day, macro_source=macro_source, component_metadata_json=metadata_json)
             await self._refresh_rollups(conn, user_id, day)
         return meal_row(row)
+
+    async def _insert_meal_conn(self, conn, *, user_id, name, meal, calories, protein,
+                                carbs, fat, fiber, day, macro_source,
+                                component_metadata_json=None):
+        """Insert one nutrition row using the caller's transaction."""
+        await conn.execute("INSERT INTO days(user_id,date) VALUES($1,$2) ON CONFLICT(user_id,date) DO NOTHING", user_id, day)
+        await conn.fetchval("SELECT date FROM days WHERE user_id=$1 AND date=$2 FOR UPDATE", user_id, day)
+        meal_id = await conn.fetchval(
+            "INSERT INTO meals(id,user_id,day,meal_type) VALUES($1,$2,$3,$4) "
+            "ON CONFLICT(user_id,day,meal_type) DO UPDATE SET meal_type=EXCLUDED.meal_type RETURNING id",
+            str(uuid4()), user_id, day, meal)
+        item_id, observation_id = await self._catalog_snapshot(
+            conn, name=name, macros={"calories": calories, "protein": protein,
+            "carbs": carbs, "fat": fat, "fiber": fiber}, macro_source=macro_source)
+        row = await conn.fetchrow(
+            "INSERT INTO nutrition_entries(id,user_id,name,meal,calories,protein,carbs,fat,fiber,day,meal_id,macro_source,food_item_id,food_observation_id,component_metadata) "
+            "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb) RETURNING *",
+            str(uuid4()), user_id, name, meal, calories, protein, carbs, fat, fiber, day,
+            meal_id, macro_source, item_id, observation_id, component_metadata_json)
+        return row
 
     async def insert_meals(self, rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
         """Insert one validated food turn atomically for the authenticated user.
@@ -302,6 +336,7 @@ class Store:
         if len(days) != 1:
             raise ValueError("a meal batch must belong to one day")
         day = next(iter(days))
+        metadata = [_component_metadata_json(row.get("component_metadata")) for row in rows]
         pool = await self.connect()
         user_id = current_user_id()
         inserted = []
@@ -315,7 +350,7 @@ class Store:
                 user_id, day,
             )
             meal_ids: dict[str, Any] = {}
-            for row in rows:
+            for row, metadata_json in zip(rows, metadata):
                 meal_name = str(row["meal"])
                 if meal_name not in meal_ids:
                     meal_ids[meal_name] = await conn.fetchval(
@@ -324,17 +359,245 @@ class Store:
                         "meal_type=EXCLUDED.meal_type RETURNING id",
                         str(uuid4()), user_id, day, meal_name,
                     )
+                item_id, observation_id = await self._catalog_snapshot(
+                    conn, name=str(row["name"]),
+                    macros={key: row[key] for key in ("calories","protein","carbs","fat","fiber")},
+                    macro_source=str(row["macro_source"]),
+                )
                 stored = await conn.fetchrow(
                     "INSERT INTO nutrition_entries(id,user_id,name,meal,calories,protein,"
-                    "carbs,fat,fiber,day,meal_id,macro_source) VALUES($1,$2,$3,$4,$5,$6,"
-                    "$7,$8,$9,$10,$11,$12) RETURNING *",
+                    "carbs,fat,fiber,day,meal_id,macro_source,food_item_id,food_observation_id) "
+                    "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *",
                     str(uuid4()), user_id, row["name"], meal_name, row["calories"],
                     row["protein"], row["carbs"], row["fat"], row["fiber"], day,
-                    meal_ids[meal_name], row["macro_source"],
+                    meal_ids[meal_name], row["macro_source"], item_id, observation_id,
                 )
                 inserted.append(meal_row(stored))
+                if metadata_json is not None:
+                    await conn.execute("UPDATE nutrition_entries SET component_metadata=$1::jsonb WHERE id=$2",
+                        metadata_json, stored["id"])
             await self._refresh_rollups(conn, user_id, day)
         return inserted
+
+    @staticmethod
+    async def _catalog_snapshot(conn, *, name: str, macros: Mapping[str, Any], macro_source: str,
+                                serving_basis: str | None = None):
+        """Create/link catalog evidence inside the caller's meal transaction."""
+        normalized = normalize_food_name(name)
+        provider_match = re.match(r"^(FatSecret|OpenFoodFacts(?: barcode)?):\s*([^\s,—]+)", macro_source or "", re.I)
+        if provider_match:
+            provider = "OpenFoodFacts" if provider_match.group(1).casefold().startswith("openfoodfacts") else "FatSecret"
+            linked = await conn.fetchrow(
+                "SELECT i.id item_id,o.id observation_id,o.serving_basis,o.calories,o.protein,o.carbs,o.fat,o.fiber FROM food_identifiers x "
+                "JOIN food_items i ON i.id=x.food_item_id JOIN food_nutrition_observations o ON o.food_item_id=i.id "
+                "JOIN food_source_records s ON s.id=o.source_record_id WHERE lower(x.provider)=lower($1) "
+                "AND x.external_id=$2 AND s.trusted AND o.verification_state IN ('official_curated','internal_curated','exact_identifier') "
+                "ORDER BY o.observed_at DESC LIMIT 1", provider, provider_match.group(2))
+            macro_keys = ("calories", "protein", "carbs", "fat", "fiber")
+            macros_match = linked and all(
+                Decimal(str(linked[key])) == Decimal(str(macros[key])) for key in macro_keys
+            )
+            basis_match = linked and (serving_basis is None or linked["serving_basis"] == serving_basis)
+            if macros_match and basis_match:
+                return linked["item_id"], linked["observation_id"]
+        trusted = await conn.fetchrow(
+            "SELECT i.id item_id,o.id observation_id FROM food_aliases a JOIN food_items i ON i.id=a.food_item_id "
+            "JOIN food_nutrition_observations o ON o.food_item_id=i.id JOIN food_source_records s ON s.id=o.source_record_id "
+            "WHERE a.normalized_alias=$1 AND s.trusted AND o.verification_state IN ('official_curated','internal_curated','exact_identifier') "
+            "AND o.calories=$2 AND o.protein=$3 AND o.carbs=$4 AND o.fat=$5 AND o.fiber=$6 "
+            "ORDER BY o.observed_at DESC LIMIT 1", normalized,
+            *(macros[key] for key in ("calories","protein","carbs","fat","fiber")))
+        if trusted:
+            return trusted["item_id"], trusted["observation_id"]
+        item_id = await conn.fetchval(
+            "INSERT INTO food_items(normalized_name,display_name) VALUES($1,$2) "
+            "ON CONFLICT(normalized_name,brand,product_identity) DO UPDATE SET display_name=food_items.display_name RETURNING id",
+            normalized, name,
+        )
+        await conn.execute(
+            "INSERT INTO food_aliases(food_item_id,normalized_alias,alias_text) VALUES($1,$2,$3) "
+            "ON CONFLICT(food_item_id,normalized_alias) DO NOTHING", item_id, normalized, name,
+        )
+        classified_state, _classified_trust = provenance_state(macro_source)
+        # A log snapshot records what was used for that request. It is not
+        # independently verified evidence, even when its source text names a
+        # trusted provider. Provider evidence is cached separately only when
+        # licensing permits it.
+        state = "estimate" if classified_state == "estimate" else "community_observed"
+        trusted = False
+        metadata = {"macro_source": macro_source, "macros": dict(macros), "basis": "logged_snapshot"}
+        digest = evidence_hash(metadata)
+        source_id = await conn.fetchval(
+            "WITH inserted AS (INSERT INTO food_source_records(provider,source_reference,retrieved_at,evidence_hash,metadata,trusted,cache_allowed) "
+            "VALUES('legacy_log',$1,now(),$2,$3::jsonb,$4,true) ON CONFLICT(provider,evidence_hash) "
+            "DO NOTHING RETURNING id) SELECT id FROM inserted UNION ALL SELECT id FROM food_source_records "
+            "WHERE provider='legacy_log' AND evidence_hash=$2 LIMIT 1",
+            macro_source or "community_observed", digest, json.dumps(metadata), trusted,
+        )
+        observation_key = f"{item_id}:{digest}"
+        observation_id = await conn.fetchval(
+            "WITH inserted AS (INSERT INTO food_nutrition_observations(observation_key,food_item_id,source_record_id,verification_state,serving_basis,"
+            "calories,protein,carbs,fat,fiber) VALUES($1,$2,$3,$4,'logged_snapshot',$5,$6,$7,$8,$9) "
+            "ON CONFLICT(observation_key) DO NOTHING RETURNING id) SELECT id FROM inserted UNION ALL "
+            "SELECT id FROM food_nutrition_observations WHERE observation_key=$1 LIMIT 1",
+            observation_key, item_id, source_id, state,
+            *(macros[key] for key in ("calories","protein","carbs","fat","fiber")),
+        )
+        return item_id, observation_id
+
+    async def lookup_catalog(self, query: str) -> dict[str, Any] | None:
+        """Return only trusted exact-name/alias observations from the catalog."""
+        normalized = normalize_food_name(query)
+        if not normalized:
+            return None
+        pool = await self.connect()
+        row = await pool.fetchrow(
+            "SELECT i.display_name,o.serving_basis,o.serving_text,o.serving_grams,o.calories,o.protein,o.carbs,o.fat,o.fiber,s.source_reference "
+            "FROM food_items i JOIN food_aliases a ON a.food_item_id=i.id "
+            "JOIN food_nutrition_observations o ON o.food_item_id=i.id "
+            "JOIN food_source_records s ON s.id=o.source_record_id "
+            "WHERE a.normalized_alias=$1 AND s.trusted AND o.verification_state IN ('official_curated','internal_curated','exact_identifier') "
+            "ORDER BY o.observed_at DESC LIMIT 1", normalized,
+        )
+        if row is None:
+            return None
+        macros = {key: float(row[key]) for key in ("calories","protein","carbs","fat","fiber")}
+        result = {"name": row["display_name"], "source": row["source_reference"]}
+        result["macros_per_100g" if row["serving_basis"] == "per_100g" else "macros_per_serving"] = macros
+        if row["serving_text"]:
+            result["serving_size"] = row["serving_text"]
+        return result
+
+    async def cache_provider_food(self, found: Mapping[str, Any]) -> None:
+        """Persist licensed provider evidence without retaining its raw payload."""
+        attribution = found.get("attribution")
+        if not isinstance(attribution, Mapping) or not attribution.get("cache_allowed"):
+            return
+        provider = str(attribution.get("provider") or "").strip()
+        external_id = str(attribution.get("external_id") or "").strip()
+        name = str(found.get("name") or "").strip()
+        if not provider or not external_id or not name:
+            return
+        normalized = normalize_food_name(name)
+        verification = str(attribution.get("verification_state") or "exact_identifier")
+        if verification != "exact_identifier":
+            return
+        metadata = {key: attribution.get(key) for key in ("provider","external_id","source_url",
+            "serving_grams","serving_basis","confidence","evidence_hash","license","license_url",
+            "attribution_text")}
+        metadata.update({"name": name, "serving_size": found.get("serving_size")})
+        digest = str(attribution.get("evidence_hash") or evidence_hash({**metadata,
+            "per_100g": found.get("macros_per_100g"), "per_serving": found.get("macros_per_serving")}))
+        pool = await self.connect()
+        async with pool.acquire() as conn, conn.transaction():
+            item_id = await conn.fetchval(
+                "INSERT INTO food_items(normalized_name,display_name,product_identity) VALUES($1,$2,$3) "
+                "ON CONFLICT(normalized_name,brand,product_identity) DO UPDATE SET display_name=food_items.display_name RETURNING id",
+                normalized, name, f"{provider.casefold()}:{external_id}",
+            )
+            await conn.execute(
+                "INSERT INTO food_aliases(food_item_id,normalized_alias,alias_text) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
+                item_id, normalized, name,
+            )
+            await conn.execute(
+                "INSERT INTO food_identifiers(food_item_id,identifier_type,provider,external_id) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+                item_id, str(attribution.get("identifier_type") or "provider_id"), provider, external_id,
+            )
+            source_id = await conn.fetchval(
+                "WITH inserted AS (INSERT INTO food_source_records(provider,external_id,source_reference,retrieved_at,evidence_hash,metadata,trusted,cache_allowed) "
+                "VALUES($1,$2,$3,$4,now(),$5,$6,$7::jsonb,true,true) ON CONFLICT(provider,evidence_hash) DO NOTHING RETURNING id) "
+                "SELECT id FROM inserted UNION ALL SELECT id FROM food_source_records WHERE provider=$1 AND evidence_hash=$5 LIMIT 1",
+                provider, external_id, str(found.get("source") or f"{provider}: {external_id}"),
+                attribution.get("source_url"), digest, attribution.get("confidence"), json.dumps(metadata),
+            )
+            for basis, key in (("per_100g", "macros_per_100g"), ("per_serving", "macros_per_serving")):
+                macros = found.get(key)
+                if not isinstance(macros, Mapping):
+                    continue
+                observation_key = f"provider:{provider}:{external_id}:{basis}:{digest}"
+                await conn.execute(
+                    "INSERT INTO food_nutrition_observations(observation_key,food_item_id,source_record_id,verification_state,serving_basis,serving_text,"
+                    "serving_grams,calories,protein,carbs,fat,fiber) VALUES($1,$2,$3,'exact_identifier',$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING",
+                    observation_key, item_id, source_id, basis, found.get("serving_size"), attribution.get("serving_grams"),
+                    *(macros.get(macro, 0) for macro in ("calories","protein","carbs","fat","fiber")),
+                )
+
+    async def migration_readiness(self) -> dict[str, object]:
+        """Return protected read-only connectivity and migration compatibility."""
+        conn = await asyncpg.connect(self.database_url)
+        try:
+            status = await migration_status(conn)
+            await conn.fetchval("SELECT 1")
+        finally:
+            await conn.close()
+        return {"database": "connected", "migrations": status}
+
+    async def run_idempotent(self, key: str, request_hash: str,
+                             write: Callable[[asyncpg.Connection], Awaitable[Mapping[str, Any]]]
+                             ) -> dict[str, Any]:
+        """Atomically claim, write, and persist a replay response.
+
+        The callback must perform every durable business write through the
+        supplied connection. Any exception rolls back both its writes and the
+        operation claim, so crashes cannot strand ``in_progress``.
+        """
+        if not key or len(key) > 200:
+            raise ValueError("idempotency key must contain 1 to 200 characters")
+        pool = await self.connect()
+        user_id = current_user_id()
+        async with pool.acquire() as conn, conn.transaction():
+            claimed = await conn.fetchrow(
+                "INSERT INTO request_operations(user_id,idempotency_key,request_hash) VALUES($1,$2,$3) "
+                "ON CONFLICT(user_id,idempotency_key) DO NOTHING RETURNING id", user_id, key, request_hash,
+            )
+            if claimed is None:
+                existing = await conn.fetchrow(
+                    "SELECT request_hash,status,stored_response FROM request_operations "
+                    "WHERE user_id=$1 AND idempotency_key=$2 FOR UPDATE", user_id, key,
+                )
+                if existing["request_hash"] != request_hash:
+                    raise IdempotencyConflict("Idempotency key was already used for a different request")
+                if existing["status"] != "completed" or existing["stored_response"] is None:
+                    raise IdempotencyConflict("Idempotent operation has invalid durable state")
+                stored = existing["stored_response"]
+                return json.loads(stored) if isinstance(stored, str) else dict(stored)
+            response = dict(await write(conn))
+            await conn.execute("UPDATE request_operations SET status='completed',stored_response=$1::jsonb,"
+                "completed_at=now() WHERE user_id=$2 AND idempotency_key=$3",
+                json.dumps(response), user_id, key)
+            return response
+
+    async def insert_meal_idempotent(self, key: str, request_hash: str, *,
+                                     response_builder, **values) -> dict[str, Any]:
+        """Insert, refresh, snapshot a response, and claim a key atomically."""
+        metadata_json = _component_metadata_json(values.pop("component_metadata", None))
+        user_id = current_user_id()
+
+        async def write(conn):
+            row = await self._insert_meal_conn(
+                conn, user_id=user_id, component_metadata_json=metadata_json, **values
+            )
+            await self._refresh_rollups(conn, user_id, values["day"])
+            return await response_builder(conn, user_id, row)
+
+        return await self.run_idempotent(key, request_hash, write)
+
+    @staticmethod
+    async def day_snapshot(conn, user_id, day) -> dict[str, Any]:
+        """Read canonical day inputs through the transaction's connection."""
+        entries = await conn.fetch(
+            "SELECT * FROM nutrition_entries WHERE user_id=$1 AND day=$2 ORDER BY created_at DESC",
+            user_id, day)
+        meal_rollups = await conn.fetch(
+            "SELECT * FROM meals WHERE user_id=$1 AND day=$2 ORDER BY meal_type", user_id, day)
+        day_rollup = await conn.fetchrow(
+            "SELECT * FROM days WHERE user_id=$1 AND date=$2", user_id, day)
+        targets = await conn.fetchrow(
+            "SELECT * FROM macro_targets WHERE user_id=$1 AND effective_date <= $2 "
+            "ORDER BY effective_date DESC, created_at DESC LIMIT 1", user_id, day)
+        return {"meals": [meal(row) for row in entries],
+                "meal_rollups": [_dict(row) for row in meal_rollups],
+                "day_rollup": _dict(day_rollup), "targets": _dict(targets)}
 
     @staticmethod
     async def _refresh_rollups(conn: asyncpg.Connection, user_id: UUID, day: date) -> None:

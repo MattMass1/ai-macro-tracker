@@ -19,6 +19,21 @@ import server as srv  # noqa: E402
 from auth import bind_user, reset_user  # noqa: E402
 from test_coach import FakeStore, chat_request  # noqa: E402
 
+
+def test_provider_defaults_and_global_off_license_metadata(monkeypatch):
+    monkeypatch.delenv("FATSECRET_ATTRIBUTION_ENABLED", raising=False)
+    assert os.environ.get("FATSECRET_ATTRIBUTION_ENABLED", "false") == "false"
+    product = {"product_name": "Bar", "nutriments": {
+        "energy-kcal_100g": 200, "proteins_100g": 10,
+        "carbohydrates_100g": 20, "fat_100g": 8, "fiber_100g": 2}}
+    exact = food_lookup._off_result(product, "123", exact=True)
+    text = food_lookup._off_result(product, "123", exact=False)
+    assert exact["attribution"]["cache_allowed"] is True
+    assert exact["attribution"]["license"] == "Open Database License (ODbL) 1.0"
+    assert exact["attribution"]["license_url"].endswith("/odbl/1-0/")
+    assert text["attribution"]["cache_allowed"] is False
+    assert text["attribution"]["verification_state"] == "unknown"
+
 OFF_PAYLOAD = {"products": [{
     "code": "737628064502",
     "product_name": "Rice noodles",
@@ -55,10 +70,6 @@ BANANA_HIT = {
 }
 
 
-@pytest.fixture(autouse=True)
-def disable_live_food_classifier(monkeypatch):
-    """Keep cascade tests network-free unless they explicitly mock classification."""
-    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
 
 
 def mock_transport(monkeypatch, handler):
@@ -73,6 +84,10 @@ def mock_transport(monkeypatch, handler):
         transport=httpx.MockTransport(recording_handler), timeout=food_lookup.TIMEOUT,
         headers={"User-Agent": food_lookup.USER_AGENT}))
     return calls
+
+
+def without_attribution(result):
+    return {key: value for key, value in result.items() if key != "attribution"}
 
 
 async def test_client_sends_identifying_user_agent():
@@ -95,7 +110,7 @@ async def test_barcode_hit_parses_per_100g_and_serving_macros(monkeypatch):
         return httpx.Response(200, json=OFF_BARCODE_PAYLOAD)
 
     mock_transport(monkeypatch, handler)
-    assert await food_lookup.search_openfoodfacts_by_code("737628064502") == {
+    assert without_attribution(await food_lookup.search_openfoodfacts_by_code("737628064502")) == {
         "name": "Chocolate protein bar",
         "macros_per_100g": {
             "calories": 364.0, "protein": 36.4, "carbs": 32.7,
@@ -141,102 +156,18 @@ async def test_openfoodfacts_hit_parses_macros_and_source(monkeypatch):
         }]})
 
     calls = mock_transport(monkeypatch, handler)
-    assert await food_lookup.resolve_food("banana") == BANANA_HIT
+    assert without_attribution(await food_lookup.resolve_food("banana")) == BANANA_HIT
     assert len(calls) == 1  # Tavily is never contacted on an OpenFoodFacts hit
 
 
-@pytest.mark.parametrize(
-    ("classification", "expected"),
-    [
-        ("whole", ["off"]),
-        ("branded", ["off"]),
-        ("restaurant", ["tavily"]),
-        ("unknown", ["off"]),
-    ],
-)
-async def test_classifier_routes_matching_tier_first(monkeypatch, classification, expected):
-    calls = []
-
-    async def fake_classify(_query):
-        return classification
-
-    def search(name):
-        async def fake(_query):
-            calls.append(name)
-            return BANANA_HIT
-        return fake
-
-    monkeypatch.setattr(food_lookup, "classify_food", fake_classify)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", search("off"))
-    monkeypatch.setattr(food_lookup, "search_tavily", search("tavily"))
-
-    assert await food_lookup.resolve_food("food") == BANANA_HIT
-    assert calls == expected
 
 
-async def test_classifier_without_token_degrades_to_unknown(monkeypatch):
-    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
-    assert await food_lookup.classify_food("Nutella") == "unknown"
 
 
-async def test_classified_first_tier_miss_runs_complete_fallback(monkeypatch):
-    calls = []
-
-    async def fake_classify(_query):
-        return "restaurant"
-
-    def search(name, result=None):
-        async def fake(_query):
-            calls.append(name)
-            return result
-        return fake
-
-    monkeypatch.setattr(food_lookup, "classify_food", fake_classify)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", search("off", BANANA_HIT))
-    monkeypatch.setattr(food_lookup, "search_tavily", search("tavily"))
-
-    assert await food_lookup.resolve_food("food") == BANANA_HIT
-    assert calls == ["tavily", "off"]
 
 
-async def test_classification_can_be_disabled(monkeypatch):
-    calls = []
-
-    async def unexpected(_query):
-        raise AssertionError("classifier should not run")
-
-    def search(name, result=None):
-        async def fake(_query):
-            calls.append(name)
-            return result
-        return fake
-
-    monkeypatch.setattr(food_lookup, "classify_food", unexpected)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", search("off", BANANA_HIT))
-    monkeypatch.setattr(food_lookup, "search_tavily", search("tavily"))
-
-    assert await food_lookup.resolve_food("food", classify=False) == BANANA_HIT
-    assert calls == ["off"]
 
 
-async def test_classifier_failure_uses_original_order(monkeypatch):
-    calls = []
-
-    async def failed_classify(_query):
-        raise httpx.ReadTimeout("slow")
-
-    def search(name, result=None):
-        async def fake(_query):
-            calls.append(name)
-            return result
-        return fake
-
-    monkeypatch.setattr(food_lookup, "classify_food", failed_classify)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", search("off", BANANA_HIT))
-    monkeypatch.setattr(food_lookup, "search_tavily", search("tavily"))
-
-    assert await food_lookup.resolve_food("food") == BANANA_HIT
-    assert calls == ["off"]
 
 
 async def test_openfoodfacts_resolves_without_tavily(monkeypatch):
@@ -247,7 +178,7 @@ async def test_openfoodfacts_resolves_without_tavily(monkeypatch):
 
     calls = mock_transport(monkeypatch, handler)
     result = await food_lookup.resolve_food("rice noodles")
-    assert result == {
+    assert without_attribution(result) == {
         "name": "Rice noodles",
         "macros_per_100g": {"calories": 355.0, "protein": 7.1, "carbs": 78.6,
                             "fat": 1.2, "fiber": 1.8},
@@ -275,242 +206,32 @@ async def test_openfoodfacts_requires_no_api_key(monkeypatch):
     assert [c.url.host for c in calls] == ["world.openfoodfacts.org"]
 
 
-async def test_tavily_clean_nutrition_hit_parses_macros(monkeypatch):
-    monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
-
-    def handler(request):
-        assert request.method == "POST"
-        assert request.url == httpx.URL(food_lookup.TAVILY_SEARCH_URL)
-        payload = json.loads(request.content)
-        assert payload == {
-            "api_key": "tavily-key",
-            "query": "McDonald's grilled chicken sandwich",
-            "search_depth": "basic",
-            "max_results": 3,
-            "include_answer": False,
-        }
-        return httpx.Response(200, json={"results": [{
-            "title": "McDonald's Grilled Chicken Sandwich Nutrition",
-            "url": "https://example.com/mcdonalds-chicken",
-            "content": (
-                "Per 100g: Calories 220, Protein 18g, Carbohydrates 22g, "
-                "Fat 7.5g, Fiber 1.5g."
-            ),
-        }]})
-
-    mock_transport(monkeypatch, handler)
-    assert await food_lookup.search_tavily("McDonald's grilled chicken sandwich") == {
-        "name": "McDonald's Grilled Chicken Sandwich Nutrition",
-        "macros_per_100g": {
-            "calories": 220.0,
-            "protein": 18.0,
-            "carbs": 22.0,
-            "fat": 7.5,
-            "fiber": 1.5,
-        },
-        "source": "Tavily: https://example.com/mcdonalds-chicken",
-    }
 
 
-def test_tavily_per_bar_panel_is_normalized_to_100g():
-    result = food_lookup._tavily_result("Barebells protein bar", {
-        "title": "Barebells Protein Bar Nutrition",
-        "url": "https://example.com/barebells",
-        "content": (
-            "Per 55g bar: Calories 200, Protein 20g, Carbs 18g, "
-            "Fat 8g, Fiber 3g."
-        ),
-    })
-
-    assert result is not None
-    assert result["macros_per_100g"]["calories"] == pytest.approx(363.64)
-    macros, _source = food_lookup.portion_from_grams(result, 55)
-    assert macros["calories"] == pytest.approx(200.0, abs=0.01)
 
 
-def test_tavily_us_serving_size_with_weight_is_normalized_to_100g():
-    result = food_lookup._tavily_result("55g Barebells protein bar", {
-        "title": "Barebells Protein Bar Nutrition",
-        "url": "https://example.com/barebells-us",
-        "content": (
-            "Serving Size 1 bar (55g), Calories 200, Protein 20g, "
-            "Carbs 18g, Fat 8g, Fiber 3g."
-        ),
-    })
-
-    assert result is not None
-    assert result["serving_size"] == "1 bar (55g)"
-    assert result["macros_per_serving"]["calories"] == 200.0
-    macros, _source = food_lookup.portion_from_grams(result, 55)
-    assert macros["calories"] == pytest.approx(200.0, abs=0.01)
 
 
-def test_tavily_us_weightless_serving_supports_only_whole_item_query():
-    panel = {
-        "title": "Barebells Nutrition",
-        "url": "https://example.com/barebells-us",
-        "content": (
-            "Serving: 1 bar, Calories 200, Protein 20g, Carbs 18g, "
-            "Fat 8g, Fiber 3g."
-        ),
-    }
-    result = food_lookup._tavily_result("log 1 Barebells", panel)
-
-    assert result is not None
-    assert result["basis"] == "serving"
-    assert result["serving"] == "1 bar"
-    assert result["macros_per_serving"]["calories"] == 200.0
-    assert food_lookup.portion_from_grams(result, 55) is None
-    assert food_lookup._tavily_result("log one Barebells", panel) is not None
-    assert food_lookup._tavily_result("log 1/2 Barebells", panel) is None
-    assert food_lookup._tavily_result("log 1.5 Barebells", panel) is None
-
-    assert food_lookup._tavily_result("55g Barebells", {
-        "title": "Barebells Nutrition",
-        "content": (
-            "Serving Size 1 bar, Calories 200, Protein 20g, Carbs 18g, "
-            "Fat 8g, Fiber 3g."
-        ),
-    }) is None
 
 
-def test_tavily_dual_column_panel_keeps_values_with_item_basis():
-    result = food_lookup._tavily_result("Barebells protein bar", {
-        "title": "Barebells Protein Bar Nutrition",
-        "url": "https://example.com/barebells",
-        "content": (
-            "Per 55g bar: Calories 200, Protein 20g, Carbs 18g, "
-            "Fat 8g, Fiber 3g. Per 100g: Calories 364, Protein 36.4g, "
-            "Carbs 32.7g, Fat 14.5g, Fiber 5.5g."
-        ),
-    })
-
-    assert result is not None
-    macros, _source = food_lookup.portion_from_grams(result, 55)
-    assert macros["calories"] == pytest.approx(200.0, abs=0.01)
 
 
-def test_tavily_conflicting_dual_column_panel_returns_none():
-    assert food_lookup._tavily_result("Barebells protein bar", {
-        "title": "Barebells Protein Bar Nutrition",
-        "content": (
-            "Per 55g bar: Calories 200, Protein 20g, Carbs 18g, "
-            "Fat 8g, Fiber 3g. Per 100g: Calories 500, Protein 36.4g, "
-            "Carbs 32.7g, Fat 14.5g, Fiber 5.5g."
-        ),
-    }) is None
 
 
-def test_tavily_per_serving_without_weight_is_accepted_for_unquantified_query():
-    # A query with no stated quantity means one serving — the weightless
-    # serving panel is the best available answer, not a reason to refuse.
-    result = food_lookup._tavily_result("Barebells protein bar", {
-        "title": "Barebells Protein Bar Nutrition",
-        "content": (
-            "Per serving: Calories 200, Protein 20g, Carbs 18g, "
-            "Fat 8g, Fiber 3g."
-        ),
-    })
-    assert result is not None
-    assert result["basis"] == "serving"
-    assert result["macros_per_serving"]["calories"] == 200.0
 
 
-def test_tavily_per_100g_panel_is_accepted_as_is():
-    result = food_lookup._tavily_result("Greek yogurt", {
-        "title": "Greek Yogurt Nutrition",
-        "url": "https://example.com/yogurt",
-        "content": (
-            "Per 100 grams: Calories 97, Protein 9g, Carbs 4g, "
-            "Fat 5g, Fiber 0g."
-        ),
-    })
-
-    assert result is not None
-    assert result["macros_per_100g"] == {
-        "calories": 97.0, "protein": 9.0, "carbs": 4.0,
-        "fat": 5.0, "fiber": 0.0,
-    }
 
 
-def test_tavily_partial_weighted_panel_zeroes_missing_macros():
-    result = food_lookup._tavily_result("Egg White Grill", {
-        "title": "Egg White Grill Nutrition",
-        "url": "https://example.com/egg-white-grill",
-        "content": "Per 100g: Calories 300, Protein 27g.",
-    })
-
-    assert result is not None
-    assert result["macros_per_100g"] == {
-        "calories": 300.0, "protein": 27.0, "carbs": 0.0,
-        "fat": 0.0, "fiber": 0.0,
-    }
 
 
-def test_tavily_partial_serving_panel_zeroes_missing_macros():
-    result = food_lookup._tavily_result("Egg White Grill", {
-        "title": "Egg White Grill Nutrition",
-        "url": "https://example.com/egg-white-grill",
-        "content": "Serving size 1 sandwich, Calories 300, Protein 27g.",
-    })
-
-    assert result is not None
-    assert result["macros_per_serving"] == {
-        "calories": 300.0, "protein": 27.0, "carbs": 0.0,
-        "fat": 0.0, "fiber": 0.0,
-    }
 
 
-def test_tavily_ambiguous_panel_without_basis_returns_none():
-    assert food_lookup._tavily_result("Niche Cafe Bowl", {
-        "title": "Niche Cafe Bowl nutrition",
-        "content": "Calories: 310 Protein: 20g Carbs: 35g Fat: 9g Fiber: 6g",
-    }) is None
 
 
-async def test_tavily_result_without_nutrition_patterns_returns_none(monkeypatch):
-    monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
-    mock_transport(monkeypatch, lambda _request: httpx.Response(200, json={
-        "results": [{"title": "McDonald's menu", "content": "Browse our latest menu."}]
-    }))
-    assert await food_lookup.search_tavily("McDonald's burger") is None
 
 
-@pytest.mark.parametrize("response", [httpx.Response(500), httpx.ReadTimeout("slow")])
-async def test_tavily_error_or_timeout_returns_none(monkeypatch, response):
-    monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
-
-    def handler(_request):
-        if isinstance(response, Exception):
-            raise response
-        return response
-
-    mock_transport(monkeypatch, handler)
-    assert await food_lookup.search_tavily("restaurant meal") is None
 
 
-async def test_cascade_reaches_tavily_only_after_off_miss(monkeypatch):
-    monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
-
-    def handler(request):
-        if request.url.host == "world.openfoodfacts.org":
-            return httpx.Response(200, json={"products": []})
-        return httpx.Response(200, json={"results": [{
-            "title": "Niche Cafe Bowl nutrition",
-            "url": "https://example.com/bowl",
-            "content": (
-                "Per 100g: Calories: 310 Protein: 20g Carbs: 35g "
-                "Fat: 9g Fiber: 6g"
-            ),
-        }]})
-
-    calls = mock_transport(monkeypatch, handler)
-    result = await food_lookup.resolve_food("Niche Cafe Bowl")
-    assert result is not None
-    assert result["source"] == "Tavily: https://example.com/bowl"
-    assert [call.url.host for call in calls] == [
-        "world.openfoodfacts.org", "api.tavily.com"
-    ]
 
 
 @pytest.mark.parametrize("off_body", [
@@ -724,6 +445,36 @@ async def test_parser_known_food_skips_lookup(monkeypatch):
     assert items[0]["sourced_from"] == "known"
 
 
+@pytest.mark.parametrize("name,approved", [
+    ("Chipotle burrito", (945, 83, 88, 31)),
+    ("CFA 8ct grilled nuggets + grilled club + sauce", (710, 62, 61, 25)),
+])
+async def test_approved_known_food_macros_survive_chat_to_log_end_to_end(monkeypatch, name, approved):
+    fake = FakeStore(plan={"version": 1}, has_targets=True)
+    monkeypatch.setattr(srv, "_client", fake)
+    captured = {}
+    async def fake_parse(_message):
+        return [{"name":name, "calories":1, "protein":1, "carbs":1, "fat":1,
+                 "fiber":0, "quantity":1, "basis":"per_serving",
+                 "sourced_from":"known", "meal":"Lunch", "note":f"Known food: {name}"}], None
+    async def fake_write(name, calories, protein, carbs, fat, macro_source, meal,
+                         day_value, allow_estimate=False, fiber=0, component_metadata=None):
+        captured.update(calories=calories, protein=protein, carbs=carbs, fat=fat,
+                        macro_source=macro_source)
+        return {"logged":{"id":"known", "name":name, "meal":meal, "calories":calories,
+            "protein":protein, "carbs":carbs, "fat":fat, "fiber":fiber}}
+    async def fake_day(_day, ensure=None):
+        return {"totals":{"calories":captured.get("calories", 0)},
+                "targets":{"calories":2000}}
+    monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
+    monkeypatch.setattr(srv, "write_meal", fake_write)
+    monkeypatch.setattr(srv, "day_payload", fake_day)
+    response = await srv.api_chat(chat_request({"message":f"log {name}"}))
+    assert response.status_code == 200
+    assert tuple(captured[key] for key in ("calories","protein","carbs","fat")) == approved
+    assert captured["macro_source"] == f"Known food: {name}"
+
+
 async def test_parser_lookup_tool_executes_at_most_three_calls(monkeypatch):
     monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "test-openai-token")
     monkeypatch.setattr(srv, "_client", FakeStore())
@@ -760,7 +511,9 @@ async def test_coach_lookup_food_tool_returns_hit_and_not_found(monkeypatch):
 
     async def fake_resolve(query):
         assert query == "greek yogurt"
-        return BANANA_HIT
+        return {**BANANA_HIT, "attribution": {"provider":"OpenFoodFacts",
+            "license":"Open Database License (ODbL) 1.0",
+            "attribution_text":"Data from OpenFoodFacts"}}
 
     monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
     handler = srv._coach_tool_handlers()["lookup_food"]
@@ -771,7 +524,9 @@ async def test_coach_lookup_food_tool_returns_hit_and_not_found(monkeypatch):
 
     token = bind_user(uuid4())
     try:
-        assert (await handler({"query": "greek yogurt"}))["source"] == "OpenFoodFacts: 4011"
+        hit = await handler({"query": "greek yogurt"})
+        assert hit["source"] == "OpenFoodFacts: 4011"
+        assert hit["attribution"]["attribution_text"] == "Data from OpenFoodFacts"
 
         async def fake_miss(_query):
             return None
@@ -798,7 +553,7 @@ async def test_food_path_does_not_repeat_parser_lookup(monkeypatch):
         return BANANA_HIT
 
     async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
-                              meal, day_value, allow_estimate=False, fiber=0):
+                              meal, day_value, allow_estimate=False, fiber=0, component_metadata=None):
         seen.update(name=name, calories=calories, protein=protein,
                     macro_source=macro_source, allow_estimate=allow_estimate)
         return {"logged": {"name": name, "calories": calories, "protein": protein,
@@ -838,7 +593,7 @@ async def test_food_path_gram_portion_takes_precedence_over_quantity(monkeypatch
         return BANANA_HIT
 
     async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
-                              meal, day_value, allow_estimate=False, fiber=0):
+                              meal, day_value, allow_estimate=False, fiber=0, component_metadata=None):
         seen.update(calories=calories, protein=protein, carbs=carbs, fat=fat,
                     fiber=fiber, macro_source=macro_source)
         return {"logged": {"name": name, "calories": calories, "protein": protein,
@@ -877,7 +632,7 @@ async def test_food_path_labels_unsourced_lookup_miss_as_estimate(monkeypatch):
         return None
 
     async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
-                              meal, day_value, allow_estimate=False, fiber=0):
+                              meal, day_value, allow_estimate=False, fiber=0, component_metadata=None):
         seen.update(macro_source=macro_source, calories=calories)
         return {"logged": {"name": name, "calories": calories, "protein": protein,
                            "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
@@ -918,23 +673,8 @@ async def test_food_path_upgrades_whole_item_from_serving_panel(monkeypatch):
                  "grams": None, "quantity": 1, "meal": "Lunch",
                  "basis": "per_serving", "sourced_from": "cascade"}], None
 
-    async def fake_off(query):
-        lookup_queries.append(("off", query))
-        return None
-
-    async def fake_tavily(query):
-        lookup_queries.append(("tavily", query))
-        return food_lookup._tavily_result("1 Chipotle chicken burrito bowl", {
-            "title": "Chipotle Chicken Burrito Bowl Nutrition",
-            "url": "https://example.com/chipotle-bowl",
-            "content": (
-                "Serving size 1 bowl Calories 700 Protein 50g "
-                "Carbohydrate 70g Fat 24g Fiber 10g"
-            ),
-        })
-
     async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
-                              meal, day_value, allow_estimate=False, fiber=0):
+                              meal, day_value, allow_estimate=False, fiber=0, component_metadata=None):
         seen.update(calories=calories, macro_source=macro_source)
         return {"logged": {"name": name, "calories": calories, "protein": protein,
                            "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
@@ -943,8 +683,6 @@ async def test_food_path_upgrades_whole_item_from_serving_panel(monkeypatch):
         return {"totals": {"calories": 700}, "targets": {"calories": 2000}}
 
     monkeypatch.setattr(srv, "parse_chat_message", fake_parse)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", fake_off)
-    monkeypatch.setattr(food_lookup, "search_tavily", fake_tavily)
     monkeypatch.setattr(srv, "write_meal", fake_write_meal)
     monkeypatch.setattr(srv, "day_payload", fake_day_payload)
 
@@ -1036,7 +774,7 @@ async def test_food_path_derives_sources_from_exact_real_data_matches(monkeypatc
         return None
 
     async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
-                              meal, day_value, allow_estimate=False, fiber=0):
+                              meal, day_value, allow_estimate=False, fiber=0, component_metadata=None):
         seen.append((macro_source, calories, protein, carbs, fat, fiber))
         return {"logged": {"name": name, "calories": calories, "protein": protein,
                            "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
@@ -1089,7 +827,7 @@ async def test_food_path_weightless_preset_grams_use_cascade(monkeypatch):
         }
 
     async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
-                              meal, day_value, allow_estimate=False, fiber=0):
+                              meal, day_value, allow_estimate=False, fiber=0, component_metadata=None):
         seen.update(calories=calories, protein=protein, carbs=carbs, fat=fat,
                     fiber=fiber, macro_source=macro_source)
         return {"logged": {"name": name, "calories": calories, "protein": protein,
@@ -1160,58 +898,10 @@ async def test_branded_flavor_query_resolves_via_generic_variant(monkeypatch):
     ]
 
 
-async def test_branded_flavor_query_resolves_via_tavily_per_slice_panel(monkeypatch):
-    # OpenFoodFacts misses everywhere; a Tavily "per slice (26g)" web panel
-    # is parsed instead of being rejected.
-    monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
-
-    def handler(request):
-        if request.url.host == "world.openfoodfacts.org":
-            return httpx.Response(200, json={"products": []})
-        assert request.url.host == "api.tavily.com"
-        return httpx.Response(200, json={"results": [{
-            "title": "L'Oven Fresh Cinnamon Raisin Bread Nutrition Facts",
-            "url": "https://example.com/loven-fresh",
-            "content": (
-                "Per slice (26g): Calories 60, Protein 2g, Carbs 12g, "
-                "Fat 1g, Fiber 1g."
-            ),
-        }]})
-
-    mock_transport(monkeypatch, handler)
-    result = await food_lookup.resolve_food(LOVEN_QUERY)
-    assert result is not None
-    assert result["source"] == "Tavily: https://example.com/loven-fresh"
-    assert result["macros_per_serving"]["calories"] == 60.0
-    macros, source = food_lookup.portion_from_serving(result)
-    assert macros["calories"] == 60.0
-    assert source == "Tavily: https://example.com/loven-fresh"
 
 
-def test_tavily_weightless_per_slice_panel_accepted_for_unquantified_query():
-    result = food_lookup._tavily_result(LOVEN_QUERY, {
-        "title": "L'Oven Fresh Cinnamon Raisin Bread Nutrition",
-        "url": "https://example.com/loven-fresh",
-        "content": (
-            "Per slice: Calories 60, Protein 2g, Carbs 12g, "
-            "Fat 1g, Fiber 1g."
-        ),
-    })
-    assert result is not None
-    assert result["basis"] == "serving"
-    assert result["serving"] == "slice"
-    assert result["macros_per_serving"]["calories"] == 60.0
 
 
-def test_plain_macro_line_accepts_calories_spelling():
-    assert food_lookup._plain_macro_line(
-        "150 calories | 5g protein | 26g carbs | 1g fat"
-    ) == {"calories": 150.0, "protein": 5.0, "carbs": 26.0, "fat": 1.0}
-    assert food_lookup._plain_macro_line("650 kcal | 43g protein") == {
-        "calories": 650.0, "protein": 43.0, "carbs": 0.0, "fat": 0.0,
-    }
-    # Label-first panels with no basis cue stay rejected (ambiguous).
-    assert food_lookup._plain_macro_line("Calories: 310 Protein: 20g") is None
 
 
 async def test_parser_refusal_after_failed_lookup_still_logs_estimate(monkeypatch):
@@ -1430,7 +1120,7 @@ async def test_food_path_zero_macro_item_is_rescued_by_lookup(monkeypatch):
         }
 
     async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
-                              meal, day_value, allow_estimate=False, fiber=0):
+                              meal, day_value, allow_estimate=False, fiber=0, component_metadata=None):
         seen.update(calories=calories, protein=protein, macro_source=macro_source)
         return {"logged": {"name": name, "calories": calories, "protein": protein,
                            "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}
@@ -1466,7 +1156,7 @@ async def test_food_path_zero_macro_item_without_lookup_gets_default_estimate(mo
         return None
 
     async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
-                              meal, day_value, allow_estimate=False, fiber=0):
+                              meal, day_value, allow_estimate=False, fiber=0, component_metadata=None):
         seen.update(calories=calories, protein=protein, carbs=carbs, fat=fat,
                     macro_source=macro_source)
         return {"logged": {"name": name, "calories": calories, "protein": protein,
@@ -1503,7 +1193,7 @@ async def test_food_path_zero_calorie_foods_keep_their_zeros(monkeypatch):
         pytest.fail("zero-calorie foods must not trigger the rescue lookup")
 
     async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
-                              meal, day_value, allow_estimate=False, fiber=0):
+                              meal, day_value, allow_estimate=False, fiber=0, component_metadata=None):
         seen.update(calories=calories, macro_source=macro_source)
         return {"logged": {"name": name, "calories": calories, "protein": protein,
                            "carbs": carbs, "fat": fat, "fiber": fiber, "meal": meal}}

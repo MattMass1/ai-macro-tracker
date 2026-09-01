@@ -5,6 +5,9 @@ services:
     plan: free
     rootDir: server
     buildCommand: pip install -r requirements.txt
+    # Render injects service env vars into pre-deploy commands. The runner
+    # validates DATABASE_URL and prints only database name + host class.
+    preDeployCommand: python src/migrations.py
     startCommand: python src/server.py
     healthCheckPath: /health
     envVars:
@@ -16,6 +19,14 @@ services:
         generateValue: true
       - key: OPENAI_ACCESS_TOKEN
         sync: false
+      - key: FATSECRET_CLIENT_ID
+        sync: false
+      - key: FATSECRET_CLIENT_SECRET
+        sync: false
+      - key: FATSECRET_ATTRIBUTION_ENABLED
+        value: "false"
+      - key: FATSECRET_CACHE_ALLOWED
+        value: "false"
       - key: LOCAL_TZ
         value: America/New_York
       - key: DAY_ROLLOVER_HOUR

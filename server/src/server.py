@@ -7,6 +7,7 @@ macro totals, and the validation exist exactly once.
 from __future__ import annotations
 
 import functools
+import hashlib
 import hmac
 import json
 import logging
@@ -35,7 +36,7 @@ from fastmcp.exceptions import ToolError  # noqa: E402
 import domain  # noqa: E402
 from config import get_config  # noqa: E402
 from domain import MacroError  # noqa: E402
-from store import Store, StoreError  # noqa: E402
+from store import IdempotencyConflict, Store, StoreError, meal as stored_meal  # noqa: E402
 from store import ChatQuotaExceeded, InviteAlreadyClaimed, InviteNotFound  # noqa: E402
 from auth import bind_user, current_user_id, reset_user  # noqa: E402
 from coach import CoachProviderError, run_agent  # noqa: E402
@@ -82,6 +83,28 @@ def store_client() -> Store:
     if _client is None:
         _client = Store(CONFIG.database_url)
     return _client
+
+
+async def resolve_food(query: str, **kwargs):
+    """Use the authenticated tenant's verified catalog before external providers."""
+    client = store_client()
+    catalog_lookup = getattr(client, "lookup_catalog", None)
+    if catalog_lookup is not None:
+        try:
+            found = await catalog_lookup(query)
+            if found is not None:
+                return found
+        except Exception:
+            logger.exception("Catalog lookup failed; isolating provider")
+    found = await food_lookup.resolve_food(query, **kwargs)
+    if found is not None:
+        cache = getattr(client, "cache_provider_food", None)
+        if cache is not None:
+            try:
+                await cache(found)
+            except Exception:
+                logger.exception("Licensed provider cache failed; returning live result")
+    return found
 
 
 @asynccontextmanager
@@ -687,6 +710,7 @@ async def write_meal(
     day_value: str | None,
     allow_estimate: bool = False,
     fiber: Any = 0,
+    component_metadata: Any = None,
 ) -> dict[str, Any]:
     """Validate, write one row, and return the day's corrected numbers."""
     clean_name = domain.validate_name(name)
@@ -708,7 +732,7 @@ async def write_meal(
     day = domain.resolve_date(day_value)
 
     page = await store_client().insert_meal(name=clean_name, meal=meal_name,
-        day=day, macro_source=source, **macros)
+        day=day, macro_source=source, component_metadata=component_metadata, **macros)
 
     logged = {
         "id": page.get("id", ""),
@@ -729,6 +753,38 @@ async def write_meal(
     return payload
 
 
+def _validated_meal_values(name, calories, protein, carbs, fat, fiber,
+                           macro_source, meal, day_value):
+    """Return the canonical values shared by ordinary and idempotent logging."""
+    clean_name = domain.validate_name(name)
+    macros = domain.validate_macros(calories, protein, carbs, fat, fiber)
+    if (macros["calories"] > 0
+            and sum(macros[key] for key in ("protein", "carbs", "fat", "fiber")) == 0
+            and not _is_zero_macro_food(clean_name)):
+        raise MacroError("food entry has calories but no macros")
+    return {"name": clean_name, "meal": domain.normalize_meal(meal),
+            "day": domain.resolve_date(day_value),
+            "macro_source": domain.validate_macro_source(macro_source), **macros}
+
+
+async def _idempotent_meal_response(conn, user_id, row) -> dict[str, Any]:
+    """Build the replayable /api/log response through the write connection."""
+    logged = stored_meal(row)
+    snapshot = await Store.day_snapshot(conn, user_id, row["day"])
+    targets_row = snapshot["targets"]
+    targets = ({key: targets_row[key] for key in domain.MACRO_KEYS}
+               if targets_row else dict(domain.DEFAULT_TARGETS))
+    totals = domain.sum_macros(snapshot["meals"])
+    payload = {"date": row["day"].isoformat(), "day_label": domain.day_label(row["day"]),
+        "totals": totals, "targets": targets, "remaining": domain.remaining(totals, targets),
+        "day_rollup": snapshot["day_rollup"], "meal_rollups": snapshot["meal_rollups"],
+        "meals": snapshot["meals"], "logged": {**logged, "macro_source": row["macro_source"]}}
+    warning = domain.atwater_warning(row["calories"], row["protein"], row["carbs"], row["fat"])
+    if warning:
+        payload["warning"] = warning
+    return payload
+
+
 KNOWN_CHAT_FOODS = """Moe's cookie 170 kcal, 2g protein, 23g carbs, 8g fat
 Fairlife 30g shake 150/30/3/2.5
 Barebells 200/20/21/7
@@ -741,9 +797,9 @@ sweet potato about 86 kcal/100g
 3 large eggs 216/19/1/14
 McNuggets 10pc 410/24/25/25
 Michelob Ultra 95 kcal, 0g protein, 2.6g carbs, 0g fat
-Chipotle bowl 625/75/45/16
-Chipotle burrito 945/83/100/24
-CFA 8ct grilled nuggets + grilled club + sauce 710/62/45/31"""
+Chipotle bowl 625/75/38/22
+Chipotle burrito 945/83/88/31
+CFA 8ct grilled nuggets + grilled club + sauce 710/62/61/25"""
 
 KNOWN_CHAT_FOOD_NAMES = (
     "Moe's cookie",
@@ -762,6 +818,13 @@ KNOWN_CHAT_FOOD_NAMES = (
     "Chipotle burrito",
     "CFA 8ct grilled nuggets + grilled club + sauce",
 )
+
+APPROVED_KNOWN_FOOD_MACROS = {
+    "Chipotle burrito": {"calories": 945, "protein": 83, "carbs": 88, "fat": 31, "fiber": 0},
+    "CFA 8ct grilled nuggets + grilled club + sauce": {
+        "calories": 710, "protein": 62, "carbs": 61, "fat": 25, "fiber": 0,
+    },
+}
 
 
 def _normalized_food_name(name: str) -> str:
@@ -929,7 +992,7 @@ async def _forced_food_item(
     if found is None and not attempted_lookups:
         # The model never searched; run the cascade ourselves before estimating.
         try:
-            found = await food_lookup.resolve_food(name)
+            found = await resolve_food(name)
         except Exception:
             logger.exception("Never-refuse fallback lookup failed; estimating")
             found = None
@@ -981,7 +1044,7 @@ Known foods (values are calories/protein/carbs/fat unless labeled):
 EXAMPLES — always log, never refuse:
 
 User: "chipotle bowl with double chicken and guac"
-You: [{{"name":"Chipotle bowl","calories":625,"protein":75,"carbs":45,"fat":16,"fiber":0,"quantity":1,"basis":"per_serving","sourced_from":"known","meal":"Lunch","note":"Known food: Chipotle bowl"}}]
+You: [{{"name":"Chipotle bowl","calories":625,"protein":75,"carbs":38,"fat":22,"fiber":0,"quantity":1,"basis":"per_serving","sourced_from":"known","meal":"Lunch","note":"Known food: Chipotle bowl"}}]
 
 User: "Barebells creamy crisp"
 You: [{{"name":"Barebells","calories":200,"protein":20,"carbs":21,"fat":7,"fiber":0,"quantity":1,"basis":"per_serving","sourced_from":"known","meal":"Snack","note":"Known food: Barebells"}}]
@@ -1009,8 +1072,8 @@ If the message is a greeting, question, or otherwise not asking to log food, out
         "function": {
             "name": "lookup_food",
             "description": (
-                "Look up real food macros using the OpenFoodFacts and "
-                "Tavily cascade. Call for foods not in presets or known foods."
+                "Look up real food macros using the verified catalog, curated "
+                "menus, FatSecret, and OpenFoodFacts fallback."
             ),
             "parameters": {
                 "type": "object",
@@ -1064,7 +1127,7 @@ If the message is a greeting, question, or otherwise not asking to log food, out
                         name = str(arguments.get("name") or "").strip()
                         if name:
                             attempted_lookups.append(name)
-                        found = await food_lookup.resolve_food(name) if name else None
+                        found = await resolve_food(name) if name else None
                         if found:
                             lookup_found[_normalized_food_name(name)] = found
                             result = {
@@ -1132,9 +1195,9 @@ async def _upgrade_estimate(
         return None
     try:
         if whole_item and portion is None:
-            found = await food_lookup.resolve_food(name, whole_item=True)
+            found = await resolve_food(name, whole_item=True)
         else:
-            found = await food_lookup.resolve_food(name)
+            found = await resolve_food(name)
         if not found:
             return None
         if portion is not None:
@@ -1163,7 +1226,7 @@ async def _best_available_macros(
     a sourced approximation always beats a zero-macro row.
     """
     try:
-        found = await food_lookup.resolve_food(name)
+        found = await resolve_food(name)
     except Exception:
         logger.exception("Zero-macro rescue lookup failed")
         return None
@@ -1264,7 +1327,7 @@ async def log_meal(
     """Log one food or meal to the nutrition log and return the day's totals.
 
     NEVER estimate or guess macros. Before calling this, look up real numbers:
-    OpenFoodFacts or Tavily, or the specific brand's nutrition label for packaged
+    a verified catalog/provider lookup, or the specific brand's nutrition label for packaged
     products. Do not guess portion sizes or weights
     either — if the amount is unclear, ask the user how much they ate.
 
@@ -1756,6 +1819,8 @@ def api_route(path: str, methods: list[str], *, public: bool = False):
                 return _with_cors(JSONResponse({"error": "Unknown invite code"}, status_code=404), request)
             except InviteAlreadyClaimed:
                 return _with_cors(JSONResponse({"error": "Invite code already claimed"}, status_code=409), request)
+            except IdempotencyConflict as exc:
+                return _with_cors(JSONResponse({"error": str(exc)}, status_code=409), request)
             except MacroError as exc:
                 return _with_cors(
                     JSONResponse({"error": str(exc)}, status_code=400), request
@@ -1867,6 +1932,10 @@ async def api_food_barcode(request: Request) -> Any:
     found = await food_lookup.resolve_by_barcode(normalized_code)
     if found is None:
         return {"error": "Barcode not found in database"}, 404
+    try:
+        await store_client().cache_provider_food(found)
+    except Exception:
+        logger.exception("Licensed barcode cache failed; returning live result")
     macros = found["macros_per_100g"]
     result = {
         "name": found["name"],
@@ -1877,6 +1946,8 @@ async def api_food_barcode(request: Request) -> Any:
         result["serving_size"] = found["serving_size"]
     if found.get("macros_per_serving"):
         result["macros_per_serving"] = found["macros_per_serving"]
+    if found.get("attribution"):
+        result["attribution"] = found["attribution"]
     return result
 
 
@@ -1894,17 +1965,20 @@ async def api_log_preset(request: Request) -> Any:
 @api_route("/api/log", methods=["POST"])
 async def api_log(request: Request) -> Any:
     body = await _json_body(request)
-    return await write_meal(
-        name=str(body.get("name", "")),
-        calories=body.get("calories"),
-        protein=body.get("protein"),
-        carbs=body.get("carbs"),
-        fat=body.get("fat"),
-        fiber=body.get("fiber", 0),
-        macro_source=str(body.get("macro_source", "")),
-        meal=body.get("meal"),
-        day_value=body.get("date"),
-    )
+    key = request.headers.get("idempotency-key", "").strip()
+    if key:
+        values = _validated_meal_values(str(body.get("name", "")), body.get("calories"),
+            body.get("protein"), body.get("carbs"), body.get("fat"), body.get("fiber", 0),
+            str(body.get("macro_source", "")), body.get("meal"), body.get("date"))
+        request_hash = hashlib.sha256(json.dumps(
+            {**values, "day": values["day"].isoformat()}, sort_keys=True,
+            separators=(",", ":"), default=str).encode()).hexdigest()
+        return await store_client().insert_meal_idempotent(
+            key, request_hash, response_builder=_idempotent_meal_response, **values)
+    return await write_meal(name=str(body.get("name", "")), calories=body.get("calories"),
+        protein=body.get("protein"), carbs=body.get("carbs"), fat=body.get("fat"),
+        fiber=body.get("fiber", 0), macro_source=str(body.get("macro_source", "")),
+        meal=body.get("meal"), day_value=body.get("date"))
 
 
 _LIBRARY_STOPWORDS = {
@@ -2300,7 +2374,7 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
         return search_workout_library(rows, str(args["query"]))
     async def lookup_food_tool(args):
         current_user_id()  # fail closed: only run inside an authenticated tenant context
-        found = await food_lookup.resolve_food(str(args["query"]))
+        found = await resolve_food(str(args["query"]))
         if not found:
             return {"result": "not found",
                     "guidance": "No free-database match. Log your best estimate "
@@ -2435,6 +2509,9 @@ def _composite_meal(
         **macros,
         "meal": _food_turn_meal(message, components),
         "macro_source": "Composite: " + "; ".join(sources),
+        "component_metadata": [{key: item.get(key) for key in
+            ("name","calories","protein","carbs","fat","fiber","macro_source")}
+            for item in components],
     }
 
 
@@ -2463,6 +2540,7 @@ async def _persist_staged_meals(
             row["name"], row["calories"], row["protein"], row["carbs"],
             row["fat"], row["macro_source"], row["meal"], day_value,
             allow_estimate=True, fiber=row["fiber"],
+            component_metadata=row.get("component_metadata"),
         )
         return [result["logged"]]
 
@@ -2486,6 +2564,7 @@ async def _persist_staged_meals(
             "meal": domain.normalize_meal(row.get("meal")),
             "macro_source": source,
             "day": day,
+            "component_metadata": row.get("component_metadata"),
             **macros,
         })
     stored = await store_client().insert_meals(validated_rows)
@@ -2641,6 +2720,17 @@ async def api_chat(request: Request) -> Any:
                     # for the user's exact portion. The registry only proves the
                     # source label; it does not redo language/portion math.
                     source = f"Known food: {known_name}"
+                    approved = APPROVED_KNOWN_FOOD_MACROS.get(known_name)
+                    if approved is not None:
+                        try:
+                            servings = float(quantity)
+                        except (TypeError, ValueError):
+                            servings = 1
+                        if servings <= 0:
+                            servings = 1
+                        macros = domain.validate_macros(
+                            *(round(approved[key] * servings, 2) for key in domain.MACRO_KEYS)
+                        )
                 else:
                     source = note if sourced_from == "lookup" else "ESTIMATE"
                 # "Logged without macros" is the worst outcome: an all-zero
@@ -3006,6 +3096,15 @@ async def health(request: Request) -> Response:
             "day_label": domain.day_label(day),
         }
     )
+
+
+@api_route("/api/readiness", methods=["GET"])
+async def readiness(request: Request) -> Any:
+    """Protected, read-only database and migration readiness details."""
+    details = await store_client().migration_readiness()
+    status = "ready" if details["migrations"]["compatible"] else "not_ready"
+    payload = {"status": status, **details}
+    return payload if status == "ready" else (payload, 503)
 
 
 def main() -> None:

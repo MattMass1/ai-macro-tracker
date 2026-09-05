@@ -1,11 +1,11 @@
 import type { Metadata, Viewport } from "next";
 
 import "./globals.css";
-import MobileRuntime from "@/components/MobileRuntime";
 
 export const metadata: Metadata = {
-  title: "Macros",
-  description: "Today's macros, one tap from the home screen.",
+  title: "Macro Coach | Web app paused",
+  description:
+    "The Macro Coach web app is temporarily paused. Please use the native iPhone app.",
   manifest: "/manifest.json",
   applicationName: "Macros",
   appleWebApp: {
@@ -33,7 +33,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: "#07090c",
+  themeColor: "#f5f6f8",
 };
 
 export default function RootLayout({
@@ -44,7 +44,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="min-h-dvh bg-bg text-text">
-        <MobileRuntime>{children}</MobileRuntime>
+        {children}
         <script
           dangerouslySetInnerHTML={{
             __html: `

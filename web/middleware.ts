@@ -10,6 +10,11 @@ import { SESSION_COOKIE, isValidSession } from "./lib/session";
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
+  // Temporary sunset bypass: the static notice and disabled proxy need no passcode.
+  if (pathname === "/" || pathname.startsWith("/api/macro/")) {
+    return NextResponse.next();
+  }
+
   if (pathname.startsWith("/api/auth")) {
     return NextResponse.next();
   }

@@ -54,6 +54,7 @@ class Config:
     port: int
     matt_user_id: UUID
     allowed_origins: list[str] = field(default_factory=list)
+    openai_api_key: str = ""
 
 
 def _require(name: str, missing: list[str], default: str = "") -> str:
@@ -83,6 +84,7 @@ def load_config() -> Config:
             for origin in os.environ.get("ALLOWED_ORIGINS", "*").split(",")
             if origin.strip()
         ],
+        openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
     )
 
     if missing:

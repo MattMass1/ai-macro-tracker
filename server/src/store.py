@@ -126,6 +126,14 @@ class Store:
             hash_device_token(raw_token),
         )
 
+    async def resolve_device_for_live(self, raw_token: str) -> UUID | None:
+        """Resolve Live-session auth without mutating device activity state."""
+        pool = await self.connect()
+        return await pool.fetchval(
+            "SELECT user_id FROM devices WHERE token_hash=$1",
+            hash_device_token(raw_token),
+        )
+
     async def claim_invite(self, code: str, label: str | None = None, display_name: str | None = None) -> dict[str, str]:
         pool = await self.connect()
         async with pool.acquire() as conn, conn.transaction():

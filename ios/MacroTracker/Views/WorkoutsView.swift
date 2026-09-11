@@ -138,7 +138,7 @@ private struct TodaysSessionCard: View {
     let date: String
     let onLog: (WorkoutLoggerSelection) -> Void
     let onAddMore: () -> Void
-    @State private var exercises: [String]
+    @State private var exercises: [WorkoutPlanPayload.Exercise]
     @State private var completed: Set<String>
     @State private var swapTarget: (index: Int, name: String)?
 
@@ -152,8 +152,7 @@ private struct TodaysSessionCard: View {
         self.date = date
         self.onLog = onLog
         self.onAddMore = onAddMore
-        let names = session.exercises.map(\.name)
-        _exercises = State(initialValue: names)
+        _exercises = State(initialValue: session.exercises)
         _completed = State(initialValue: WorkoutSessionCompletions.saved(date: date, type: session.type))
     }
 
@@ -174,13 +173,13 @@ private struct TodaysSessionCard: View {
                 Text("No exercises assigned for this session.")
                     .font(.subheadline).foregroundStyle(Theme.muted)
             } else {
-                ForEach(Array(exercises.enumerated()), id: \.offset) { index, name in
+                ForEach(Array(exercises.enumerated()), id: \.offset) { index, exercise in
                     WorkoutExerciseRow(
-                        name: name,
-                        isCompleted: completed.contains(name),
-                        onToggle: { toggle(name) },
-                        onLog: { onLog(.init(type: session.type, exercise: name)) },
-                        onSwap: { onSwap(name, index) }
+                        exercise: exercise,
+                        isCompleted: completed.contains(exercise.name),
+                        onToggle: { toggle(exercise.name) },
+                        onLog: { onLog(.init(type: session.type, exercise: exercise.name)) },
+                        onSwap: { onSwap(exercise.name, index) }
                     )
                     if index < exercises.count - 1 { Divider() }
                 }
@@ -195,11 +194,11 @@ private struct TodaysSessionCard: View {
         .task {
             WorkoutSessionCompletions.pruneOld()
         }
-        .onChange(of: session.exercises.map(\.name)) { _, names in
-            // A saved voice substitution must replace the visible rows even
-            // when the session type stays the same (for example, Push).
-            exercises = names
-            completed.formIntersection(names)
+        .onChange(of: session.exercises) { _, updated in
+            // Include prescription changes: the name may stay the same when
+            // the user asks for different planned sets, reps, or rest today.
+            exercises = updated
+            completed.formIntersection(updated.map(\.name))
         }
         .sheet(item: Binding(
             get: { swapTarget.map { SwapTarget(index: $0.index, name: $0.name) } },
@@ -228,7 +227,8 @@ private struct TodaysSessionCard: View {
     }
 
     private func swapExercise(at index: Int, from oldName: String, to newName: String) {
-        exercises[index] = newName
+        guard exercises.indices.contains(index), exercises[index].name == oldName else { return }
+        exercises[index].name = newName
         if completed.remove(oldName) != nil {
             completed.insert(newName)
         }
@@ -240,8 +240,8 @@ private struct TodaysSessionCard: View {
     }
 }
 
-private struct WorkoutExerciseRow: View {
-    let name: String
+struct WorkoutExerciseRow: View {
+    let exercise: WorkoutPlanPayload.Exercise
     let isCompleted: Bool
     let onToggle: () -> Void
     let onLog: () -> Void
@@ -257,12 +257,19 @@ private struct WorkoutExerciseRow: View {
             .buttonStyle(.plain)
 
             Button(action: onLog) {
-                Text(name)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(isCompleted ? Theme.muted : Theme.ink)
-                    .strikethrough(isCompleted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(exercise.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(isCompleted ? Theme.muted : Theme.ink)
+                        .strikethrough(isCompleted)
+                    if let prescription = WorkoutPrescriptionPresentation(exercise: exercise).text {
+                        Text(prescription)
+                            .font(.caption)
+                            .foregroundStyle(Theme.muted)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
@@ -273,6 +280,24 @@ private struct WorkoutExerciseRow: View {
                     .foregroundStyle(Theme.accent)
             }
         }
+    }
+}
+
+struct WorkoutPrescriptionPresentation: Equatable {
+    let text: String?
+
+    init(exercise: WorkoutPlanPayload.Exercise) {
+        var parts: [String] = []
+        if let sets = exercise.sets, sets > 0 {
+            parts.append("\(sets) \(sets == 1 ? "set" : "sets")")
+        }
+        if let reps = exercise.reps?.trimmingCharacters(in: .whitespacesAndNewlines), !reps.isEmpty {
+            parts.append("\(reps) reps")
+        }
+        if let rest = exercise.restSec, rest >= 0 {
+            parts.append("\(rest) sec rest")
+        }
+        text = parts.isEmpty ? nil : "Planned: " + parts.joined(separator: " · ")
     }
 }
 

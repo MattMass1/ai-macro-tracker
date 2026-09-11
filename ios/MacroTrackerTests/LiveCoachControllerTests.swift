@@ -5,6 +5,15 @@ import UIKit
 import XCTest
 @testable import MacroTracker
 
+private enum VoiceContractFixtures {
+    static func data(_ name: String) throws -> Data {
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("shared/fixtures/\(name)")
+        return try Data(contentsOf: fixture)
+    }
+}
+
 private final class TestDeviceTokens: @unchecked Sendable {
     private let lock = NSLock()
     private var value: String?
@@ -57,7 +66,12 @@ private final class VoiceRefreshURLProtocol: URLProtocol {
         case "/api/brief": body = #"{"date":"2026-09-11","text":""}"#
         case "/api/exercises": body = #"{"exercises":[]}"#
         case "/api/plan":
-            body = #"{"has_plan":true,"rotation":["Push","Pull"],"upcoming":[{"type":"Push","exercises":[{"name":"Dumbbell Bench Press"}]}],"core":[]}"#
+            do {
+                body = String(decoding: try VoiceContractFixtures.data("today-workout-plan.json"), as: UTF8.self)
+            } catch {
+                client?.urlProtocol(self, didFailWithError: error)
+                return
+            }
         case "/api/workout-stats":
             body = #"{"today":{"date":"2026-09-11","entries":1,"exercises":[]},"week":{"week_start":"2026-09-07","week_label":"This week","days_logged":1,"total_sets":2,"total_volume":2080,"streak_weeks":1},"coverage":{"muscle_groups":{},"workout_types":{},"untouched":[]},"prs":[],"plan":{"today":{"type":"Push","exercises":["Dumbbell Bench Press"]},"next":[]}}"#
         case "/api/workouts/history": body = "{\"workouts\":[\(workout)]}"
@@ -155,16 +169,44 @@ final class LiveCoachControllerTests: XCTestCase {
         XCTAssertEqual(store.day?.totals.calories, 650)
         XCTAssertEqual(store.day?.remaining.protein, 120)
         XCTAssertEqual(store.plan?.upcoming.first?.exercises.first?.name, "Dumbbell Bench Press")
+        XCTAssertEqual(store.plan?.upcoming.first?.exercises.first?.sets, 4)
+        XCTAssertEqual(store.plan?.upcoming.first?.exercises.first?.reps, "10")
+        XCTAssertEqual(store.plan?.upcoming.first?.exercises.first?.restSec, 90)
+        // Planned sets do not create or replace completed workout records.
         XCTAssertEqual(store.workouts.first?.sets, [WorkoutSet(weight: 120, reps: 10), WorkoutSet(weight: 110, reps: 8)])
         XCTAssertEqual(store.workoutHistoryEntries.first?.exercise, "Dumbbell Bench Press")
         XCTAssertEqual(store.trendsPayload?.days.first?.calories, 650)
     }
 
     func testCanonicalDataChangeEventDecodes() throws {
-        let fixture = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("shared/fixtures/live-data-changed.json")
-        XCTAssertEqual(try LiveCoachWireCodec.decode(Data(contentsOf: fixture)), .dataChanged)
+        XCTAssertEqual(try LiveCoachWireCodec.decode(VoiceContractFixtures.data("live-data-changed.json")), .dataChanged)
+    }
+
+    func testSavedWorkoutPrescriptionDecodesAndRendersWithoutClaimingCompletion() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let plan = try decoder.decode(WorkoutPlanPayload.self, from: VoiceContractFixtures.data("today-workout-plan.json"))
+        let exercise = try XCTUnwrap(plan.upcoming.first?.exercises.first)
+        XCTAssertEqual(WorkoutPrescriptionPresentation(exercise: exercise).text, "Planned: 4 sets · 10 reps · 90 sec rest")
+        let row = WorkoutExerciseRow(exercise: exercise, isCompleted: false, onToggle: {}, onLog: {}, onSwap: {})
+        let renderer = ImageRenderer(content: row.padding(20).frame(width: 390).background(Theme.surface))
+        renderer.scale = 2
+        let image = try XCTUnwrap(renderer.uiImage)
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "saved-today-workout-prescription"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        var updated = exercise
+        updated.reps = "8-12"
+        updated.restSec = 60
+        XCTAssertNotEqual([exercise], [updated], "Same-name prescription edits must trigger the row-state refresh")
+        XCTAssertEqual(WorkoutPrescriptionPresentation(exercise: updated).text, "Planned: 4 sets · 8-12 reps · 60 sec rest")
+    }
+
+    func testLegacyNameOnlyWorkoutDoesNotInventPrescription() throws {
+        let exercise = try JSONDecoder().decode(WorkoutPlanPayload.Exercise.self, from: Data(#"{"name":"Bench Press"}"#.utf8))
+        XCTAssertNil(WorkoutPrescriptionPresentation(exercise: exercise).text)
     }
 
     func testSavedActionsCoalesceRefreshAndRefreshAgainAfterEnd() async {
@@ -196,6 +238,30 @@ final class LiveCoachControllerTests: XCTestCase {
         XCTAssertTrue(LiveCoachWebSocketTransport.connectionError(status: 401).message.contains("invite code"))
         XCTAssertTrue(LiveCoachWebSocketTransport.connectionError(status: 404).message.contains("server"))
         XCTAssertEqual(LiveCoachWebSocketTransport.connectionError(status: 503).retryable, true)
+        XCTAssertEqual(LiveCoachWebSocketTransport.connectionError(status: 403).retryable, true)
+        XCTAssertFalse(LiveCoachWebSocketTransport.connectionError(status: 403).message.contains("session expired"))
+    }
+
+    func testRefusedWebSocketUpgradePreservesDeviceLogin() async {
+        let tokens = TestDeviceTokens("denied-fixture-token")
+        let auth = AuthService(
+            tokenProvider: { tokens.token },
+            tokenSaver: { tokens.save($0) },
+            tokenDeleter: { tokens.save(nil) }
+        )
+        let transport = LiveCoachWebSocketTransport(
+            baseURL: URL(string: "http://127.0.0.1:18765"),
+            tokenProvider: { tokens.token }
+        )
+        do {
+            _ = try await transport.connect()
+            XCTFail("The fixture must refuse this token's WebSocket upgrade")
+        } catch {
+            XCTAssertEqual(error as? LiveCoachConnectionError, LiveCoachWebSocketTransport.connectionError(status: 403))
+        }
+        await drainTasks()
+        XCTAssertTrue(auth.isAuthenticated)
+        XCTAssertEqual(tokens.token, "denied-fixture-token")
     }
 
     func testMutationDuringRefreshRunsFollowUpWithoutConcurrentReads() async {

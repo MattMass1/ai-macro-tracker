@@ -1,0 +1,13 @@
+{
+  "rotation": ["Push", "Pull", "Legs"],
+  "last_workout": null,
+  "upcoming": [
+    {"type": "Push", "exercises": [{"name": "Dumbbell Bench Press", "sets": 4, "reps": "10", "rest_sec": 90}], "done": false},
+    {"type": "Pull", "exercises": [{"name": "Lat Pulldown"}]},
+    {"type": "Legs", "exercises": [{"name": "Squat"}]},
+    {"type": "Push", "exercises": [{"name": "Bench Press"}]},
+    {"type": "Pull", "exercises": [{"name": "Lat Pulldown"}]}
+  ],
+  "core": [],
+  "has_plan": true
+}

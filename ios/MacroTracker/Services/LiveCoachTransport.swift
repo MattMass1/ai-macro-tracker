@@ -212,8 +212,10 @@ final class LiveCoachWebSocketTransport: NSObject, LiveCoachTransporting {
 
     static func connectionError(status: Int?) -> LiveCoachConnectionError {
         switch status {
-        case 401, 403:
+        case 401:
             return LiveCoachConnectionError(message: "Your session expired. Sign in with an invite code to use voice.", retryable: false)
+        case 403:
+            return LiveCoachConnectionError(message: "The server refused voice access. Try again shortly.", retryable: true)
         case 404:
             return LiveCoachConnectionError(message: "Voice is not available on this server yet. The server needs an update.", retryable: false)
         case 429:

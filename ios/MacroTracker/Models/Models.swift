@@ -157,7 +157,13 @@ struct LastWorkoutPayload: Codable { var exercise: String?; var sets: [WorkoutSe
 struct DeletedPayload: Codable { var deleted: String }
 
 struct WorkoutPlanPayload: Codable {
-    struct Exercise: Codable, Identifiable { var id: String { name }; var name: String }
+    struct Exercise: Codable, Identifiable, Equatable {
+        var id: String { name }
+        var name: String
+        var sets: Int?
+        var reps: String?
+        var restSec: Int?
+    }
     struct PlannedDay: Codable, Identifiable { var id: String { type }; var type: String; var exercises: [Exercise] }
     var rotation: [String]
     var lastWorkout: String?

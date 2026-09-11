@@ -97,6 +97,7 @@ final class LiveCoachAudioEngine: LiveCoachAudioHandling {
     private var tapInstalled = false
     private var playerConnected = false
     private var notificationTokens: [NSObjectProtocol] = []
+    private var observationGeneration = UUID()
     private var targetFormat: AVAudioFormat? {
         AVAudioFormat(
             commonFormat: .pcmFormatInt16,
@@ -131,51 +132,7 @@ final class LiveCoachAudioEngine: LiveCoachAudioHandling {
         try audioSession.setPreferredIOBufferDuration(0.02)
         try audioSession.setActive(true)
 
-        let input = engine.inputNode
-        if !input.isVoiceProcessingEnabled {
-            try input.setVoiceProcessingEnabled(true)
-        }
-        let inputFormat = input.outputFormat(forBus: 0)
-        guard inputFormat.sampleRate > 0,
-              inputFormat.channelCount > 0,
-              let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
-            throw LiveCoachAudioError.unsupportedFormat
-        }
-        if !playerConnected {
-            engine.connect(player, to: engine.mainMixerNode, format: targetFormat)
-            playerConnected = true
-        }
-
-        let continuation = capturedContinuation
-        let muteState = muteState
-        input.installTap(onBus: 0, bufferSize: 2_400, format: inputFormat) { buffer, _ in
-            guard !muteState.get() else { return }
-            let ratio = targetFormat.sampleRate / inputFormat.sampleRate
-            let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio)) + 32
-            guard let output = AVAudioPCMBuffer(
-                pcmFormat: targetFormat,
-                frameCapacity: capacity
-            ) else { return }
-            var supplied = false
-            var conversionError: NSError?
-            let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
-                if supplied {
-                    inputStatus.pointee = .noDataNow
-                    return nil
-                }
-                supplied = true
-                inputStatus.pointee = .haveData
-                return buffer
-            }
-            guard conversionError == nil,
-                  status != .error,
-                  output.frameLength > 0,
-                  let bytes = output.audioBufferList.pointee.mBuffers.mData else { return }
-            let count = Int(output.frameLength) * MemoryLayout<Int16>.size
-            guard count <= LiveCoachWireCodec.maximumAudioBytes else { return }
-            continuation.yield(Data(bytes: bytes, count: count))
-        }
-        tapInstalled = true
+        try rebuildGraph(targetFormat: targetFormat)
         engine.prepare()
         try engine.start()
         observeAudioSessionChanges()
@@ -226,8 +183,38 @@ final class LiveCoachAudioEngine: LiveCoachAudioHandling {
         muteState.set(muted)
     }
 
+    func recoverFromConfigurationChange() throws {
+        guard !audioSession.currentRoute.inputs.isEmpty,
+              !audioSession.currentRoute.outputs.isEmpty,
+              let targetFormat else { throw LiveCoachAudioError.unsupportedFormat }
+        stopPlaybackForRouteSafety()
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        engine.stop()
+        if playerConnected {
+            engine.disconnectNodeOutput(player)
+            playerConnected = false
+        }
+        engine.reset()
+        do {
+            try rebuildGraph(targetFormat: targetFormat)
+            engine.prepare()
+            try engine.start()
+        } catch {
+            if tapInstalled {
+                engine.inputNode.removeTap(onBus: 0)
+                tapInstalled = false
+            }
+            engine.stop()
+            throw error
+        }
+    }
+
     func stop() {
         muteState.set(false)
+        observationGeneration = UUID()
         if tapInstalled {
             engine.inputNode.removeTap(onBus: 0)
             tapInstalled = false
@@ -240,6 +227,59 @@ final class LiveCoachAudioEngine: LiveCoachAudioHandling {
         notificationTokens.removeAll()
         try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
         replaceSessionStreams()
+    }
+
+    private func rebuildGraph(targetFormat: AVAudioFormat) throws {
+        let input = engine.inputNode
+        if !input.isVoiceProcessingEnabled {
+            try input.setVoiceProcessingEnabled(true)
+        }
+        let inputFormat = input.outputFormat(forBus: 0)
+        guard inputFormat.sampleRate > 0,
+              inputFormat.channelCount > 0,
+              let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+            throw LiveCoachAudioError.unsupportedFormat
+        }
+        if !playerConnected {
+            engine.connect(player, to: engine.mainMixerNode, format: targetFormat)
+            playerConnected = true
+        }
+        let continuation = capturedContinuation
+        let muteState = muteState
+        input.installTap(onBus: 0, bufferSize: 2_400, format: inputFormat) { buffer, _ in
+            guard !muteState.get() else { return }
+            let ratio = targetFormat.sampleRate / inputFormat.sampleRate
+            let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio)) + 32
+            guard let output = AVAudioPCMBuffer(
+                pcmFormat: targetFormat,
+                frameCapacity: capacity
+            ) else { return }
+            var supplied = false
+            var conversionError: NSError?
+            let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
+                if supplied {
+                    inputStatus.pointee = .noDataNow
+                    return nil
+                }
+                supplied = true
+                inputStatus.pointee = .haveData
+                return buffer
+            }
+            guard conversionError == nil,
+                  status != .error,
+                  output.frameLength > 0,
+                  let bytes = output.audioBufferList.pointee.mBuffers.mData else { return }
+            let count = Int(output.frameLength) * MemoryLayout<Int16>.size
+            guard count <= LiveCoachWireCodec.maximumAudioBytes else { return }
+            continuation.yield(Data(bytes: bytes, count: count))
+        }
+        tapInstalled = true
+    }
+
+    private func stopPlaybackForRouteSafety() {
+        player.stop()
+        playbackQueue.reset()
+        playbackContinuation.yield(false)
     }
 
     private func replaceSessionStreams() {
@@ -261,22 +301,73 @@ final class LiveCoachAudioEngine: LiveCoachAudioHandling {
         guard notificationTokens.isEmpty else { return }
         let center = NotificationCenter.default
         let lifecycleContinuation = lifecycleContinuation
+        let observationGeneration = UUID()
+        self.observationGeneration = observationGeneration
         notificationTokens.append(center.addObserver(
             forName: AVAudioSession.routeChangeNotification,
             object: audioSession,
             queue: .main
-        ) { _ in
-            lifecycleContinuation.yield(.routeChanged)
+        ) { [weak self] notification in
+            let rawReason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.observationGeneration == observationGeneration else { return }
+                let reason = AVAudioSession.RouteChangeReason(rawValue: rawReason ?? 0)
+                let change = LiveCoachAudioRouteChange(
+                    reason: Self.routeReason(reason),
+                    hasInput: !self.audioSession.currentRoute.inputs.isEmpty,
+                    hasOutput: !self.audioSession.currentRoute.outputs.isEmpty
+                )
+                if change.reason == .oldDeviceUnavailable || !change.hasOutput {
+                    self.stopPlaybackForRouteSafety()
+                }
+                lifecycleContinuation.yield(.routeEvaluated(change))
+            }
         })
         notificationTokens.append(center.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: audioSession,
             queue: .main
-        ) { notification in
+        ) { [weak self] notification in
             let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-            if raw == AVAudioSession.InterruptionType.began.rawValue {
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.observationGeneration == observationGeneration,
+                      raw == AVAudioSession.InterruptionType.began.rawValue else { return }
+                self.stopPlaybackForRouteSafety()
                 lifecycleContinuation.yield(.interrupted)
             }
         })
+        notificationTokens.append(center.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.observationGeneration == observationGeneration else { return }
+                self.stopPlaybackForRouteSafety()
+                lifecycleContinuation.yield(.engineConfigurationChanged(
+                    hasInput: !self.audioSession.currentRoute.inputs.isEmpty,
+                    hasOutput: !self.audioSession.currentRoute.outputs.isEmpty,
+                    engineRunning: self.engine.isRunning
+                ))
+            }
+        })
+    }
+
+    private static func routeReason(
+        _ reason: AVAudioSession.RouteChangeReason?
+    ) -> LiveCoachAudioRouteChangeReason {
+        switch reason {
+        case .newDeviceAvailable: .newDeviceAvailable
+        case .oldDeviceUnavailable: .oldDeviceUnavailable
+        case .categoryChange: .categoryChange
+        case .override: .override
+        case .wakeFromSleep: .wakeFromSleep
+        case .noSuitableRouteForCategory: .noSuitableRouteForCategory
+        case .routeConfigurationChange: .routeConfigurationChange
+        default: .unknown
+        }
     }
 }

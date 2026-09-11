@@ -93,7 +93,7 @@ struct AddBarView: View {
 
             quickAction("Log Meal", systemImage: "fork.knife", action: onLogMeal)
             quickAction("Log Workout", systemImage: "dumbbell", action: onLogWorkout)
-            quickAction("Scan Food", systemImage: "camera", action: onScanFood)
+            quickAction("Scan Barcode", systemImage: "barcode.viewfinder", action: onScanFood)
             quickAction("Ask Coach", systemImage: "message", action: onAskCoach)
         }
         .frame(width: 320, height: 76)

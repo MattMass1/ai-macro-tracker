@@ -6,10 +6,4 @@ enum Config {
               !raw.isEmpty, !raw.contains("$("), let url = URL(string: raw) else { return nil }
         return url
     }
-
-    static var token: String {
-        let value = Bundle.main.object(forInfoDictionaryKey: "APP_SHARED_TOKEN") as? String ?? ""
-        return value.contains("$(") ? "" : value
-    }
 }
-

@@ -5,6 +5,7 @@ struct WorkoutsView: View {
     @State private var loggerSelection: WorkoutLoggerSelection?
     @State private var librarySelection: WorkoutLoggerSelection?
     @State private var showLibrary = false
+    @State private var historyScope = 0
     var body: some View {
         ZStack { Theme.canvas.ignoresSafeArea()
             ScrollView {
@@ -17,17 +18,31 @@ struct WorkoutsView: View {
                             onLog: { loggerSelection = $0 },
                             onAddMore: { showLibrary = true }
                         )
-                        .id(session.type)
+                        .id("\(store.dateString)|\(session.type)")
                     }
                     if store.isLoadingWorkouts && store.stats == nil { workoutSkeleton }
                     if let stats = store.stats { WorkoutDashboard(stats: stats) }
                     if let plan = store.plan, (plan.hasPlan != true || !store.isToday) {
                         WorkoutPlanCard(plan: plan)
                     }
-                    WorkoutHistory(workouts: store.workouts) { id in Task { await store.deleteWorkout(id) } }
+                    Picker("History range", selection: $historyScope) {
+                        Text("Today").tag(0)
+                        Text("All").tag(1)
+                    }
+                    .pickerStyle(.segmented)
+                    if historyScope == 0 {
+                        WorkoutHistory(workouts: store.workouts) { id in Task { await store.deleteWorkout(id) } }
+                    } else {
+                        AggregateWorkoutHistory(workouts: store.workoutHistoryEntries) { id in Task { await store.deleteWorkout(id) } }
+                    }
                 }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 96)
-            }.refreshable { await store.loadWorkoutData() }
+            }.refreshable {
+                async let selectedDay: Void = store.loadWorkoutData()
+                async let fullHistory: Void = store.workoutHistory()
+                _ = await (selectedDay, fullHistory)
+            }
         }
+        .task { await store.workoutHistory() }
         .navigationBarHidden(true)
         .sheet(item: $loggerSelection) { selection in
             WorkoutLoggerView(initialType: selection.type, initialExercise: selection.exercise)
@@ -47,13 +62,59 @@ struct WorkoutsView: View {
     private var workoutSkeleton: some View { VStack(spacing: 10) { HStack { RoundedRectangle(cornerRadius: 20).frame(height: 130); RoundedRectangle(cornerRadius: 20).frame(height: 130) }; RoundedRectangle(cornerRadius: 20).frame(height: 160) }.foregroundStyle(Theme.surface).redacted(reason: .placeholder).shimmering() }
 }
 
-private struct WorkoutLoggerSelection: Identifiable {
+struct WorkoutLoggerSelection: Identifiable {
     let type: String
     let exercise: String
+    var muscleGroup: String? = nil
+    var equipment: String? = nil
     var id: String { "\(type)|\(exercise)" }
 }
 
-private enum CanonicalWorkoutType {
+/// Local checkmarks for today's planned session. Device-scoped (not per-user),
+/// so sign-out must wipe them via `removeAll()` or the next claim inherits them.
+enum WorkoutSessionCompletions {
+    static let keyPrefix = "workout-session-completed."
+
+    static func key(date: String, type: String) -> String {
+        "\(keyPrefix)\(date).\(type)"
+    }
+
+    static func saved(date: String, type: String) -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: key(date: date, type: type)) ?? [])
+    }
+
+    static func save(_ completed: Set<String>, date: String, type: String) {
+        UserDefaults.standard.set(Array(completed), forKey: key(date: date, type: type))
+    }
+
+    static func removeAll() {
+        let defaults = UserDefaults.standard
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(keyPrefix) {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    static func pruneOld() {
+        let defaults = UserDefaults.standard
+        let calendar = Calendar(identifier: .gregorian)
+        guard let cutoff = calendar.date(byAdding: .day, value: -30, to: calendar.startOfDay(for: Date())) else { return }
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(keyPrefix) {
+            let suffix = key.dropFirst(keyPrefix.count)
+            guard suffix.count > 10, suffix[suffix.index(suffix.startIndex, offsetBy: 10)] == "." else { continue }
+            let dateText = String(suffix.prefix(10))
+            if let storedDate = formatter.date(from: dateText), storedDate < cutoff {
+                defaults.removeObject(forKey: key)
+            }
+        }
+    }
+}
+
+enum CanonicalWorkoutType {
     static let ordered = ["Push", "Pull", "Legs", "Abs", "Cardio", "Full Body"]
     static let all = ordered + ["Rest"]
 
@@ -79,7 +140,7 @@ private struct TodaysSessionCard: View {
     let onAddMore: () -> Void
     @State private var exercises: [String]
     @State private var completed: Set<String>
-    @State private var library: [LibraryExercise] = []
+    @State private var swapTarget: (index: Int, name: String)?
 
     init(
         session: WorkoutPlanPayload.PlannedDay,
@@ -93,7 +154,7 @@ private struct TodaysSessionCard: View {
         self.onAddMore = onAddMore
         let names = session.exercises.map(\.name)
         _exercises = State(initialValue: names)
-        _completed = State(initialValue: Self.savedCompletions(date: date, type: session.type))
+        _completed = State(initialValue: WorkoutSessionCompletions.saved(date: date, type: session.type))
     }
 
     var body: some View {
@@ -114,35 +175,13 @@ private struct TodaysSessionCard: View {
                     .font(.subheadline).foregroundStyle(Theme.muted)
             } else {
                 ForEach(Array(exercises.enumerated()), id: \.offset) { index, name in
-                    HStack(spacing: 10) {
-                        Button { toggle(name) } label: {
-                            Image(systemName: completed.contains(name) ? "checkmark.circle.fill" : "circle")
-                                .font(.title3)
-                                .foregroundStyle(completed.contains(name) ? Theme.accent : Theme.muted)
-                        }
-                        .buttonStyle(.plain)
-                        Button { onLog(.init(type: session.type, exercise: name)) } label: {
-                            Text(name)
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(completed.contains(name) ? Theme.muted : Theme.ink)
-                                .strikethrough(completed.contains(name))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        Menu {
-                            let swaps = swaps(for: name)
-                            if swaps.isEmpty {
-                                Text("No swaps available")
-                            } else {
-                                ForEach(swaps, id: \.self) { swap in
-                                    Button(swap) { swapExercise(at: index, from: name, to: swap) }
-                                }
-                            }
-                        } label: {
-                            Text("SWAP").font(.caption2.weight(.bold)).tracking(0.8).foregroundStyle(Theme.accent)
-                        }
-                    }
+                    WorkoutExerciseRow(
+                        name: name,
+                        isCompleted: completed.contains(name),
+                        onToggle: { toggle(name) },
+                        onLog: { onLog(.init(type: session.type, exercise: name)) },
+                        onSwap: { onSwap(name, index) }
+                    )
                     if index < exercises.count - 1 { Divider() }
                 }
             }
@@ -154,15 +193,33 @@ private struct TodaysSessionCard: View {
         }
         .appCard()
         .task {
-            Self.pruneOldCompletions()
-            if let payload = try? await APIClient.shared.library() {
-                library = payload.exercises
+            WorkoutSessionCompletions.pruneOld()
+        }
+        .onChange(of: session.exercises.map(\.name)) { _, names in
+            // A saved voice substitution must replace the visible rows even
+            // when the session type stays the same (for example, Push).
+            exercises = names
+            completed.formIntersection(names)
+        }
+        .sheet(item: Binding(
+            get: { swapTarget.map { SwapTarget(index: $0.index, name: $0.name) } },
+            set: { swapTarget = $0.map { (index: $0.index, name: $0.name) } }
+        )) { target in
+            ExerciseLibraryView { selection in
+                swapExercise(at: target.index, from: target.name, to: selection.exercise)
+                swapTarget = nil
             }
         }
     }
 
-    private func swaps(for name: String) -> [String] {
-        library.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.swaps ?? []
+    private struct SwapTarget: Identifiable {
+        let index: Int
+        let name: String
+        var id: String { "\(index)|\(name)" }
+    }
+
+    private func onSwap(_ name: String, _ index: Int) {
+        swapTarget = (index: index, name: name)
     }
 
     private func toggle(_ name: String) {
@@ -179,39 +236,47 @@ private struct TodaysSessionCard: View {
     }
 
     private func saveCompletions() {
-        UserDefaults.standard.set(Array(completed), forKey: Self.completionKey(date: date, type: session.type))
+        WorkoutSessionCompletions.save(completed, date: date, type: session.type)
     }
+}
 
-    private static func savedCompletions(date: String, type: String) -> Set<String> {
-        Set(UserDefaults.standard.stringArray(forKey: completionKey(date: date, type: type)) ?? [])
-    }
+private struct WorkoutExerciseRow: View {
+    let name: String
+    let isCompleted: Bool
+    let onToggle: () -> Void
+    let onLog: () -> Void
+    let onSwap: () -> Void
 
-    private static func completionKey(date: String, type: String) -> String {
-        "workout-session-completed.\(date).\(type)"
-    }
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: onToggle) {
+                Image(systemName: isCompleted ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isCompleted ? Theme.accent : Theme.muted)
+            }
+            .buttonStyle(.plain)
 
-    private static func pruneOldCompletions() {
-        let defaults = UserDefaults.standard
-        let prefix = "workout-session-completed."
-        let calendar = Calendar(identifier: .gregorian)
-        guard let cutoff = calendar.date(byAdding: .day, value: -30, to: calendar.startOfDay(for: Date())) else { return }
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
+            Button(action: onLog) {
+                Text(name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(isCompleted ? Theme.muted : Theme.ink)
+                    .strikethrough(isCompleted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
 
-        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(prefix) {
-            let suffix = key.dropFirst(prefix.count)
-            guard suffix.count > 10, suffix[suffix.index(suffix.startIndex, offsetBy: 10)] == "." else { continue }
-            let dateText = String(suffix.prefix(10))
-            if let storedDate = formatter.date(from: dateText), storedDate < cutoff {
-                defaults.removeObject(forKey: key)
+            Button(action: onSwap) {
+                Text("SWAP")
+                    .font(.caption2.weight(.bold))
+                    .tracking(0.8)
+                    .foregroundStyle(Theme.accent)
             }
         }
     }
 }
 
-private struct ExerciseLibraryView: View {
+struct ExerciseLibraryView: View {
     private struct SectionGroup: Identifiable {
         let type: String
         let exercises: [LibraryExercise]
@@ -219,10 +284,26 @@ private struct ExerciseLibraryView: View {
     }
 
     @Environment(\.dismiss) private var dismiss
-    let onSelect: (WorkoutLoggerSelection) -> Void
+    private let allowsMultipleSelection: Bool
+    private let onSelect: ((WorkoutLoggerSelection) -> Void)?
+    private let onConfirmMultiple: (([LibraryExercise]) -> Void)?
     @State private var exercises: [LibraryExercise] = []
     @State private var search = ""
     @State private var isLoading = true
+    @State private var selectedIDs: Set<String> = []
+    @State private var selectedOrder: [LibraryExercise] = []
+
+    init(onSelect: @escaping (WorkoutLoggerSelection) -> Void) {
+        self.allowsMultipleSelection = false
+        self.onSelect = onSelect
+        self.onConfirmMultiple = nil
+    }
+
+    init(allowsMultipleSelection: Bool, onConfirm: @escaping ([LibraryExercise]) -> Void) {
+        self.allowsMultipleSelection = allowsMultipleSelection
+        self.onSelect = nil
+        self.onConfirmMultiple = onConfirm
+    }
 
     private var filtered: [LibraryExercise] {
         guard !search.isEmpty else { return exercises }
@@ -234,7 +315,8 @@ private struct ExerciseLibraryView: View {
     }
 
     private var groupedExercises: [SectionGroup] {
-        let grouped = Dictionary(grouping: filtered) {
+        let visible = allowsMultipleSelection ? filtered.filter { !selectedIDs.contains($0.id) } : filtered
+        let grouped = Dictionary(grouping: visible) {
             CanonicalWorkoutType.value(for: $0.workoutType, muscleGroups: $0.muscleGroup)
         }
         return CanonicalWorkoutType.ordered.compactMap { type in
@@ -252,17 +334,20 @@ private struct ExerciseLibraryView: View {
                     ContentUnavailableView("Exercise library unavailable", systemImage: "dumbbell")
                 } else {
                     List {
+                        if allowsMultipleSelection, !selectedOrder.isEmpty {
+                            Section("Selected") {
+                                ForEach(selectedOrder) { exercise in
+                                    exerciseRow(exercise, type: CanonicalWorkoutType.value(
+                                        for: exercise.workoutType,
+                                        muscleGroups: exercise.muscleGroup
+                                    ))
+                                }
+                            }
+                        }
                         ForEach(groupedExercises) { group in
                             Section(group.type) {
                                 ForEach(group.exercises) { exercise in
-                                    Button { onSelect(.init(type: group.type, exercise: exercise.name)) } label: {
-                                        VStack(alignment: .leading, spacing: 3) {
-                                            Text(exercise.name).foregroundStyle(Theme.ink)
-                                            Text([exercise.muscleGroup.joined(separator: ", "), exercise.equipment]
-                                                .filter { !$0.isEmpty }.joined(separator: " · "))
-                                                .font(.caption).foregroundStyle(Theme.muted)
-                                        }
-                                    }
+                                    exerciseRow(exercise, type: group.type)
                                 }
                             }
                         }
@@ -272,16 +357,118 @@ private struct ExerciseLibraryView: View {
                 }
             }
             .background(Theme.canvas)
-            .navigationTitle("Add exercise")
+            .navigationTitle(allowsMultipleSelection ? "Pick exercises" : "Add exercise")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                if allowsMultipleSelection {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button(selectedOrder.isEmpty ? "Use these" : "Use \(selectedOrder.count)") {
+                            onConfirmMultiple?(selectedOrder)
+                            dismiss()
+                        }
+                        .fontWeight(.semibold)
+                        .disabled(selectedOrder.isEmpty)
+                    }
+                }
+            }
         }
         .task {
-            if let payload = try? await APIClient.shared.library() {
+            // Load the full library once (lazy — only when the picker opens).
+            if exercises.isEmpty, let payload = try? await APIClient.shared.library() {
                 exercises = payload.exercises
             }
             isLoading = false
         }
+        .searchable(text: $search, prompt: "Search exercises")
+        .onChange(of: search) { _, query in
+            // Server-side search: fetch matches instead of filtering 1,542 rows locally.
+            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.count >= 2 else { return }
+            Task {
+                if let payload = try? await APIClient.shared.library(query: trimmed) {
+                    exercises = payload.exercises
+                }
+            }
+        }
+    }
+
+    private func exerciseRow(_ exercise: LibraryExercise, type: String) -> some View {
+        Button { tap(exercise, type: type) } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(exercise.name).foregroundStyle(Theme.ink)
+                    Text([exercise.muscleGroup.joined(separator: ", "), exercise.equipment]
+                        .filter { !$0.isEmpty }.joined(separator: " · "))
+                        .font(.caption).foregroundStyle(Theme.muted)
+                }
+                Spacer(minLength: 0)
+                if allowsMultipleSelection {
+                    Image(systemName: selectedIDs.contains(exercise.id) ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .foregroundStyle(selectedIDs.contains(exercise.id) ? Theme.accent : Theme.muted)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func tap(_ exercise: LibraryExercise, type: String) {
+        if allowsMultipleSelection {
+            toggle(exercise)
+            return
+        }
+        onSelect?(.init(
+            type: type,
+            exercise: exercise.name,
+            muscleGroup: exercise.muscleGroup.first,
+            equipment: exercise.equipment.isEmpty ? nil : exercise.equipment
+        ))
+    }
+
+    private func toggle(_ exercise: LibraryExercise) {
+        if selectedIDs.contains(exercise.id) {
+            selectedIDs.remove(exercise.id)
+            selectedOrder.removeAll { $0.id == exercise.id }
+        } else {
+            selectedIDs.insert(exercise.id)
+            selectedOrder.append(exercise)
+        }
+    }
+}
+
+extension WorkoutPlanWrite {
+    static func fromPickedExercises(_ exercises: [LibraryExercise]) -> WorkoutPlanWrite? {
+        guard !exercises.isEmpty else { return nil }
+        let grouped = Dictionary(grouping: exercises) { exercise -> String in
+            let type = CanonicalWorkoutType.value(for: exercise.workoutType, muscleGroups: exercise.muscleGroup)
+            return type == "Rest" ? "Full Body" : type
+        }
+        let rotation = CanonicalWorkoutType.ordered.filter { grouped[$0] != nil }
+        guard !rotation.isEmpty else { return nil }
+        var days: [String: Day] = [:]
+        for type in rotation {
+            let items = Array((grouped[type] ?? []).prefix(30))
+            days[type] = Day(
+                label: type,
+                exercises: items.map { exercise in
+                    Day.Exercise(
+                        name: exercise.name,
+                        sets: 3,
+                        reps: "8-12",
+                        restSec: 90,
+                        swaps: exercise.swaps.isEmpty ? nil : exercise.swaps
+                    )
+                }
+            )
+        }
+        return WorkoutPlanWrite(
+            version: 1,
+            rotation: rotation,
+            daysPerWeek: min(7, max(1, rotation.count)),
+            days: days
+        )
     }
 }
 
@@ -348,10 +535,74 @@ private struct WorkoutHistory: View {
     }
 }
 
+private struct AggregateWorkoutHistory: View {
+    let workouts: [WorkoutHistoryEntry]
+    let onDelete: (String) -> Void
+
+    private var groups: [(date: String, workouts: [WorkoutHistoryEntry])] {
+        Dictionary(grouping: workouts, by: \.date)
+            .map { (date: $0.key, workouts: $0.value) }
+            .sorted { $0.date > $1.date }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionLabel(text: "History")
+            if workouts.isEmpty {
+                EmptyState(icon: "clock.arrow.circlepath", title: "No workout history", message: "Your logged training will appear here.")
+            }
+            ForEach(groups, id: \.date) { group in
+                SectionLabel(text: dayLabel(group.date))
+                VStack(spacing: 0) {
+                    ForEach(Array(group.workouts.enumerated()), id: \.element.id) { index, workout in
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(systemName: "dumbbell.fill")
+                                .foregroundStyle(Theme.accent)
+                                .frame(width: 28, height: 28)
+                                .background(Theme.accentTint, in: Circle())
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(workout.exercise).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.ink)
+                                Text(setSummary(workout.sets)).font(.caption.monospacedDigit()).foregroundStyle(Theme.muted)
+                                Text(workout.workoutType.joined(separator: " · ").uppercased())
+                                    .font(.caption2.weight(.bold)).tracking(1).foregroundStyle(Theme.accent)
+                            }
+                            Spacer()
+                            Menu {
+                                Button("Delete workout", systemImage: "trash", role: .destructive) { onDelete(workout.id) }
+                            } label: { Image(systemName: "ellipsis").foregroundStyle(Theme.muted) }
+                        }
+                        .padding(.vertical, 12)
+                        if index < group.workouts.count - 1 { Divider() }
+                    }
+                }
+                .appCard(padding: 14)
+            }
+        }
+    }
+
+    private func setSummary(_ sets: [WorkoutSet]) -> String {
+        sets.map { $0.weight > 0 ? "\($0.weight.formatted())×\($0.reps)" : "\($0.reps) reps" }.joined(separator: "  ·  ")
+    }
+
+    private func dayLabel(_ date: String) -> String {
+        guard let parsed = Self.dateFormatter.date(from: date) else { return date }
+        return parsed.formatted(.dateTime.weekday(.wide).month(.abbreviated).day()).uppercased()
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+}
+
 struct WorkoutLoggerView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var exercise: String; @State private var type: String; @State private var sets = [WorkoutSet(weight: 0, reps: 0)]; @State private var last: LastWorkoutPayload?; @State private var isSaving = false
+    @FocusState private var inputFocused: Bool
     private let types = ["Push", "Pull", "Legs", "Abs", "Cardio", "Full Body", "Rest"]
     private var suggestions: [KnownExercise] { store.exercises.filter { $0.workoutType.contains(type) } }
     init(initialType: String = "Push", initialExercise: String = "") {
@@ -361,21 +612,32 @@ struct WorkoutLoggerView: View {
     var body: some View {
         NavigationStack {
             ScrollView { VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 9) { SectionLabel(text: "Training type"); ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(types, id: \.self) { item in Button(item) { type = item; exercise = item == "Rest" ? "Rest Day" : ""; sets = [WorkoutSet(weight: 0, reps: 0)] }.buttonStyle(.borderedProminent).tint(type == item ? Theme.accent : Color.secondary.opacity(0.2)).foregroundStyle(type == item ? .white : .primary) } } } }
+                VStack(alignment: .leading, spacing: 9) { SectionLabel(text: "Training type"); ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(types, id: \.self) { item in Button(item) { inputFocused = false; type = item; exercise = item == "Rest" ? "Rest Day" : ""; sets = [WorkoutSet(weight: 0, reps: 0)] }.buttonStyle(.borderedProminent).tint(type == item ? Theme.accent : Theme.input).foregroundStyle(type == item ? .white : Theme.sectionInk) } } } }
                 if type != "Rest" {
                     VStack(alignment: .leading, spacing: 9) {
                         HStack { SectionLabel(text: "Exercise"); Spacer(); if let last, !last.sets.isEmpty { Button("Fill last time") { sets = Array(last.sets.prefix(4)) }.font(.caption.weight(.bold)) } }
-                        TextField("Barbell bench press", text: $exercise).textInputAutocapitalization(.words).padding(14).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14)).onChange(of: exercise) { _, value in lookupLastWorkout(value) }.onDisappear { lastWorkoutTask?.cancel() }
-                        if !suggestions.isEmpty { ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(suggestions) { item in Button(item.name) { exercise = item.name }.font(.caption).buttonStyle(.bordered) } } } }
+                        TextField("Barbell bench press", text: $exercise).textInputAutocapitalization(.words).focused($inputFocused).padding(14).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14)).onChange(of: exercise) { _, value in lookupLastWorkout(value) }.onDisappear { lastWorkoutTask?.cancel() }
+                        if !suggestions.isEmpty { ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(suggestions) { item in Button(item.name) { inputFocused = false; exercise = item.name }.font(.caption).buttonStyle(.bordered) } } } }
                     }
                     VStack(alignment: .leading, spacing: 10) {
                         HStack { SectionLabel(text: "Sets"); Spacer(); Button("Add set", systemImage: "plus") { if sets.count < 4 { sets.append(WorkoutSet(weight: 0, reps: 0)) } }.font(.caption.weight(.bold)).disabled(sets.count == 4) }
                         HStack { Text("SET").frame(width: 30); Text("WEIGHT").frame(maxWidth: .infinity); Text("REPS").frame(maxWidth: .infinity); Color.clear.frame(width: 28) }.font(.caption2.weight(.bold)).foregroundStyle(.secondary)
-                        ForEach(sets.indices, id: \.self) { index in HStack { Text("\(index + 1)").font(.caption.monospacedDigit()).frame(width: 30); TextField("lb", value: $sets[index].weight, format: .number).keyboardType(.decimalPad).multilineTextAlignment(.center).padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12)); TextField("reps", value: $sets[index].reps, format: .number).keyboardType(.numberPad).multilineTextAlignment(.center).padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12)); Button(role: .destructive) { if sets.count > 1 { sets.remove(at: index) } } label: { Image(systemName: "minus.circle") }.frame(width: 28).disabled(sets.count == 1) } }
+                        ForEach(sets.indices, id: \.self) { index in HStack { Text("\(index + 1)").font(.caption.monospacedDigit()).frame(width: 30); TextField("lb", value: $sets[index].weight, format: .number).keyboardType(.decimalPad).focused($inputFocused).multilineTextAlignment(.center).padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12)); TextField("reps", value: $sets[index].reps, format: .number).keyboardType(.numberPad).focused($inputFocused).multilineTextAlignment(.center).padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12)); Button(role: .destructive) { inputFocused = false; if sets.count > 1 { sets.remove(at: index) } } label: { Image(systemName: "minus.circle").frame(width: 44, height: 44) }.disabled(sets.count == 1) } }
                     }
                 }
                 Button { submit() } label: { if isSaving { ProgressView().tint(.white) } else { Text(type == "Rest" ? "Log rest day" : "Log exercise").fontWeight(.bold) } }.frame(maxWidth: .infinity).frame(height: 52).background(Theme.accent, in: RoundedRectangle(cornerRadius: 16)).foregroundStyle(.white).disabled(isSaving || (type != "Rest" && (exercise.trimmingCharacters(in: .whitespaces).isEmpty || !sets.contains { $0.weight > 0 || $0.reps > 0 }))).opacity(isSaving ? 0.6 : 1)
-            }.padding(16) }.background(Theme.canvas).navigationTitle("Log workout").navigationBarTitleDisplayMode(.inline).toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            }.padding(16) }
+            .scrollDismissesKeyboard(.interactively)
+            .background(Theme.canvas)
+            .navigationTitle("Log workout")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { inputFocused = false }.fontWeight(.semibold)
+                }
+            }
         }
         .presentationDetents([.large])
         .task {
@@ -393,5 +655,5 @@ struct WorkoutLoggerView: View {
             last = result
         }
     }
-    private func submit() { Task { isSaving = true; let valid = type == "Rest" ? [] : sets.filter { $0.weight > 0 || $0.reps > 0 }; if await store.logWorkout(exercise: type == "Rest" ? "Rest Day" : exercise, sets: valid, type: type) { dismiss() }; isSaving = false } }
+    private func submit() { inputFocused = false; Task { isSaving = true; let valid = type == "Rest" ? [] : sets.filter { $0.weight > 0 || $0.reps > 0 }; if await store.logWorkout(exercise: type == "Rest" ? "Rest Day" : exercise, sets: valid, type: type) { dismiss() }; isSaving = false } }
 }

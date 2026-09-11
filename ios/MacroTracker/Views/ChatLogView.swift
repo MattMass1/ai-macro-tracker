@@ -27,6 +27,7 @@ struct ChatLogView: View {
     @State private var isSending = false
     @State private var showScanSheet = false
     @State private var showManual = false
+    @State private var showVoiceCoach = false
     @State private var loggerSelection: WorkoutLoggerSelection?
     @State private var showExerciseLibrary = false
     @State private var swapTargetMessageId: UUID?
@@ -111,6 +112,7 @@ struct ChatLogView: View {
             }
         }
         .sheet(isPresented: $showManual) { ManualFoodView() }
+        .sheet(isPresented: $showVoiceCoach) { LiveCoachView() }
         .sheet(item: $loggerSelection) { selection in
             WorkoutLoggerView(initialType: selection.type, initialExercise: selection.exercise)
         }
@@ -167,6 +169,17 @@ struct ChatLogView: View {
                 HStack(spacing: 5) { Circle().fill(Theme.accent).frame(width: 7, height: 7); Text("Online").font(.caption).foregroundStyle(Theme.muted) }
             }
             Spacer()
+            Button {
+                dismissKeyboard()
+                showVoiceCoach = true
+            } label: {
+                Image(systemName: "waveform")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 40, height: 40)
+                    .background(Theme.accentTint, in: Circle())
+            }
+            .accessibilityLabel("Open Voice Coach")
             Button("Manual", systemImage: "slider.horizontal.3") { showManual = true }.font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
         }.padding(.horizontal, 16).padding(.vertical, 10).background(Theme.surface).overlay(alignment: .bottom) { Divider().overlay(Theme.divider) }
     }

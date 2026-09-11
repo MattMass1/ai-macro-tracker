@@ -16,6 +16,8 @@ services:
         generateValue: true
       - key: OPENAI_ACCESS_TOKEN
         sync: false
+      - key: OPENAI_API_KEY
+        sync: false
       - key: LOCAL_TZ
         value: America/New_York
       - key: DAY_ROLLOVER_HOUR

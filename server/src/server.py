@@ -28,6 +28,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from starlette.requests import Request  # noqa: E402
 from starlette.responses import JSONResponse, Response  # noqa: E402
+from starlette.routing import WebSocketRoute  # noqa: E402
+from starlette.websockets import WebSocket  # noqa: E402
+import uvicorn  # noqa: E402
 
 from fastmcp import FastMCP  # noqa: E402
 from fastmcp.exceptions import ToolError  # noqa: E402
@@ -40,6 +43,11 @@ from store import ChatQuotaExceeded, InviteAlreadyClaimed, InviteNotFound  # noq
 from auth import bind_user, current_user_id, reset_user  # noqa: E402
 from coach import CoachProviderError, run_agent  # noqa: E402
 import food_lookup  # noqa: E402
+from live_coach import (  # noqa: E402
+    LiveCoachService,
+    LiveSessionGate,
+    connect_openai_live,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +72,7 @@ async def lifespan(_app: Any):
 
 CONFIG = get_config()
 mcp = FastMCP("macro-tracker", lifespan=lifespan)
+_live_session_gate = LiveSessionGate()
 
 
 # --------------------------------------------------------------------------- #
@@ -2199,8 +2208,31 @@ async def health(request: Request) -> Response:
     )
 
 
+def create_app(*, live_service: LiveCoachService | None = None) -> Any:
+    """Build the production ASGI app with MCP, HTTP APIs, and native Live."""
+    service = live_service or LiveCoachService(
+        store=store_client(),
+        provider_connect=connect_openai_live,
+        api_key=CONFIG.openai_api_key,
+        gate=_live_session_gate,
+    )
+
+    async def live_coach_endpoint(websocket: WebSocket) -> None:
+        await service.serve(websocket)
+
+    app = mcp.http_app()
+    app.routes.append(WebSocketRoute("/api/live-coach", live_coach_endpoint))
+    return app
+
+
 def main() -> None:
-    mcp.run(transport="http", host="0.0.0.0", port=CONFIG.port)
+    uvicorn.run(
+        create_app(),
+        host="0.0.0.0",
+        port=CONFIG.port,
+        ws_max_size=65_536,
+        ws_max_queue=16,
+    )
 
 
 if __name__ == "__main__":

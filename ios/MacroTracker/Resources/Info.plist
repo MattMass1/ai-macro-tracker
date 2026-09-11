@@ -28,6 +28,8 @@
 	<string>Scan product barcodes to look up and log nutrition.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Unlock your private nutrition and workout log.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Talk with your nutrition and workout coach.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

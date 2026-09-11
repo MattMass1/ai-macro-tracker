@@ -437,6 +437,10 @@ async def _resolve_today_session() -> tuple[int, str, list[dict[str, Any]], bool
     today_type = rotation[index]
     day = days.get(today_type) if isinstance(days.get(today_type), dict) else {}
     exercises = [ex for ex in day.get("exercises", []) if isinstance(ex, dict)]
+    saved = await store_client().fetch_today_workout(today)
+    if saved is not None:
+        today_type = saved["workout_type"]
+        exercises = saved["exercises"]
     return index, today_type, exercises, done
 
 
@@ -564,6 +568,9 @@ async def workout_plan_payload() -> dict[str, Any]:
     # completion flag so a session the coach marked done shows as done here.
     if upcoming:
         upcoming[0]["done"] = _as_day((day_state or {}).get("done_date")) == today_date
+        saved = await store_client().fetch_today_workout(today_date)
+        if saved is not None:
+            upcoming[0].update(type=saved["workout_type"], exercises=saved["exercises"])
 
     return {
         "rotation": list(domain.WORKOUT_ROTATION),
@@ -2195,6 +2202,111 @@ def reply_requests_metrics(reply: str) -> bool:
     ))
 
 
+def _live_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[Any]]]:
+    """Voice-only action policy; reuse validated coach reads and writes."""
+    from live_tools import READ_TOOLS, WRITE_TOOLS
+    common = _coach_tool_handlers()
+    handlers = {name: handler for name, handler in common.items() if name in READ_TOOLS | WRITE_TOOLS}
+
+    async def today_snapshot(_args):
+        session = await common["get_today_session"]({})
+        snapshot = {"user_id": str(current_user_id()), "date": domain.effective_date().isoformat(),
+                    "today_type": session.get("today_type"), "exercises": session.get("exercises", []),
+                    "done": session.get("done", False)}
+        revision = hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return {**session, "session_revision": revision}
+
+    async def update_today(args):
+        operation_day = domain.effective_date()
+        before = await today_snapshot({})
+        revision = args.get("session_revision")
+        if not before.get("has_plan"):
+            raise MacroError("Create a workout routine before editing today's workout.")
+        if not isinstance(revision, str) or not hmac.compare_digest(revision, before["session_revision"]):
+            raise MacroError("Today's workout changed. Read get_today_session again, then apply only the requested edit.")
+        raw = args.get("exercises")
+        if not isinstance(raw, list) or any(not isinstance(ex, dict) or set(ex) != {"name", "sets", "reps", "rest_sec"} for ex in raw):
+            raise MacroError("Provide each planned exercise's name, sets, reps and rest_sec.")
+        if any(not isinstance(ex["name"], str) or len(ex["name"]) > 120 or not isinstance(ex["reps"], str) or not 1 <= len(ex["reps"]) <= 40 for ex in raw):
+            raise MacroError("Use a valid exercise name and short rep prescription.")
+        today_type = before["today_type"]
+        try:
+            validated = domain.validate_workout_plan({"version": domain.WORKOUT_PLAN_VERSION,
+                "rotation": [today_type], "days": {today_type: {"label": today_type, "exercises": raw}}})
+        except ValueError as exc:
+            raise MacroError(str(exc)) from None
+        exercises = validated["days"][today_type]["exercises"]
+        library = await store_client().fetch_workout_library()
+        names: dict[str, list[str]] = {}
+        for row in library:
+            name = str(row.get("name", ""))
+            names.setdefault(name.casefold(), []).append(name)
+        existing = {str(ex.get("name", "")).casefold(): ex for ex in before["exercises"]}
+        clean = []
+        for exercise in exercises:
+            matches = names.get(exercise["name"].casefold(), [])
+            if len(matches) != 1:
+                raise MacroError("Use exact, unambiguous exercise names from the workout library.")
+            name = matches[0]
+            clean.append({**existing.get(name.casefold(), {}), **exercise, "name": name})
+        if len({ex["name"].casefold() for ex in clean}) != len(clean):
+            raise MacroError("Each exercise may appear only once in today's plan.")
+        latest = await today_snapshot({})
+        if domain.effective_date() != operation_day or latest["session_revision"] != revision:
+            raise MacroError("Today's workout changed. Read get_today_session again before editing.")
+        await store_client().put_today_workout(operation_day, today_type, clean)
+        return {**await today_snapshot({}), "scope": "today"}
+
+    async def replace_today(args):
+        operation_day = domain.effective_date()
+        before = await today_snapshot({})
+        old = domain.validate_name(args.get("old_exercise"), "old exercise")
+        new = domain.validate_name(args.get("new_exercise"), "new exercise")
+        _, today_type, exercises, done = await _resolve_today_session()
+        matches = [i for i, ex in enumerate(exercises) if str(ex.get("name", "")).casefold() == old.casefold()]
+        if len(matches) != 1:
+            raise MacroError("Name exactly one exercise currently in today's workout to replace.")
+        library = await store_client().fetch_workout_library()
+        replacements = [row for row in library if str(row.get("name", "")).casefold() == new.casefold()]
+        if len(replacements) != 1:
+            raise MacroError("Choose one exact replacement exercise from the library.")
+        replacement = str(replacements[0]["name"])
+        changed = [dict(ex) for ex in exercises]
+        changed[matches[0]]["name"] = replacement
+        latest = await today_snapshot({})
+        if domain.effective_date() != operation_day or latest["session_revision"] != before["session_revision"]:
+            raise MacroError("Today's workout changed. Read get_today_session again before replacing it.")
+        saved = await store_client().put_today_workout(operation_day, today_type, changed)
+        return {"today_type": saved["workout_type"], "exercises": saved["exercises"], "done": done,
+                "scope": "today", "replaced": old, "replacement": replacement}
+
+    async def log_sets(args):
+        unit = args.get("weight_unit")
+        if unit not in {"lb", "kg", "bodyweight"}:
+            raise MacroError("Ask whether the weights are pounds or kilograms, or bodyweight.")
+        sets = args.get("sets")
+        if not isinstance(sets, list) or any(not isinstance(s, dict) or s.get("weight") is None or s.get("reps") is None for s in sets):
+            raise MacroError("Ask for the actual weight and reps of every completed set.")
+        clean = domain.validate_sets(sets)
+        if any(s["reps"] <= 0 or not s["reps"].is_integer() for s in clean):
+            raise MacroError("Completed sets require a positive whole number of reps.")
+        if unit == "bodyweight" and any(s["weight"] != 0 for s in clean):
+            raise MacroError("Bodyweight sets must have zero added weight.")
+        if unit == "kg":
+            clean = [{"weight": round(s["weight"] * 2.2046226218, 4), "reps": s["reps"]} for s in clean]
+        return await common["log_workout"]({**args, "sets": clean})
+
+    async def lookup(args):
+        result = await common["lookup_food"](args)
+        if isinstance(result, dict) and result.get("result") == "not found":
+            return {"result": "not found", "guidance": "Ask for a nutrition label, saved preset, or clearer food. Unverified estimates cannot be saved."}
+        return result
+
+    handlers.update(replace_today_exercise=replace_today, update_today_workout=update_today,
+                    get_today_session=today_snapshot, log_workout=log_sets, lookup_food=lookup)
+    return handlers
+
+
 def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[Any]]]:
     """Build tenant-bound coach tools; none accepts a user identifier."""
     async def set_display_name_tool(args):
@@ -3123,6 +3235,7 @@ def create_app(*, live_service: LiveCoachService | None = None) -> Any:
         provider_connect=connect_openai_live,
         api_key=CONFIG.openai_api_key,
         gate=_live_session_gate,
+        handlers=_live_tool_handlers(),
     )
 
     async def live_coach_endpoint(websocket: WebSocket) -> None:

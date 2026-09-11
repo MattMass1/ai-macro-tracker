@@ -528,6 +528,9 @@ class FakeStore:
     async def fetch_session_day_state(self):
         return self.session_state
 
+    async def fetch_today_workout(self, day):
+        return None
+
     async def put_session_day_state(self, rotation_index, done_date):
         self.session_state = {"rotation_index": rotation_index, "done_date": done_date}
         return dict(self.session_state)

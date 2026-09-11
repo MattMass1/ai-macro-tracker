@@ -236,6 +236,34 @@ class Store:
             current_user_id(),
         ))
 
+    async def fetch_today_workout(self, day) -> dict[str, Any] | None:
+        """Read the authenticated user's override for exactly this date."""
+        pool = await self.connect()
+        row = await pool.fetchrow(
+            "SELECT workout_type,exercises FROM daily_workout_sessions WHERE user_id=$1 AND day=$2",
+            current_user_id(), day,
+        )
+        if row is None:
+            return None
+        result = dict(row)
+        if isinstance(result["exercises"], str):
+            result["exercises"] = json.loads(result["exercises"])
+        return result
+
+    async def put_today_workout(self, day, workout_type, exercises) -> dict[str, Any]:
+        """Persist a date-scoped session without changing the permanent routine."""
+        pool = await self.connect()
+        row = await pool.fetchrow(
+            "INSERT INTO daily_workout_sessions(user_id,day,workout_type,exercises) VALUES($1,$2,$3,$4::jsonb) "
+            "ON CONFLICT(user_id,day) DO UPDATE SET workout_type=EXCLUDED.workout_type,"
+            "exercises=EXCLUDED.exercises,updated_at=now() RETURNING workout_type,exercises",
+            current_user_id(), day, workout_type, json.dumps(exercises),
+        )
+        result = dict(row)
+        if isinstance(result["exercises"], str):
+            result["exercises"] = json.loads(result["exercises"])
+        return result
+
     async def put_session_day_state(self, rotation_index: int, done_date) -> dict[str, Any]:
         """Upsert the authenticated user's rotation day-state."""
         pool = await self.connect()

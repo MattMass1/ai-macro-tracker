@@ -19,9 +19,45 @@ enum LiveCoachServerEvent: Equatable {
     case failure(code: String, message: String)
 }
 
+enum LiveCoachAudioRouteChangeReason: Equatable {
+    case newDeviceAvailable
+    case oldDeviceUnavailable
+    case categoryChange
+    case override
+    case wakeFromSleep
+    case noSuitableRouteForCategory
+    case routeConfigurationChange
+    case unknown
+}
+
+struct LiveCoachAudioRouteChange: Equatable {
+    let reason: LiveCoachAudioRouteChangeReason
+    let hasInput: Bool
+    let hasOutput: Bool
+}
+
 enum LiveCoachAudioLifecycleEvent: Equatable {
     case interrupted
-    case routeChanged
+    case routeEvaluated(LiveCoachAudioRouteChange)
+    case engineConfigurationChanged(hasInput: Bool, hasOutput: Bool, engineRunning: Bool)
+
+    var requiresSessionEnd: Bool {
+        switch self {
+        case .interrupted:
+            return true
+        case .routeEvaluated(let change):
+            guard change.hasInput, change.hasOutput else { return true }
+            switch change.reason {
+            case .newDeviceAvailable, .categoryChange, .override,
+                 .wakeFromSleep, .routeConfigurationChange:
+                return false
+            case .oldDeviceUnavailable, .noSuitableRouteForCategory, .unknown:
+                return true
+            }
+        case .engineConfigurationChanged(let hasInput, let hasOutput, _):
+            return !hasInput || !hasOutput
+        }
+    }
 }
 
 struct LiveCoachConnectionError: Error, Equatable {
@@ -51,6 +87,7 @@ protocol LiveCoachAudioHandling: AnyObject {
     func start() throws
     func play(_ data: Data) throws
     func setMuted(_ muted: Bool)
+    func recoverFromConfigurationChange() throws
     func stop()
 }
 
@@ -247,10 +284,22 @@ final class LiveCoachController: ObservableObject {
                 }
             },
             Task { [weak self, audio] in
-                for await _ in audio.lifecycleEvents {
+                for await event in audio.lifecycleEvents {
                     guard !Task.isCancelled else { return }
                     guard self?.sessionGeneration == generation else { return }
-                    Task { [weak self] in await self?.end() }
+                    if case .engineConfigurationChanged(let hasInput, let hasOutput, _) = event,
+                       hasInput, hasOutput {
+                        do {
+                            try audio.recoverFromConfigurationChange()
+                            continue
+                        } catch {
+                            // A viable route is not enough if its rebuilt graph cannot start.
+                            await self?.end()
+                            return
+                        }
+                    }
+                    guard event.requiresSessionEnd else { continue }
+                    await self?.end()
                     return
                 }
             },

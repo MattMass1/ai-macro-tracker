@@ -31,6 +31,8 @@ An isolated loopback-only PostgreSQL instance was used, with synthetic accounts 
 
 Final combined evidence: `live-persistence-canary-final-result.json`, synthetic account `9b2dfb98-e7d4-48c1-906d-a3154458d250`. It exercised synthetic spoken input through the mounted authenticated app, actual GPT-Live delegation, real local PostgreSQL writes, and database readback. Five `app.data_changed` events reached the client. Other tenants were unchanged. An earlier attempt stopped because its harness incorrectly required a separate read tool after a write already returned fresh totals; the final harness checks persisted outcomes and passed.
 
+The independent release verifier read the final synthetic database directly and confirmed the saved meal, five completed sets, today-only prescription, unchanged permanent routine, other-tenant digest, and migration compatibility. The isolated PostgreSQL cluster was then stopped cleanly; synthetic database files and evidence remain available, and no records were deleted. Local app and provider sessions ended cleanly.
+
 A compatible rollback must retain the exact 002 migration file, ledger entry, and table/data while reverting runtime changes. An old migration inventory rejects the newer database. Do not delete data or migration history to force rollback.
 
 The final canary verified this against the actual migrated database: current inventory and rollback inventory retaining 002 are compatible; baseline-only inventory is incompatible with unknown migration 002. Retained migration SHA-256: `ba7bf701157d32e60b2588321bcece4f9d0b1b7b14e7c2d92935a3419ffe20a1`.

@@ -11,7 +11,7 @@ from datetime import date
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -87,8 +87,28 @@ class LiveCoachPolicy:
     queue_size: int = 16
 
 
+@dataclass
+class LiveSession:
+    """One holder of a user's gate slot, with its own supersede signal.
+
+    Identity (not equality) is what matters: `release()` only clears a user's
+    slot when the session passed back is the one currently holding it, so an
+    old session's delayed `release()` can never clobber the session that
+    superseded it.
+    """
+
+    superseded: asyncio.Event = field(default_factory=asyncio.Event)
+
+
 class LiveSessionGate:
-    """Process-local admission gate for paid per-user Live sessions."""
+    """Process-local admission gate for paid per-user Live sessions.
+
+    Newest connection wins: acquiring while a session is already active for
+    that user signals the *older* session to close (`superseded`) instead of
+    refusing the newcomer. A refused reconnect would otherwise lock a user out
+    of their own account for up to `max_duration` whenever the client believes
+    a session ended but the server hasn't noticed yet.
+    """
 
     def __init__(
         self,
@@ -97,31 +117,42 @@ class LiveSessionGate:
         attempt_window: float = 60.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._active: set[UUID] = set()
+        self._sessions: dict[UUID, LiveSession] = {}
         self._attempts: dict[UUID, deque[float]] = defaultdict(deque)
         self._max_attempts = max_attempts
         self._attempt_window = attempt_window
         self._clock = clock
         self._lock = asyncio.Lock()
 
-    async def acquire(self, user_id: UUID) -> str | None:
+    async def acquire(self, user_id: UUID) -> tuple[str | None, LiveSession | None]:
         async with self._lock:
-            if user_id in self._active:
-                return "active_session"
             now = self._clock()
             attempts = self._attempts[user_id]
             cutoff = now - self._attempt_window
             while attempts and attempts[0] <= cutoff:
                 attempts.popleft()
             if len(attempts) >= self._max_attempts:
-                return "rate_limited"
+                logger.info(
+                    "live gate rejected: user_id=%s reason=rate_limited", user_id
+                )
+                return "rate_limited", None
             attempts.append(now)
-            self._active.add(user_id)
-            return None
+            previous = self._sessions.get(user_id)
+            if previous is not None:
+                previous.superseded.set()
+                logger.info(
+                    "live gate superseded: user_id=%s reason=superseded", user_id
+                )
+            session = LiveSession()
+            self._sessions[user_id] = session
+            logger.info("live gate acquired: user_id=%s", user_id)
+            return None, session
 
-    async def release(self, user_id: UUID) -> None:
+    async def release(self, user_id: UUID, session: LiveSession) -> None:
         async with self._lock:
-            self._active.discard(user_id)
+            if self._sessions.get(user_id) is session:
+                del self._sessions[user_id]
+                logger.info("live gate released: user_id=%s", user_id)
 
 
 def _number(value: Any) -> float:
@@ -555,32 +586,23 @@ class LiveCoachService:
             })
             await websocket.close(code=1011, reason="Voice coach is not configured")
             return
-        rejection = await self.gate.acquire(user_id)
+        rejection, session = await self.gate.acquire(user_id)
         if rejection is not None:
-            if rejection == "active_session":
-                payload = {
-                    "type": "error",
-                    "code": "active_session",
-                    "message": "A voice coach session is already active.",
-                }
-                reason = "Voice coach session already active"
-            else:
-                payload = {
-                    "type": "error",
-                    "code": "start_limited",
-                    "message": "Too many voice session starts. Try again shortly.",
-                }
-                reason = "Voice coach start limit reached"
+            payload = {
+                "type": "error",
+                "code": "start_limited",
+                "message": "Too many voice session starts. Try again shortly.",
+            }
             await websocket.send_json(payload)
-            await websocket.close(code=1008, reason=reason)
+            await websocket.close(code=1008, reason="Voice coach start limit reached")
             return
         try:
-            await self._serve_admitted(websocket, user_id)
+            await self._serve_admitted(websocket, user_id, session)
         finally:
-            await self.gate.release(user_id)
+            await self.gate.release(user_id, session)
 
     async def _serve_admitted(
-        self, websocket: ClientWebSocket, user_id: UUID
+        self, websocket: ClientWebSocket, user_id: UUID, session: LiveSession
     ) -> None:
         # Bound for the whole session, not just context-building: delegated
         # tool calls executed later in `_bridge` also resolve tenancy from
@@ -590,12 +612,16 @@ class LiveCoachService:
             context = await build_live_context(
                 self.store, today=self.today_provider()
             )
-            await self._serve_bound(websocket, context)
+            await self._serve_bound(websocket, context, user_id, session)
         finally:
             reset_user(context_token)
 
     async def _serve_bound(
-        self, websocket: ClientWebSocket, context: Mapping[str, Any]
+        self,
+        websocket: ClientWebSocket,
+        context: Mapping[str, Any],
+        user_id: UUID,
+        session: LiveSession,
     ) -> None:
         try:
             provider = await asyncio.wait_for(
@@ -646,7 +672,7 @@ class LiveCoachService:
                 await websocket.close(code=1011, reason="Voice coach could not connect")
                 return
 
-            await self._bridge(websocket, provider, allowed_tool_names)
+            await self._bridge(websocket, provider, allowed_tool_names, user_id, session)
             try:
                 await websocket.close(code=1000, reason="Voice session ended")
             except Exception:
@@ -659,6 +685,8 @@ class LiveCoachService:
         websocket: ClientWebSocket,
         provider: Any,
         allowed_tool_names: frozenset[str] = frozenset(),
+        user_id: UUID | None = None,
+        session: LiveSession | None = None,
     ) -> None:
         """Pump both directions concurrently through bounded ordered queues."""
         to_provider: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
@@ -779,28 +807,38 @@ class LiveCoachService:
         client_writer = asyncio.create_task(write_client())
         duration = asyncio.create_task(asyncio.sleep(self.policy.max_duration))
         idle = asyncio.create_task(wait_for_idle())
-        tasks = (
-            client_reader,
-            provider_writer,
-            provider_reader,
-            client_writer,
-            duration,
-            idle,
+        supersede = (
+            asyncio.create_task(session.superseded.wait())
+            if session is not None
+            else None
+        )
+        tasks = tuple(
+            task
+            for task in (
+                client_reader,
+                provider_writer,
+                provider_reader,
+                client_writer,
+                duration,
+                idle,
+                supersede,
+            )
+            if task is not None
         )
         client_can_receive = True
         try:
-            done, _ = await asyncio.wait(
-                {
-                    client_reader,
-                    provider_writer,
-                    provider_reader,
-                    client_writer,
-                    duration,
-                    idle,
-                },
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if duration in done:
+            done, _ = await asyncio.wait(set(tasks), return_when=asyncio.FIRST_COMPLETED)
+            if supersede is not None and supersede in done:
+                logger.info(
+                    "live bridge closing: user_id=%s reason=superseded", user_id
+                )
+                await put_terminal(to_client, {
+                    "type": "error",
+                    "code": "superseded",
+                    "message": "Voice coach reconnected from another session.",
+                })
+                await put_terminal(to_provider, {"type": "session.close"})
+            elif duration in done:
                 await put_terminal(to_client, {
                     "type": "error",
                     "code": "duration_limit",

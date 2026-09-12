@@ -453,13 +453,19 @@ def validate_workout_plan(plan: Any) -> dict[str, Any]:
 
 
 def atwater_warning(
-    calories: float, protein: float, carbs: float, fat: float
+    calories: Any, protein: Any, carbs: Any, fat: Any
 ) -> str | None:
     """Flag calories that disagree with 4/4/9 by more than max(50, 20%).
 
     Returns a warning string, or ``None`` when the numbers are consistent. This
     never blocks a write — alcohol and fiber legitimately break the identity.
+    Accepts ``Any`` because callers pass values straight off an asyncpg row,
+    where Postgres ``NUMERIC`` comes back as ``decimal.Decimal``, not ``float``.
     """
+    calories = _num(calories)
+    protein = _num(protein)
+    carbs = _num(carbs)
+    fat = _num(fat)
     computed = 4.0 * protein + 4.0 * carbs + 9.0 * fat
     delta = abs(computed - calories)
     tolerance = max(50.0, 0.20 * calories)

@@ -453,6 +453,75 @@ async def test_atwater_warning_rides_along_with_the_write(lagging):
     assert len(lagging.inserted) == 1
 
 
+async def test_idempotent_meal_response_survives_decimal_row_values():
+    """asyncpg returns Postgres NUMERIC columns as decimal.Decimal. The
+    response builder (including the Atwater cross-check it runs on the raw
+    insert-returning row) must not raise `float * Decimal` when it sees them.
+    """
+    day = date(2026, 9, 12)
+
+    class FakeConn:
+        async def fetch(self, sql, *args):
+            if "FROM nutrition_entries" in sql:
+                return [{
+                    "id": "row-1",
+                    "name": "6 oz ground beef (93/7, estimated) + 100 g sweet potato",
+                    "meal": "Snack", "calories": Decimal("446"),
+                    "protein": Decimal("40.6"), "carbs": Decimal("20.1"),
+                    "fat": Decimal("21.1"), "fiber": Decimal("3.0"),
+                    "day": day, "created_at": "2026-09-12T20:00:00+00:00",
+                }]
+            if "FROM meals" in sql:
+                return [{
+                    "id": "meal-1", "day": day, "meal_type": "Snack",
+                    "calories": Decimal("446"), "protein": Decimal("40.6"),
+                    "carbs": Decimal("20.1"), "fat": Decimal("21.1"),
+                    "fiber": Decimal("3.0"),
+                }]
+            raise AssertionError(f"unexpected fetch: {sql}")
+
+        async def fetchrow(self, sql, *args):
+            if "FROM days" in sql:
+                return {
+                    "date": day, "calories": Decimal("446"),
+                    "protein": Decimal("40.6"), "carbs": Decimal("20.1"),
+                    "fat": Decimal("21.1"), "fiber": Decimal("3.0"),
+                }
+            if "FROM macro_targets" in sql:
+                return {
+                    "calories": Decimal("2400"), "protein": Decimal("180"),
+                    "carbs": Decimal("200"), "fat": Decimal("70"),
+                    "fiber": Decimal("30"),
+                }
+            raise AssertionError(f"unexpected fetchrow: {sql}")
+
+    row = {
+        "id": "row-1",
+        "name": "6 oz ground beef (93/7, estimated) + 100 g sweet potato",
+        "meal": "Snack",
+        "calories": Decimal("446"), "protein": Decimal("40.6"),
+        "carbs": Decimal("20.1"), "fat": Decimal("21.1"), "fiber": Decimal("3.0"),
+        "day": day, "created_at": "2026-09-12T20:00:00+00:00",
+        "macro_source": "ESTIMATE — 6 oz 93/7 ground beef, typical values; "
+                        "FatSecret: 36617 — 100 g sweet potato",
+    }
+
+    payload = await srv._idempotent_meal_response(FakeConn(), uuid4(), row)
+
+    assert payload["logged"]["calories"] == 446.0
+    assert isinstance(payload["logged"]["calories"], float)
+    assert payload["totals"] == {
+        "calories": 446.0, "protein": 40.6, "carbs": 20.1,
+        "fat": 21.1, "fiber": 3.0,
+    }
+    assert payload["remaining"]["calories"] == 2400.0 - 446.0
+    assert payload["day_rollup"]["calories"] == 446.0
+    assert isinstance(payload["day_rollup"]["calories"], float)
+    assert payload["day_label"] == srv.domain.day_label(day)
+    # Within Atwater tolerance for these numbers, so no warning is raised.
+    assert "warning" not in payload
+
+
 async def test_undo_excludes_the_row_it_just_deleted(lagging):
     payload = await srv.undo_last_meal()
     assert lagging.deleted == [("nutrition_entries", "meal-1")]

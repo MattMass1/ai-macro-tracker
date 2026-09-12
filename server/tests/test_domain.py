@@ -244,6 +244,23 @@ def test_atwater_tolerates_zero_calorie_entries():
     assert atwater_warning(0, 0, 0, 0) is None
 
 
+def test_atwater_accepts_decimal_values_from_an_asyncpg_row():
+    """Postgres NUMERIC columns come back from asyncpg as decimal.Decimal.
+    `float * Decimal` raises TypeError, so the check must coerce first."""
+    from decimal import Decimal
+
+    warning = atwater_warning(
+        Decimal("446"), Decimal("40.6"), Decimal("20.1"), Decimal("21.1")
+    )
+    assert warning is None
+
+    warning = atwater_warning(
+        Decimal("1500"), Decimal("30"), Decimal("3"), Decimal("2.5")
+    )
+    assert warning is not None
+    assert "1500" in warning
+
+
 # --------------------------------------------------------------------------- #
 # Totals
 # --------------------------------------------------------------------------- #

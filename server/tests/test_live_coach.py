@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 from datetime import date
 import json
 import logging
@@ -1115,17 +1116,50 @@ async def test_duration_limit_requests_graceful_close_and_reports_reason():
 
 
 @pytest.mark.asyncio
-async def test_session_gate_allows_only_one_active_session_per_user():
+async def test_session_gate_supersedes_older_session_for_same_user():
     gate = LiveSessionGate()
     first_user = uuid4()
     second_user = uuid4()
 
-    assert await gate.acquire(first_user) is None
-    assert await gate.acquire(first_user) == "active_session"
-    assert await gate.acquire(second_user) is None
+    rejection1, session1 = await gate.acquire(first_user)
+    assert rejection1 is None
+    assert not session1.superseded.is_set()
 
-    await gate.release(first_user)
-    assert await gate.acquire(first_user) is None
+    # Newest connection wins: acquiring again for the same user signals the
+    # older session to close instead of refusing the newcomer.
+    rejection2, session2 = await gate.acquire(first_user)
+    assert rejection2 is None
+    assert session2 is not session1
+    assert session1.superseded.is_set()
+    assert not session2.superseded.is_set()
+
+    rejection3, session3 = await gate.acquire(second_user)
+    assert rejection3 is None
+    assert not session3.superseded.is_set()
+
+    # A stale release from the superseded session must not free the slot
+    # the newer session is holding.
+    await gate.release(first_user, session1)
+    assert gate._sessions.get(first_user) is session2
+
+    await gate.release(first_user, session2)
+    assert first_user not in gate._sessions
+
+
+@pytest.mark.asyncio
+async def test_session_gate_logs_acquire_supersede_and_release(caplog):
+    gate = LiveSessionGate()
+    user = uuid4()
+
+    with caplog.at_level(logging.INFO):
+        _, session1 = await gate.acquire(user)
+        _, session2 = await gate.acquire(user)
+        await gate.release(user, session2)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("acquired" in m and str(user) in m for m in messages)
+    assert any("superseded" in m and str(user) in m for m in messages)
+    assert any("released" in m and str(user) in m for m in messages)
 
 
 @pytest.mark.asyncio
@@ -1136,47 +1170,114 @@ async def test_session_gate_bounds_start_attempts_per_user_window():
     )
     user = uuid4()
 
-    assert await gate.acquire(user) is None
-    await gate.release(user)
-    assert await gate.acquire(user) is None
-    await gate.release(user)
-    assert await gate.acquire(user) == "rate_limited"
+    rejection, session = await gate.acquire(user)
+    assert rejection is None
+    await gate.release(user, session)
+    rejection, session = await gate.acquire(user)
+    assert rejection is None
+    await gate.release(user, session)
+    rejection, session = await gate.acquire(user)
+    assert rejection == "rate_limited"
+    assert session is None
 
     now[0] = 161.0
-    assert await gate.acquire(user) is None
+    rejection, session = await gate.acquire(user)
+    assert rejection is None
 
 
 @pytest.mark.asyncio
-async def test_service_rejects_second_session_before_provider_creation():
+async def test_session_gate_logs_rate_limited_rejection(caplog):
+    gate = LiveSessionGate(max_attempts=1, attempt_window=60.0)
+    user = uuid4()
+    await gate.acquire(user)
+
+    with caplog.at_level(logging.INFO):
+        rejection, session = await gate.acquire(user)
+
+    assert rejection == "rate_limited"
+    assert session is None
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "rejected" in m and "rate_limited" in m and str(user) in m
+        for m in messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_service_supersedes_older_session_and_admits_reconnect():
     tenant = uuid4()
     gate = LiveSessionGate()
-    assert await gate.acquire(tenant) is None
-    provider_calls = []
 
     class Store:
         async def resolve_device_for_live(self, token): return tenant
+        async def fetch_targets(self, day): return None
+        async def fetch_meals(self, day, end=None): return []
+        async def fetch_workout_plan(self): return None
+        async def fetch_workouts(self, start=None, end=None, exercise=None): return []
+        async def fetch_prs(self): return []
+        async def fetch_workout_library(self): return []
 
-    async def connect_provider(*args, **kwargs):
-        provider_calls.append((args, kwargs))
-        raise AssertionError("must reject before provider creation")
+    class Provider:
+        def __init__(self):
+            self.sent = []
+            self.incoming = asyncio.Queue()
 
-    socket = FakeClientWebSocket(authorization="Bearer valid-device-token")
+        async def send(self, text):
+            event = json.loads(text)
+            self.sent.append(event)
+            if event["type"] == "session.start":
+                await self.incoming.put(json.dumps({"type": "session.started"}))
+            elif event["type"] == "session.close":
+                await self.incoming.put(json.dumps({
+                    "type": "session.closed", "reason": "close_requested"
+                }))
+
+        async def recv(self): return await self.incoming.get()
+        async def close(self): pass
+
+    providers: list[Provider] = []
+
+    def connect_provider(*args, **kwargs):
+        provider = Provider()
+        providers.append(provider)
+        return asyncio.sleep(0, result=provider)
+
     service = LiveCoachService(
         store=Store(),
         provider_connect=connect_provider,
         api_key="project-key-test",
+        today_provider=lambda: date(2026, 9, 10),
         gate=gate,
+        policy=LiveCoachPolicy(idle_timeout=5.0, max_duration=5.0, close_timeout=0.2),
     )
 
-    await service.serve(socket)
+    socket_a = FakeClientWebSocket(authorization="Bearer valid-device-token")
+    socket_b = FakeClientWebSocket(authorization="Bearer valid-device-token")
 
-    assert socket.sent == [{
-        "type": "error",
-        "code": "active_session",
-        "message": "A voice coach session is already active.",
-    }]
-    assert socket.closed == [(1008, "Voice coach session already active")]
-    assert provider_calls == []
+    async def wait_for_started(socket, label):
+        for _ in range(200):
+            if any(event.get("type") == "session.started" for event in socket.sent):
+                return
+            await asyncio.sleep(0.01)
+        pytest.fail(f"session {label} never started")
+
+    task_a = asyncio.create_task(service.serve(socket_a))
+    await wait_for_started(socket_a, "A")
+
+    task_b = asyncio.create_task(service.serve(socket_b))
+    try:
+        await wait_for_started(socket_b, "B")
+        await asyncio.wait_for(task_a, timeout=1.0)
+
+        assert any(event.get("code") == "superseded" for event in socket_a.sent)
+        assert socket_a.closed and socket_a.closed[-1] == (1000, "Voice session ended")
+        assert len(providers) == 2
+    finally:
+        task_b.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task_b
+
+    assert tenant not in gate._sessions
 
 
 @pytest.mark.asyncio
@@ -1212,16 +1313,22 @@ async def test_idle_limit_requests_graceful_close():
 
     provider = Provider()
     socket = FakeClientWebSocket(authorization="Bearer valid-device-token")
+    gate = LiveSessionGate()
     service = LiveCoachService(
         store=Store(),
         provider_connect=lambda *args, **kwargs: asyncio.sleep(0, result=provider),
         api_key="project-key-test",
         today_provider=lambda: date(2026, 9, 10),
+        gate=gate,
         policy=LiveCoachPolicy(
             idle_timeout=0.01, max_duration=1.0, close_timeout=0.1
         ),
     )
 
+    # Bounded by the idle timeout, not max_duration: a session nobody is
+    # touching must release the gate quickly, or the next legitimate
+    # connection attempt (from this same device) would find a slot that
+    # looks occupied for up to max_duration.
     await asyncio.wait_for(service.serve(socket), timeout=0.2)
 
     assert [event["type"] for event in provider.sent] == [
@@ -1232,6 +1339,7 @@ async def test_idle_limit_requests_graceful_close():
         "code": "idle_timeout",
         "message": "The voice session ended after being idle.",
     }
+    assert tenant not in gate._sessions
 
 
 @pytest.mark.asyncio

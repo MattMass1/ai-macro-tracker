@@ -1,8 +1,9 @@
 // !$*UTF8*$!
 {
 	archiveVersion = 1;
-	classes = {};
-	objectVersion = 77;
+	classes = {
+	};
+	objectVersion = 71;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -21,10 +22,29 @@
 		B0010000000000000000000D /* FoodComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000D /* FoodComponents.swift */; };
 		B0010000000000000000000E /* AddBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000012 /* AddBarView.swift */; };
 		B0010000000000000000000F /* ModelDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000F /* ModelDecodingTests.swift */; };
+		B00100000000000000000010 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000013 /* Keychain.swift */; };
+		B00100000000000000000011 /* InviteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000014 /* InviteView.swift */; };
+		B00100000000000000000012 /* BarcodeScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000015 /* BarcodeScannerView.swift */; };
+		B00100000000000000000013 /* MetricsFormCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000016 /* MetricsFormCard.swift */; };
+		B00100000000000000000015 /* ExerciseVideoCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000017 /* ExerciseVideoCard.swift */; };
+		B00100000000000000000016 /* UIImage+GIF.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000018 /* UIImage+GIF.swift */; };
+		B00100000000000000000017 /* ExercisePickerPromptCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000019 /* ExercisePickerPromptCard.swift */; };
+		B00100000000000000000018 /* LiveCoachControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001A /* LiveCoachControllerTests.swift */; };
+		B00100000000000000000019 /* LiveCoachController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001B /* LiveCoachController.swift */; };
+		B0010000000000000000001A /* LiveCoachTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001C /* LiveCoachTransport.swift */; };
+		B0010000000000000000001B /* LiveCoachAudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001D /* LiveCoachAudioEngine.swift */; };
+		B0010000000000000000001C /* LiveCoachView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001E /* LiveCoachView.swift */; };
+		B00100000000000000000014 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000E /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		D00000000000000000000001 = {isa = PBXContainerItemProxy; containerPortal = A00000000000000000000000 /* Project object */; proxyType = 1; remoteGlobalIDString = A00000000000000000000001; remoteInfo = MacroTracker; };
+		D00000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000000 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A00000000000000000000001;
+			remoteInfo = MacroTracker;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
@@ -48,61 +68,412 @@
 		F00100000000000000000010 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		F00100000000000000000011 /* Config.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.xcconfig; sourceTree = SOURCE_ROOT; };
 		F00100000000000000000012 /* AddBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddBarView.swift; sourceTree = "<group>"; };
+		F00100000000000000000013 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
+		F00100000000000000000014 /* InviteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InviteView.swift; sourceTree = "<group>"; };
+		F00100000000000000000015 /* BarcodeScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BarcodeScannerView.swift; sourceTree = "<group>"; };
+		F00100000000000000000016 /* MetricsFormCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricsFormCard.swift; sourceTree = "<group>"; };
+		F00100000000000000000017 /* ExerciseVideoCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExerciseVideoCard.swift; sourceTree = "<group>"; };
+		F00100000000000000000018 /* UIImage+GIF.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "UIImage+GIF.swift"; sourceTree = "<group>"; };
+		F00100000000000000000019 /* ExercisePickerPromptCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExercisePickerPromptCard.swift; sourceTree = "<group>"; };
+		F0010000000000000000001A /* LiveCoachControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachControllerTests.swift; sourceTree = "<group>"; };
+		F0010000000000000000001B /* LiveCoachController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachController.swift; sourceTree = "<group>"; };
+		F0010000000000000000001C /* LiveCoachTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachTransport.swift; sourceTree = "<group>"; };
+		F0010000000000000000001D /* LiveCoachAudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachAudioEngine.swift; sourceTree = "<group>"; };
+		F0010000000000000000001E /* LiveCoachView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		C00000000000000000000001 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
-		C00000000000000000000002 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		C00000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C00000000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		A10000000000000000000000 = {isa = PBXGroup; children = (A10000000000000000000001, A10000000000000000000007, F00100000000000000000011, A10000000000000000000008); sourceTree = "<group>"; };
-		A10000000000000000000001 /* MacroTracker */ = {isa = PBXGroup; children = (F00100000000000000000001, F00100000000000000000002, F00100000000000000000003, F00100000000000000000004, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004, A10000000000000000000006, F00100000000000000000010); path = MacroTracker; sourceTree = "<group>"; };
-		A10000000000000000000002 /* Models */ = {isa = PBXGroup; children = (F00100000000000000000005); path = Models; sourceTree = "<group>"; };
-		A10000000000000000000003 /* Services */ = {isa = PBXGroup; children = (F00100000000000000000006, F00100000000000000000007, F00100000000000000000008); path = Services; sourceTree = "<group>"; };
-		A10000000000000000000004 /* Views */ = {isa = PBXGroup; children = (F00100000000000000000009, F0010000000000000000000A, F0010000000000000000000B, A10000000000000000000005); path = Views; sourceTree = "<group>"; };
-		A10000000000000000000005 /* Components */ = {isa = PBXGroup; children = (F0010000000000000000000C, F0010000000000000000000D, F00100000000000000000012); path = Components; sourceTree = "<group>"; };
-		A10000000000000000000006 /* Resources */ = {isa = PBXGroup; children = (F0010000000000000000000E); path = Resources; sourceTree = "<group>"; };
-		A10000000000000000000007 /* MacroTrackerTests */ = {isa = PBXGroup; children = (F0010000000000000000000F); path = MacroTrackerTests; sourceTree = "<group>"; };
-		A10000000000000000000008 /* Products */ = {isa = PBXGroup; children = (F00000000000000000000001, F00000000000000000000002); name = Products; sourceTree = "<group>"; };
+		A10000000000000000000000 = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000001 /* MacroTracker */,
+				A10000000000000000000007 /* MacroTrackerTests */,
+				F00100000000000000000011 /* Config.xcconfig */,
+				A10000000000000000000008 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10000000000000000000001 /* MacroTracker */ = {
+			isa = PBXGroup;
+			children = (
+				F00100000000000000000001 /* MacroTrackerApp.swift */,
+				F00100000000000000000002 /* ContentView.swift */,
+				F00100000000000000000003 /* AppStore.swift */,
+				F00100000000000000000004 /* Theme.swift */,
+				A10000000000000000000002 /* Models */,
+				A10000000000000000000003 /* Services */,
+				A10000000000000000000004 /* Views */,
+				A10000000000000000000006 /* Resources */,
+			);
+			path = MacroTracker;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000002 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				F00100000000000000000005 /* Models.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000003 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				F00100000000000000000006 /* Config.swift */,
+				F00100000000000000000007 /* APIClient.swift */,
+				F00100000000000000000008 /* AuthService.swift */,
+				F00100000000000000000013 /* Keychain.swift */,
+				F0010000000000000000001B /* LiveCoachController.swift */,
+				F0010000000000000000001C /* LiveCoachTransport.swift */,
+				F0010000000000000000001D /* LiveCoachAudioEngine.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000004 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				F00100000000000000000009 /* TodayView.swift */,
+				F0010000000000000000000A /* ChatLogView.swift */,
+				F0010000000000000000000B /* WorkoutsView.swift */,
+				F00100000000000000000014 /* InviteView.swift */,
+				F00100000000000000000015 /* BarcodeScannerView.swift */,
+				F0010000000000000000001E /* LiveCoachView.swift */,
+				A10000000000000000000005 /* Components */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000005 /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				F0010000000000000000000C /* MacroRingsView.swift */,
+				F0010000000000000000000D /* FoodComponents.swift */,
+				F00100000000000000000012 /* AddBarView.swift */,
+				F00100000000000000000016 /* MetricsFormCard.swift */,
+				F00100000000000000000017 /* ExerciseVideoCard.swift */,
+				F00100000000000000000018 /* UIImage+GIF.swift */,
+				F00100000000000000000019 /* ExercisePickerPromptCard.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000006 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				F0010000000000000000000E /* Assets.xcassets */,
+				F00100000000000000000010 /* Info.plist */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000007 /* MacroTrackerTests */ = {
+			isa = PBXGroup;
+			children = (
+				F0010000000000000000000F /* ModelDecodingTests.swift */,
+				F0010000000000000000001A /* LiveCoachControllerTests.swift */,
+			);
+			path = MacroTrackerTests;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000008 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				F00000000000000000000001 /* MacroTracker.app */,
+				F00000000000000000000002 /* MacroTrackerTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		A00000000000000000000001 /* MacroTracker */ = {isa = PBXNativeTarget; buildConfigurationList = E00000000000000000000001; buildPhases = (C10000000000000000000001, C00000000000000000000001, C20000000000000000000001); buildRules = (); dependencies = (); name = MacroTracker; productName = MacroTracker; productReference = F00000000000000000000001; productType = "com.apple.product-type.application"; };
-		A00000000000000000000002 /* MacroTrackerTests */ = {isa = PBXNativeTarget; buildConfigurationList = E00000000000000000000002; buildPhases = (C10000000000000000000002, C00000000000000000000002, C20000000000000000000002); buildRules = (); dependencies = (D10000000000000000000001); name = MacroTrackerTests; productName = MacroTrackerTests; productReference = F00000000000000000000002; productType = "com.apple.product-type.bundle.unit-test"; };
+		A00000000000000000000001 /* MacroTracker */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E00000000000000000000001 /* Build configuration list for PBXNativeTarget "MacroTracker" */;
+			buildPhases = (
+				C10000000000000000000001 /* Sources */,
+				C00000000000000000000001 /* Frameworks */,
+				C20000000000000000000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MacroTracker;
+			productName = MacroTracker;
+			productReference = F00000000000000000000001 /* MacroTracker.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A00000000000000000000002 /* MacroTrackerTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E00000000000000000000002 /* Build configuration list for PBXNativeTarget "MacroTrackerTests" */;
+			buildPhases = (
+				C10000000000000000000002 /* Sources */,
+				C00000000000000000000002 /* Frameworks */,
+				C20000000000000000000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D10000000000000000000001 /* PBXTargetDependency */,
+			);
+			name = MacroTrackerTests;
+			productName = MacroTrackerTests;
+			productReference = F00000000000000000000002 /* MacroTrackerTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		A00000000000000000000000 /* Project object */ = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 2660; LastUpgradeCheck = 2660; TargetAttributes = {A00000000000000000000001 = {CreatedOnToolsVersion = 26.0; }; A00000000000000000000002 = {CreatedOnToolsVersion = 26.0; TestTargetID = A00000000000000000000001; }; }; }; buildConfigurationList = E00000000000000000000000; compatibilityVersion = "Xcode 16.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = A10000000000000000000000; productRefGroup = A10000000000000000000008; projectDirPath = ""; projectRoot = ""; targets = (A00000000000000000000001, A00000000000000000000002); };
+		A00000000000000000000000 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2660;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = {
+					A00000000000000000000001 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+					A00000000000000000000002 = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = A00000000000000000000001;
+					};
+				};
+			};
+			buildConfigurationList = E00000000000000000000000 /* Build configuration list for PBXProject "MacroTracker" */;
+			compatibilityVersion = "Xcode 16.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A10000000000000000000000;
+			productRefGroup = A10000000000000000000008 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A00000000000000000000001 /* MacroTracker */,
+				A00000000000000000000002 /* MacroTrackerTests */,
+			);
+		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		C20000000000000000000001 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
-		C20000000000000000000002 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		C20000000000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B00100000000000000000014 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C20000000000000000000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		C10000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B00100000000000000000001, B00100000000000000000002, B00100000000000000000003, B00100000000000000000004, B00100000000000000000005, B00100000000000000000006, B00100000000000000000007, B00100000000000000000008, B00100000000000000000009, B0010000000000000000000A, B0010000000000000000000B, B0010000000000000000000C, B0010000000000000000000D, B0010000000000000000000E); runOnlyForDeploymentPostprocessing = 0; };
-		C10000000000000000000002 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B0010000000000000000000F); runOnlyForDeploymentPostprocessing = 0; };
+		C10000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B00100000000000000000001 /* MacroTrackerApp.swift in Sources */,
+				B00100000000000000000002 /* ContentView.swift in Sources */,
+				B00100000000000000000003 /* AppStore.swift in Sources */,
+				B00100000000000000000004 /* Theme.swift in Sources */,
+				B00100000000000000000005 /* Models.swift in Sources */,
+				B00100000000000000000006 /* Config.swift in Sources */,
+				B00100000000000000000007 /* APIClient.swift in Sources */,
+				B00100000000000000000008 /* AuthService.swift in Sources */,
+				B00100000000000000000009 /* TodayView.swift in Sources */,
+				B0010000000000000000000A /* ChatLogView.swift in Sources */,
+				B0010000000000000000000B /* WorkoutsView.swift in Sources */,
+				B0010000000000000000000C /* MacroRingsView.swift in Sources */,
+				B0010000000000000000000D /* FoodComponents.swift in Sources */,
+				B0010000000000000000000E /* AddBarView.swift in Sources */,
+				B00100000000000000000010 /* Keychain.swift in Sources */,
+				B00100000000000000000011 /* InviteView.swift in Sources */,
+				B00100000000000000000012 /* BarcodeScannerView.swift in Sources */,
+				B00100000000000000000013 /* MetricsFormCard.swift in Sources */,
+				B00100000000000000000015 /* ExerciseVideoCard.swift in Sources */,
+				B00100000000000000000016 /* UIImage+GIF.swift in Sources */,
+				B00100000000000000000017 /* ExercisePickerPromptCard.swift in Sources */,
+				B00100000000000000000019 /* LiveCoachController.swift in Sources */,
+				B0010000000000000000001A /* LiveCoachTransport.swift in Sources */,
+				B0010000000000000000001B /* LiveCoachAudioEngine.swift in Sources */,
+				B0010000000000000000001C /* LiveCoachView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C10000000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B0010000000000000000000F /* ModelDecodingTests.swift in Sources */,
+				B00100000000000000000018 /* LiveCoachControllerTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		D10000000000000000000001 = {isa = PBXTargetDependency; target = A00000000000000000000001; targetProxy = D00000000000000000000001; };
+		D10000000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A00000000000000000000001 /* MacroTracker */;
+			targetProxy = D00000000000000000000001 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		E10000000000000000000001 = {isa = XCBuildConfiguration; baseConfigurationReference = F00100000000000000000011; buildSettings = {CLANG_ENABLE_MODULES = YES; DEBUG_INFORMATION_FORMAT = dwarf; ENABLE_TESTABILITY = YES; GCC_OPTIMIZATION_LEVEL = 0; ONLY_ACTIVE_ARCH = YES; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; }; name = Debug; };
-		E10000000000000000000002 = {isa = XCBuildConfiguration; baseConfigurationReference = F00100000000000000000011; buildSettings = {CLANG_ENABLE_MODULES = YES; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; SWIFT_COMPILATION_MODE = wholemodule; VALIDATE_PRODUCT = YES; }; name = Release; };
-		E10000000000000000000003 = {isa = XCBuildConfiguration; baseConfigurationReference = F00100000000000000000011; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = MacroTracker/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.biz21.macrotracker; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; }; name = Debug; };
-		E10000000000000000000004 = {isa = XCBuildConfiguration; baseConfigurationReference = F00100000000000000000011; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = MacroTracker/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.biz21.macrotracker; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; }; name = Release; };
-		E10000000000000000000005 = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.biz21.macrotracker.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MacroTracker.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MacroTracker"; }; name = Debug; };
-		E10000000000000000000006 = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.biz21.macrotracker.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MacroTracker.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MacroTracker"; }; name = Release; };
+		E10000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = F00100000000000000000011 /* Config.xcconfig */;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		E10000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = F00100000000000000000011 /* Config.xcconfig */;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		E10000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = F00100000000000000000011 /* Config.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 88A69374G2;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MacroTracker/Resources/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.biz21.macrotracker;
+				PRODUCT_NAME = MacroTracker;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		E10000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = F00100000000000000000011 /* Config.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 88A69374G2;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MacroTracker/Resources/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.biz21.macrotracker;
+				PRODUCT_NAME = MacroTracker;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		E10000000000000000000005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.biz21.macrotracker.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MacroTracker.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MacroTracker";
+			};
+			name = Debug;
+		};
+		E10000000000000000000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.biz21.macrotracker.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MacroTracker.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MacroTracker";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		E00000000000000000000000 = {isa = XCConfigurationList; buildConfigurations = (E10000000000000000000001, E10000000000000000000002); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-		E00000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (E10000000000000000000003, E10000000000000000000004); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-		E00000000000000000000002 = {isa = XCConfigurationList; buildConfigurations = (E10000000000000000000005, E10000000000000000000006); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		E00000000000000000000000 /* Build configuration list for PBXProject "MacroTracker" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E10000000000000000000001 /* Debug */,
+				E10000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E00000000000000000000001 /* Build configuration list for PBXNativeTarget "MacroTracker" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E10000000000000000000003 /* Debug */,
+				E10000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E00000000000000000000002 /* Build configuration list for PBXNativeTarget "MacroTrackerTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E10000000000000000000005 /* Debug */,
+				E10000000000000000000006 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 	};
 	rootObject = A00000000000000000000000 /* Project object */;

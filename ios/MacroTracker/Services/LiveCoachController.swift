@@ -1,0 +1,489 @@
+import Foundation
+
+enum LiveCoachState: Equatable {
+    case ready
+    case connecting
+    case listening
+    case speaking
+    case failed(message: String, retryable: Bool, settingsAvailable: Bool = false)
+    case ended
+}
+
+enum LiveCoachServerEvent: Equatable {
+    case started
+    case inputTranscript(String)
+    case outputTranscript(String)
+    case outputAudio(Data)
+    case inputMuted(Bool)
+    case activity(state: LiveCoachActivityState, label: String)
+    case mealCommitted(operationID: String, label: String, dayTotal: MacroTotals)
+    case closed(reason: String)
+    case failure(code: String, message: String)
+}
+
+enum LiveCoachActivityState: String, Equatable {
+    case resolving
+    case logging
+    case done
+    case error
+}
+
+enum LiveCoachAudioRouteChangeReason: Equatable {
+    case newDeviceAvailable
+    case oldDeviceUnavailable
+    case categoryChange
+    case override
+    case wakeFromSleep
+    case noSuitableRouteForCategory
+    case routeConfigurationChange
+    case unknown
+}
+
+struct LiveCoachAudioRouteChange: Equatable {
+    let reason: LiveCoachAudioRouteChangeReason
+    let hasInput: Bool
+    let hasOutput: Bool
+}
+
+enum LiveCoachAudioLifecycleEvent: Equatable {
+    case interrupted
+    case routeEvaluated(LiveCoachAudioRouteChange)
+    case engineConfigurationChanged(hasInput: Bool, hasOutput: Bool, engineRunning: Bool)
+}
+
+struct LiveCoachConnectionError: Error, Equatable {
+    let message: String
+    let retryable: Bool
+}
+
+@MainActor
+protocol LiveCoachPermissionChecking {
+    func requestPermission() async -> Bool
+}
+
+@MainActor
+protocol LiveCoachTransporting: AnyObject {
+    /// Returns only after the server confirms `session.started`.
+    func connect() async throws -> AsyncThrowingStream<LiveCoachServerEvent, Error>
+    func sendAudio(_ data: Data) async throws
+    func setMuted(_ muted: Bool) async throws
+    func close() async
+}
+
+@MainActor
+protocol LiveCoachAudioHandling: AnyObject {
+    var capturedAudio: AsyncStream<Data> { get }
+    var playbackActivity: AsyncStream<Bool> { get }
+    var lifecycleEvents: AsyncStream<LiveCoachAudioLifecycleEvent> { get }
+    func start() throws
+    func play(_ data: Data) throws
+    func setMuted(_ muted: Bool)
+    func recoverFromConfigurationChange() throws
+    func stop()
+}
+
+@MainActor
+final class LiveCoachController: ObservableObject {
+    @Published private(set) var state: LiveCoachState = .ready
+    @Published private(set) var isMuted = false
+    @Published private(set) var userCaption = ""
+    @Published private(set) var coachCaption = ""
+    @Published private(set) var activityState: LiveCoachActivityState?
+    @Published private(set) var activityLabel = ""
+    @Published private(set) var committedMealOperationID: String?
+    @Published private(set) var committedMealLabel = ""
+
+    private let permission: LiveCoachPermissionChecking
+    private let transport: LiveCoachTransporting
+    private let audio: LiveCoachAudioHandling
+    private var sessionGeneration = UUID()
+    private var sessionTasks: [Task<Void, Never>] = []
+    private var activityClearTask: Task<Void, Never>?
+    private var committedMealClearTask: Task<Void, Never>?
+    private var closeTask: Task<Void, Never>?
+    private var endTask: Task<Void, Never>?
+    private var endTaskID: UUID?
+    private var audioIsRunning = false
+    private var transportIsOpen = false
+    private var startAttemptInProgress = false
+    private var startAttemptWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(
+        permission: LiveCoachPermissionChecking,
+        transport: LiveCoachTransporting,
+        audio: LiveCoachAudioHandling
+    ) {
+        self.permission = permission
+        self.transport = transport
+        self.audio = audio
+    }
+
+    func start() async {
+        let requestGeneration = sessionGeneration
+        if let endTask {
+            await endTask.value
+            guard requestGeneration == sessionGeneration else { return }
+        }
+        guard !isActiveState else { return }
+        if startAttemptInProgress {
+            await withCheckedContinuation { startAttemptWaiters.append($0) }
+            guard requestGeneration == sessionGeneration else { return }
+            guard !isActiveState else { return }
+        }
+        guard !startAttemptInProgress else { return }
+        startAttemptInProgress = true
+        defer { finishStartAttempt() }
+
+        stopLocalSession()
+        let generation = UUID()
+        sessionGeneration = generation
+        state = .connecting
+        isMuted = false
+        userCaption = ""
+        coachCaption = ""
+        clearActivity()
+        clearCommittedMeal()
+
+        let pendingClose = closeTask
+        closeTask = nil
+        if let pendingClose {
+            await pendingClose.value
+            guard generation == sessionGeneration else { return }
+        }
+
+        let permissionGranted = await permission.requestPermission()
+        guard generation == sessionGeneration else { return }
+        guard permissionGranted else {
+            state = .failed(
+                message: "Microphone access is required for voice coaching.",
+                retryable: false,
+                settingsAvailable: true
+            )
+            return
+        }
+
+        do {
+            transportIsOpen = true
+            let events = try await transport.connect()
+            guard generation == sessionGeneration else { return }
+            try audio.start()
+            audioIsRunning = true
+            state = .listening
+            launchSessionTasks(events: events, generation: generation)
+        } catch {
+            guard generation == sessionGeneration else { return }
+            audio.stop()
+            audioIsRunning = false
+            if transportIsOpen {
+                transportIsOpen = false
+                await transport.close()
+                guard generation == sessionGeneration else { return }
+            }
+            if let connectionError = error as? LiveCoachConnectionError {
+                state = .failed(
+                    message: connectionError.message,
+                    retryable: connectionError.retryable,
+                    settingsAvailable: false
+                )
+            } else {
+                state = .failed(
+                    message: "Voice coach could not connect. Try again.",
+                    retryable: true,
+                    settingsAvailable: false
+                )
+            }
+        }
+    }
+
+    func toggleMute() async {
+        guard state == .listening || state == .speaking else { return }
+        let generation = sessionGeneration
+        let next = !isMuted
+        do {
+            try await transport.setMuted(next)
+            guard !Task.isCancelled,
+                  generation == sessionGeneration,
+                  state == .listening || state == .speaking else { return }
+            isMuted = next
+            audio.setMuted(next)
+        } catch {
+            guard generation == sessionGeneration else { return }
+            failCurrentSession(
+                message: "Voice coach lost the connection. Try again.",
+                retryable: true
+            )
+        }
+    }
+
+    func end() async {
+        if let endTask {
+            sessionGeneration = UUID()
+            await endTask.value
+            return
+        }
+        let pendingClose = closeTask
+        closeTask = nil
+        let hadTransport = transportIsOpen
+        sessionGeneration = UUID()
+        guard hadTransport || audioIsRunning || !sessionTasks.isEmpty || pendingClose != nil else {
+            clearActivity()
+            clearCommittedMeal()
+            state = .ended
+            return
+        }
+        stopLocalSession()
+        transportIsOpen = false
+        clearActivity()
+        clearCommittedMeal()
+        state = .ended
+        let taskID = UUID()
+        endTaskID = taskID
+        let task = Task { [weak self, transport] in
+            if hadTransport {
+                await transport.close()
+            }
+            if let pendingClose {
+                await pendingClose.value
+            }
+            guard let self, self.endTaskID == taskID else { return }
+            self.endTask = nil
+            self.endTaskID = nil
+        }
+        endTask = task
+        await task.value
+    }
+
+    private func launchSessionTasks(
+        events: AsyncThrowingStream<LiveCoachServerEvent, Error>,
+        generation: UUID
+    ) {
+        sessionTasks = [
+            Task { [weak self] in
+                do {
+                    for try await event in events {
+                        guard !Task.isCancelled else { return }
+                        self?.handle(event, generation: generation)
+                    }
+                    self?.finishRemoteSession(generation: generation)
+                } catch {
+                    self?.failIfCurrent(generation: generation)
+                }
+            },
+            Task { [weak self, audio, transport] in
+                for await chunk in audio.capturedAudio {
+                    guard !Task.isCancelled else { return }
+                    do {
+                        try await transport.sendAudio(chunk)
+                    } catch {
+                        self?.failIfCurrent(generation: generation)
+                        return
+                    }
+                }
+            },
+            Task { [weak self, audio] in
+                for await active in audio.playbackActivity {
+                    guard !Task.isCancelled else { return }
+                    self?.handlePlayback(active: active, generation: generation)
+                }
+            },
+            Task { [weak self, audio] in
+                for await event in audio.lifecycleEvents {
+                    guard !Task.isCancelled else { return }
+                    guard self?.sessionGeneration == generation else { return }
+                    switch event {
+                    case .routeEvaluated(let change):
+                        guard change.hasInput, change.hasOutput else {
+                            self?.failCurrentSession(
+                                message: "The audio route is unavailable. Reconnect when audio is available.",
+                                retryable: true
+                            )
+                            return
+                        }
+                        do {
+                            try audio.recoverFromConfigurationChange()
+                            continue
+                        } catch {
+                            self?.failCurrentSession(
+                                message: "Voice audio stopped. Reconnect to continue.",
+                                retryable: true
+                            )
+                            return
+                        }
+                    case .engineConfigurationChanged(let hasInput, let hasOutput, let engineRunning):
+                        guard hasInput, hasOutput else {
+                            self?.failCurrentSession(
+                                message: "The audio route is unavailable. Reconnect when audio is available.",
+                                retryable: true
+                            )
+                            return
+                        }
+                        guard !engineRunning else { continue }
+                        do {
+                            try audio.recoverFromConfigurationChange()
+                            continue
+                        } catch {
+                            self?.failCurrentSession(
+                                message: "Voice audio stopped. Reconnect to continue.",
+                                retryable: true
+                            )
+                            return
+                        }
+                    case .interrupted:
+                        self?.failCurrentSession(
+                            message: "Voice audio was interrupted. Reconnect to continue.",
+                            retryable: true
+                        )
+                        return
+                    }
+                }
+            },
+        ]
+    }
+
+    private func handle(_ event: LiveCoachServerEvent, generation: UUID) {
+        guard generation == sessionGeneration else { return }
+        switch event {
+        case .started:
+            break
+        case .inputTranscript(let delta):
+            userCaption = Self.appending(delta, to: userCaption)
+        case .outputTranscript(let delta):
+            coachCaption = Self.appending(delta, to: coachCaption)
+        case .outputAudio(let data):
+            do {
+                try audio.play(data)
+            } catch {
+                failCurrentSession(
+                    message: "Voice playback could not continue.",
+                    retryable: true
+                )
+            }
+        case .inputMuted(let muted):
+            isMuted = muted
+            audio.setMuted(muted)
+        case .activity(let activityState, let label):
+            updateActivity(activityState, label: label, generation: generation)
+        case .mealCommitted(let operationID, let label, _):
+            updateCommittedMeal(operationID: operationID, label: label, generation: generation)
+        case .closed:
+            finishRemoteSession(generation: generation)
+        case .failure(let code, let message):
+            let terminalCodes = ["not_configured", "provider_access"]
+            failCurrentSession(
+                message: message,
+                retryable: !terminalCodes.contains(code)
+            )
+        }
+    }
+
+    private func updateActivity(_ activityState: LiveCoachActivityState, label: String, generation: UUID) {
+        activityClearTask?.cancel()
+        self.activityState = activityState
+        activityLabel = label
+        switch activityState {
+        case .resolving, .logging:
+            activityClearTask = nil
+        case .done, .error:
+            activityClearTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled else { return }
+                guard self?.sessionGeneration == generation else { return }
+                self?.activityState = nil
+                self?.activityLabel = ""
+            }
+        }
+    }
+
+    private func clearActivity() {
+        activityClearTask?.cancel()
+        activityClearTask = nil
+        activityState = nil
+        activityLabel = ""
+    }
+
+    private func updateCommittedMeal(operationID: String, label: String, generation: UUID) {
+        committedMealClearTask?.cancel()
+        committedMealOperationID = operationID
+        committedMealLabel = label
+        committedMealClearTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            guard self?.sessionGeneration == generation else { return }
+            self?.committedMealOperationID = nil
+            self?.committedMealLabel = ""
+        }
+    }
+
+    private func clearCommittedMeal() {
+        committedMealClearTask?.cancel()
+        committedMealClearTask = nil
+        committedMealOperationID = nil
+        committedMealLabel = ""
+    }
+
+    private func handlePlayback(active: Bool, generation: UUID) {
+        guard generation == sessionGeneration else { return }
+        guard state == .listening || state == .speaking else { return }
+        state = active ? .speaking : .listening
+    }
+
+    private func failIfCurrent(generation: UUID) {
+        guard generation == sessionGeneration else { return }
+        failCurrentSession(
+            message: "Voice coach lost the connection. Try again.",
+            retryable: true
+        )
+    }
+
+    private func failCurrentSession(message: String, retryable: Bool) {
+        let shouldClose = transportIsOpen
+        transportIsOpen = false
+        sessionGeneration = UUID()
+        stopLocalSession()
+        clearActivity()
+        clearCommittedMeal()
+        state = .failed(
+            message: message,
+            retryable: retryable,
+            settingsAvailable: false
+        )
+        if shouldClose {
+            closeTask = Task { [transport] in await transport.close() }
+        }
+    }
+
+    private func finishRemoteSession(generation: UUID) {
+        guard generation == sessionGeneration else { return }
+        sessionGeneration = UUID()
+        transportIsOpen = false
+        stopLocalSession()
+        clearActivity()
+        clearCommittedMeal()
+        state = .ended
+    }
+
+    private func stopLocalSession() {
+        sessionTasks.forEach { $0.cancel() }
+        sessionTasks.removeAll()
+        if audioIsRunning {
+            audio.stop()
+            audioIsRunning = false
+        }
+    }
+
+    private var isActiveState: Bool {
+        state == .connecting || state == .listening || state == .speaking
+    }
+
+    private func finishStartAttempt() {
+        startAttemptInProgress = false
+        let waiters = startAttemptWaiters
+        startAttemptWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    private static func appending(_ delta: String, to existing: String) -> String {
+        let combined = existing + delta
+        return String(combined.suffix(4_000))
+    }
+}

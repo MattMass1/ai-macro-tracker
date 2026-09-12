@@ -1,2 +1,1 @@
 MACRO_API_URL = https:/$()/ai-macro-tracker-nuoo.onrender.com
-APP_SHARED_TOKEN = paste-your-shared-token-here

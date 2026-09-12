@@ -60,6 +60,17 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 | **Research and Overflow** | Grok/Cursor | Research, adversarial edge-case brainstorming, and overflow | Not a permanent correctness reviewer and cannot review its own work |
 | **Contract Owner** | Temporary designation on one existing builder | Canonical contract decisions and fixture coordination for a cross-surface task | Not a separate agent or standing role |
 
+### Legacy role aliases and ownership detail
+
+| Role | Agent | Owns | Never touches |
+|---|---|---|---|
+| **Orchestrator** | Hermes | Planning, triage, dispatch, review aggregation, deploy | Writing feature code directly |
+| **UI Builder** | Sol/Grok (Codex, VM) | `ios/` SwiftUI: screens, theme, components, Keychain | Backend logic, schema |
+| **Backend Builder** | Sol (Codex) | `server/`: store, auth, coach tools, schema | SwiftUI files |
+| **Writer** | Luna (Codex) | Tests, migrations, backfill scripts, mechanical code | Architecture decisions |
+| **Design Reviewer** | Fable (Claude) + Sol/Grok (Codex) | Design/architecture review, Swift idioms, taste | Writing feature code |
+| **Correctness Reviewer** | Grok (Codex) | Edge cases, race conditions, data-loss hunting | Writing feature code |
+
 ### Work rules
 
 - Each brief has exactly one writer. If ownership changes, the orchestrator
@@ -99,6 +110,17 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 10. **Close incident:** only after production or device evidence exists. Only
     the Release and Operations Verifier may close an incident.
 
+### Operational ownership detail
+
+1. **Hermes** writes the brief (what + constraints + who owns it).
+2. **Owning builder** implements (Sol for backend, Sol/Grok for SwiftUI — all Codex).
+3. **Reviewers** inspect: Fable (design/idioms) + Grok (edge cases), and Sol
+   for contract when backend touched. Independent, parallel. Fable's Claude
+   session cap (8pm UTC) is known — when capped, Sol/Grok carry design review.
+4. **Hermes** aggregates findings, routes fixes back to the owner.
+5. **Re-review** until approved. Then commit + push.
+6. **Hermes** verifies the deploy (or the Mac build) and reports to Matt.
+
 ## Hard fleet gates
 
 - One writer per brief. Ownership changes require an explicit, recorded
@@ -131,6 +153,16 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 - No em-dashes in user-facing copy.
 - Tenancy isolation is the highest-priority correctness property in this app.
   When in doubt, scope tighter, never looser.
+- **MATT'S DATA IS NEVER DELETED — EVER.** Matthew (be6333cc-e4c1-48f2-adb1-5e7f14dbf7c2)
+  is the production user. Any operation that deletes, modifies, or touches
+  Matthew's rows requires explicit approval. Spoof/test users are disposable —
+  Matthew's data is not. Never write delete logic that could match Matthew's
+  user_id. When in doubt, scope the delete to the spoof user only.
+- **Unknown registrations are treated as REAL USERS.** A claim from a new
+  invite code (different device, different place) is likely a real person —
+  never delete, never alter their data, never assume they're a spoof. Only
+  explicitly-created spoof users (minted with NEW_USER for testing) may be
+  deleted, and only on Matthew's request.
 
 ## Style (code + copy)
 

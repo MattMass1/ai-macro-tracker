@@ -598,14 +598,23 @@ async def dispatch_voice_tool_call(
             await report_activity("error", error_label)
         return str(exc)
     handler_ms = (time.monotonic() - handler_started) * 1000
-    logger.info(
-        "Voice tool call: name=%r call_id=%r outcome=ok delegation_ms=%s handler_ms=%.1f",
-        name, call_id, _format_ms(delegation_ms), handler_ms,
+    result_status = result.get("status") if isinstance(result, Mapping) else None
+    succeeded = result_status not in {"needs_clarification", "failed", "unknown"}
+    log = logger.info if succeeded else logger.warning
+    log(
+        "Voice tool call: name=%r call_id=%r outcome=%s status=%s delegation_ms=%s handler_ms=%.1f",
+        name, call_id, "ok" if succeeded else "not_ok",
+        str(result_status or "none")[:32], _format_ms(delegation_ms), handler_ms,
     )
     if (name == "log_meal" and not defer_log_meal_done and report_activity is not None
             and isinstance(result, Mapping)
             and result.get("status") in {"committed", "replayed"}):
         await report_activity("done", _log_meal_done_label(result))
+    elif report_activity is not None and before is not None:
+        if succeeded and name == "lookup_food":
+            await report_activity("done", "Lookup complete")
+        elif not succeeded:
+            await report_activity("error", _ACTIVITY_ERROR_LABEL[name])
     if isinstance(result, str):
         return result
     return json.dumps(result, separators=(",", ":"), default=str)

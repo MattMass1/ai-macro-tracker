@@ -272,21 +272,32 @@ def _relevant(query: str, food: Mapping[str, Any]) -> bool:
 def _full_query_relevant(query: str, food: Mapping[str, Any]) -> bool:
     """Match the full identity, allowing only a leading brand phrase to drop."""
     query_words = normalize_food_name(query).split()
-    candidate_words = set(normalize_food_name(" ".join(
+    candidate_words = normalize_food_name(" ".join(
         str(food.get(key) or "") for key in ("food_name", "brand_name", "food_description")
-    )).split())
-    comparable = candidate_words | {
-        word[:-1] for word in candidate_words if len(word) > 3 and word.endswith("s")
-    }
-    meaningful = [word for word in query_words if word not in _UNIT_WORDS and len(word) > 1]
-    if meaningful and set(meaningful) <= comparable:
+    )).split()
+    meaningful = [word for word in query_words if word not in _UNIT_WORDS]
+
+    def identity(words: list[str]) -> set[str]:
+        return {word[:-1] if len(word) > 3 and word.endswith("s") else word for word in words}
+
+    query_ratios = {pair for pair in _LEAN_FAT_PAIRS if f"{pair[0]}/{pair[1]}" in meaningful}
+    candidate_ratios = {pair for pair in _LEAN_FAT_PAIRS if f"{pair[0]}/{pair[1]}" in candidate_words}
+    if query_ratios and query_ratios != candidate_ratios:
+        return False
+    candidate_identity = set(identity(candidate_words))
+    # Providers often append a neutral state descriptor to a whole food.
+    # Product-making modifiers (coated, meatballs, flavored, etc.) remain
+    # identity-bearing and therefore cannot be ignored.
+    candidate_identity -= {"raw", "fresh"}
+    if meaningful and set(identity(meaningful)) == candidate_identity:
         return True
     # Provider records commonly omit a leading brand. Preserve a sufficiently
     # specific trailing flavor/product identity, but never drop an interior
     # modifier such as "ground" from "93/7 ground beef".
     for dropped_prefix in (1, 2):
         suffix = meaningful[dropped_prefix:]
-        if len(suffix) >= 2 and len(suffix) / len(meaningful) >= 0.6 and set(suffix) <= comparable:
+        if (len(suffix) >= 2 and len(suffix) / len(meaningful) >= 0.6
+                and set(identity(suffix)) == candidate_identity):
             return True
     return False
 
@@ -507,7 +518,7 @@ def _generic_whole_food(query: str) -> dict[str, Any] | None:
     return {"name":entry["name"], "macros_per_100g":macros,
             "macros_per_serving":_scale_macros(macros, grams / 100),
             "serving_size":f"{source} — {grams:g} g", "source":source,
-            "basis":entry["basis"]}
+            "basis":entry["basis"], "count_grams":entry.get("count_grams")}
 
 
 def resolve_generic_whole_food(query: str) -> dict[str, Any] | None:
@@ -521,7 +532,7 @@ def resolve_generic_whole_food(query: str) -> dict[str, Any] | None:
         return found
     quantified = _quantify(found, quantity, unit)
     if quantified is None:
-        return found
+        return None
     macros, label = quantified
     return {**found, "macros_per_serving":macros, "serving_size":label}
 
@@ -630,9 +641,19 @@ def _quantify(
     """Apply a parsed quantity to a resolved food AFTER resolution — the only
     place portion arithmetic happens, so voice, chat, and presets agree."""
     if quantity is not None and unit in _GRAMS_PER_UNIT:
-        scaled = portion_from_grams(found, quantity * _GRAMS_PER_UNIT[unit])
-        if scaled is not None:
-            return scaled
+        return portion_from_grams(found, quantity * _GRAMS_PER_UNIT[unit])
+    if quantity is not None and unit in {"small", "medium", "large"}:
+        weights = found.get("count_grams")
+        if isinstance(weights, Mapping) and unit in weights:
+            return portion_from_grams(found, quantity * float(weights[unit]))
+        serving_text = normalize_food_name(str(found.get("serving_size") or ""))
+        if unit in serving_text.split():
+            base = portion_from_serving(found)
+            if base is not None:
+                macros, source = base
+                return (_scale_macros(macros, quantity),
+                        source if quantity == 1 else f"{source} x{quantity:g}")
+        return None
     base = portion_from_serving(found)
     if base is None and found.get("macros_per_100g"):
         base = portion_from_grams(found, 100)
@@ -686,7 +707,7 @@ async def _resolve_food_text(
             return found
         quantified = _quantify(found, quantity, unit)
         if quantified is None:
-            return found
+            return None
         macros, label = quantified
         return {**found, "macros_per_serving": macros, "serving_size": label}
 
@@ -749,7 +770,20 @@ def portion_from_grams(found: Mapping[str, Any], grams: Any):
 
 
 def portion_from_serving(found: Mapping[str, Any]):
-    macros = _macros(found.get("macros_per_serving", {})) if isinstance(found, Mapping) else None
+    macros = None
+    values = found.get("macros_per_serving", {}) if isinstance(found, Mapping) else {}
+    if isinstance(values, Mapping):
+        parsed: dict[str, float] = {}
+        try:
+            for key in MACRO_KEYS:
+                value = float(values.get(key, 0 if key != "calories" else None))
+                if not math.isfinite(value) or value < 0 or value > 50000:
+                    raise ValueError
+                parsed[key] = round(value, 2)
+        except (TypeError, ValueError):
+            parsed = {}
+        if parsed.get("calories", 0) > 0:
+            macros = parsed
     source = str(found.get("source") or "").strip() if isinstance(found, Mapping) else ""
     if source.startswith("Generic:") and found.get("serving_size"):
         source = str(found["serving_size"])

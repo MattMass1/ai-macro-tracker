@@ -2583,6 +2583,21 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
     base = _coach_tool_handlers()
     resolution_cache: dict[str, tuple[Any, str, dict[str, Any]]] = {}
 
+    def voice_verified(found: Mapping[str, Any] | None) -> bool:
+        """Voice writes require evidence stronger than provider text search."""
+        if not found or "UNRESOLVED:" in str(found.get("source") or ""):
+            return False
+        attribution = found.get("attribution")
+        return not (isinstance(attribution, Mapping)
+                    and attribution.get("verification_state") == "unknown")
+
+    async def known_food_with_bad_portion(query: str) -> bool:
+        quantity, unit, identity = food_lookup._clean_component(query)
+        if quantity is None or not identity:
+            return False
+        base = await resolve_food(identity)
+        return voice_verified(base)
+
     async def resolve_component(component: Mapping[str, Any]) -> dict[str, Any] | None:
         description = domain.validate_name(str(component.get("description") or ""))
         portion = " ".join(str(component.get("portion") or "").split())
@@ -2599,22 +2614,24 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             return None
         if found is None:
             found = await resolve_food(query)
-        if not found or "UNRESOLVED:" in str(found.get("source") or ""):
+        if not voice_verified(found):
+            if found is None and await known_food_with_bad_portion(query):
+                return {"portion_error": True, "name": query}
             return None
         if grams is not None:
             portioned = food_lookup.portion_from_grams(found, grams)
         else:
             portioned = food_lookup.portion_from_serving(found)
         if portioned is None:
-            return None
+            return {"portion_error": True, "name": query}
         macros, source = portioned
         if quantity is not None:
             try:
                 count = float(quantity)
             except (TypeError, ValueError):
-                return None
+                return {"portion_error": True, "name": query}
             if not 0 < count <= 100:
-                return None
+                return {"portion_error": True, "name": query}
             macros = {
                 key: round(float(macros.get(key, 0)) * count, 2)
                 for key in domain.MACRO_KEYS
@@ -2656,6 +2673,14 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         resolved = await asyncio.gather(*(bounded(component) for component in components))
         unresolved = [str(component.get("description") or "food")
                       for component, result in zip(components, resolved) if result is None]
+        bad_portions = [str(component.get("description") or "food")
+                        for component, result in zip(components, resolved)
+                        if result is not None and result.get("portion_error")]
+        if bad_portions:
+            question = f"I couldn't use that portion for {bad_portions[0]}. What amount should I use?"
+            return {"status": "needs_clarification", "reason": "invalid_portion",
+                    "operation_id": operation_id, "question": question,
+                    "confirmation": question}
         if unresolved:
             question = f"I couldn't verify {unresolved[0]}. What exact food or label should I use?"
             return {"status": "needs_clarification", "operation_id": operation_id,
@@ -2729,7 +2754,14 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
     async def voice_lookup_food_tool(_call_id: str, args: Mapping[str, Any]) -> Any:
         current_user_id()
         found = await resolve_food(str(args.get("query") or ""))
-        if not found or "UNRESOLVED:" in str(found.get("source") or ""):
+        query = str(args.get("query") or "")
+        if not voice_verified(found):
+            if found is None and await known_food_with_bad_portion(query):
+                return {
+                    "result": "not found", "status": "needs_clarification",
+                    "reason": "invalid_portion",
+                    "question": "I found the food, but I couldn't use that portion. What amount should I use?",
+                }
             return {
                 "result": "not found",
                 "status": "needs_clarification",
@@ -2739,7 +2771,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         if len(resolution_cache) >= 128:
             resolution_cache.pop(next(iter(resolution_cache)))
         resolution_cache[resolution_ref] = (
-            current_user_id(), str(args.get("query") or ""), dict(found)
+            current_user_id(), query, dict(found)
         )
         return {**found, "resolution_ref": resolution_ref}
 

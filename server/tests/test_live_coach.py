@@ -1943,7 +1943,10 @@ async def test_dispatch_voice_tool_call_reports_resolving_activity_for_lookup_fo
         report_activity=report,
     )
 
-    assert reported == [("resolving", "Looking up 93/7 ground beef")]
+    assert reported == [
+        ("resolving", "Looking up 93/7 ground beef"),
+        ("done", "Lookup complete"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -2522,6 +2525,82 @@ async def test_voice_log_meal_resolution_failure_needs_clarification_and_writes_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("description", [
+    "80/20 ground beef", "85/15 ground beef", "90/10 ground beef",
+    "96/4 ground beef", "ground turkey", "almonds",
+])
+async def test_voice_unseeded_whole_foods_cleanly_ask_for_clarification(monkeypatch, description):
+    srv = _import_server(monkeypatch)
+    fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    monkeypatch.setattr(srv, "resolve_food", lambda query: asyncio.sleep(0, result=None))
+
+    token = bind_user(uuid4())
+    try:
+        result = await srv._voice_tool_handlers()["log_meal"](
+            "unseeded-1", {"description": description, "meal_type": "Dinner"}
+        )
+    finally:
+        reset_user(token)
+
+    assert result["status"] == "needs_clarification"
+    assert result["question"].startswith("I couldn't verify")
+    assert fake.insert_count == 0
+
+
+@pytest.mark.asyncio
+async def test_voice_refuses_unverified_provider_match_for_lookup_and_write(monkeypatch):
+    srv = _import_server(monkeypatch)
+    fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    unverified = {
+        **_resolved_food(source="OpenFoodFacts: 123"),
+        "attribution": {"verification_state": "unknown", "confidence": 0.65},
+    }
+    monkeypatch.setattr(srv, "resolve_food", lambda query: asyncio.sleep(0, result=unverified))
+    handlers = srv._voice_tool_handlers()
+
+    token = bind_user(uuid4())
+    try:
+        lookup = await handlers["lookup_food"]("lookup-1", {"query": "ground turkey"})
+        logged = await handlers["log_meal"]("log-1", {
+            "description": "ground turkey", "meal_type": "Dinner",
+        })
+    finally:
+        reset_user(token)
+
+    assert lookup["status"] == "needs_clarification"
+    assert logged["status"] == "needs_clarification"
+    assert fake.insert_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("description", ["0 g sweet potato", "1 medium sweet potato"])
+async def test_voice_known_food_bad_portion_gets_portion_specific_clarification(monkeypatch, description):
+    srv = _import_server(monkeypatch)
+    fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+
+    async def resolve(query):
+        return None if query == description else _resolved_food(source="Generic: sweet potato")
+
+    monkeypatch.setattr(srv, "resolve_food", resolve)
+    token = bind_user(uuid4())
+    try:
+        result = await srv._voice_tool_handlers()["log_meal"](
+            "portion-1", {"description": description, "meal_type": "Dinner"}
+        )
+    finally:
+        reset_user(token)
+
+    assert result["status"] == "needs_clarification"
+    assert result["reason"] == "invalid_portion"
+    assert "portion" in result["question"]
+    assert "exact food" not in result["question"]
+    assert fake.insert_count == 0
+
+
+@pytest.mark.asyncio
 async def test_voice_log_meal_rejects_invalid_meal_slot_and_writes_nothing(monkeypatch):
     srv = _import_server(monkeypatch)
     fake = FakeVoiceStore()
@@ -2710,6 +2789,28 @@ async def test_dispatch_voice_tool_call_logs_success_with_tool_name_and_result(c
         and "handler_ms=" in record.getMessage()
         for record in caplog.records
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["needs_clarification", "failed", "unknown"])
+async def test_dispatch_voice_tool_call_logs_structured_failures_as_not_ok(caplog, status):
+    async def handler(_call_id, _args):
+        return {"status": status, "confirmation": "safe"}
+
+    activities = []
+    with caplog.at_level(logging.INFO):
+        await dispatch_voice_tool_call(
+            {"call_id": "call-fail", "name": "log_meal", "arguments": "{}"},
+            tool_handlers={"log_meal": handler}, allowed_names=frozenset({"log_meal"}),
+            report_activity=lambda state, label: asyncio.sleep(
+                0, result=activities.append((state, label))
+            ),
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("outcome=not_ok" in message and f"status={status}" in message for message in messages)
+    assert not any("outcome=ok" in message for message in messages)
+    assert activities[-1][0] == "error"
 
 
 @pytest.mark.asyncio

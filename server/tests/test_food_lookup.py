@@ -1292,6 +1292,43 @@ async def test_short_beef_variant_cannot_accept_bouillon(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(("query", "candidate"), [
+    ("96/4 ground beef", "80/20 ground beef"),
+    ("ground turkey", "ground turkey meatballs with almonds"),
+    ("almonds", "chocolate coated almonds"),
+])
+def test_full_query_relevance_rejects_a_different_or_composite_food(query, candidate):
+    assert not food_lookup._full_query_relevant(query, {"food_name": candidate})
+
+
+@pytest.mark.parametrize(("query", "candidate"), [
+    ("96/4 ground beef", "80/20 ground beef"),
+    ("ground turkey", "ground turkey meatballs with almonds"),
+    ("almonds", "chocolate coated almonds"),
+])
+async def test_wrong_provider_food_never_resolves(query, candidate, monkeypatch):
+    monkeypatch.delenv("FATSECRET_ATTRIBUTION_ENABLED", raising=False)
+
+    def handler(_request):
+        return httpx.Response(200, json={"products": [{
+            "code": "wrong", "product_name": candidate,
+            "nutriments": {"energy-kcal_100g": 200, "proteins_100g": 10,
+                           "carbohydrates_100g": 10, "fat_100g": 10, "fiber_100g": 1},
+        }]})
+
+    mock_transport(monkeypatch, handler)
+    assert await food_lookup.resolve_food(query) is None
+
+
+@pytest.mark.parametrize("wanted", ["80/20", "85/15", "90/10", "93/7", "96/4"])
+@pytest.mark.parametrize("candidate", ["80/20", "85/15", "90/10", "93/7", "96/4"])
+def test_lean_fat_ratio_identity_is_exact(wanted, candidate):
+    accepted = food_lookup._full_query_relevant(
+        f"{wanted} ground beef", {"food_name": f"{candidate} ground beef"}
+    )
+    assert accepted is (wanted == candidate)
+
+
 async def test_short_variant_accepts_legitimate_branded_flavor_match(monkeypatch):
     monkeypatch.delenv("FATSECRET_ATTRIBUTION_ENABLED", raising=False)
 
@@ -1514,7 +1551,7 @@ async def test_spoken_fractional_portions_scale_macros(monkeypatch, query, facto
     assert result["macros_per_serving"]["calories"] == pytest.approx(100 * factor, abs=0.01)
 
 
-async def test_composite_with_one_unresolved_component_sums_the_rest_and_flags_it(monkeypatch):
+async def test_composite_with_unhonored_explicit_portion_fails_instead_of_defaulting(monkeypatch):
     monkeypatch.delenv("FATSECRET_ATTRIBUTION_ENABLED", raising=False)
 
     def handler(request):
@@ -1529,9 +1566,7 @@ async def test_composite_with_one_unresolved_component_sums_the_rest_and_flags_i
 
     mock_transport(monkeypatch, handler)
     result = await food_lookup.resolve_food("1 medium banana and some unobtainium paste")
-    assert result is not None
-    assert "UNRESOLVED: some unobtainium paste" in result["source"]
-    assert result["macros_per_serving"]["calories"] > 0
+    assert result is None
 
 
 def test_split_components_respects_parenthetical_boundaries():
@@ -1683,6 +1718,33 @@ def test_generic_whole_food_does_not_capture_brands_composites_or_mixed_fraction
     rice = food_lookup.resolve_generic_whole_food("2 1/2 cups white rice")
     assert rice is not None
     assert food_lookup._clean_component("2 1/2 cups white rice")[:2] == (2.5, "cups")
+
+
+@pytest.mark.parametrize(("query", "grams"), [
+    ("1 small apple", 149), ("1 medium apple", 182), ("1 large apple", 223),
+    ("1 small banana", 101), ("1 medium banana", 118), ("1 large banana", 136),
+    ("1 small egg", 41.6), ("1 medium egg", 46.4), ("1 large egg", 52.7),
+])
+def test_sourced_generic_count_weights_are_applied(query, grams):
+    found = food_lookup.resolve_generic_whole_food(query)
+    assert found is not None
+    assert found["serving_size"].endswith(f", {round(grams)} g")
+
+
+@pytest.mark.parametrize("query", [
+    "1 medium sweet potato", "1 large sweet potato", "1 small sweet potato",
+    "1 medium white potato", "1 large white potato", "1 small white potato",
+    "0 g sweet potato",
+])
+def test_unsupported_or_zero_explicit_portions_never_use_the_default_serving(query):
+    assert food_lookup.resolve_generic_whole_food(query) is None
+
+
+def test_large_valid_serving_is_not_subject_to_per_100g_macro_ceiling():
+    found = food_lookup.resolve_generic_whole_food("1500 g sweet potato")
+    assert found is not None
+    macros, _ = food_lookup.portion_from_serving(found)
+    assert macros["calories"] == 1305
 
 
 async def test_resolved_cache_is_ttl_bounded_and_tenant_keyed(monkeypatch):

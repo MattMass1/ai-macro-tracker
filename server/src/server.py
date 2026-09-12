@@ -794,6 +794,45 @@ async def _idempotent_meal_response(conn, user_id, row) -> dict[str, Any]:
     return payload
 
 
+def _voice_confirmation_sentence(logged: Mapping[str, Any], day_total: Mapping[str, Any]) -> str:
+    """Server-authored, ready-to-speak sentence: name, macros, cited source,
+    and the day's running total. The delegated model relays this verbatim
+    instead of composing numbers itself (Matt's rule: the server is the
+    source of truth, the model reads resolved facts)."""
+    macros = (f"{logged['calories']:.0f} kcal, {logged['protein']:.0f}g protein, "
+              f"{logged['carbs']:.0f}g carbs, {logged['fat']:.0f}g fat")
+    totals = (f"{day_total['calories']:.0f} kcal, {day_total['protein']:.0f}g protein, "
+              f"{day_total['carbs']:.0f}g carbs, {day_total['fat']:.0f}g fat")
+    return (f"Logged {logged['name']}: {macros} (source: {logged['macro_source']}). "
+            f"Today's total: {totals}.")
+
+
+async def _voice_meal_response(conn, user_id, row) -> dict[str, Any]:
+    """Build the lean voice-path response: the logged item, the day's
+    running total, and a ready-to-speak confirmation sentence.
+
+    `_idempotent_meal_response` re-reads the whole day (every meal row, the
+    per-meal rollups, and targets) because /api/log's dashboard has to
+    re-render all of it. The voice surface only ever speaks the item just
+    logged and the day total, so this reads one row from the already-current
+    `days` rollup (updated earlier in this same transaction by
+    `_refresh_rollups`) instead of four queries against the full day.
+    """
+    logged = stored_meal(row)
+    day_row = await conn.fetchrow(
+        "SELECT calories,protein,carbs,fat,fiber FROM days WHERE user_id=$1 AND date=$2",
+        user_id, row["day"],
+    )
+    day_total = ({key: float(day_row[key]) for key in domain.MACRO_KEYS} if day_row
+                 else {key: float(logged[key]) for key in domain.MACRO_KEYS})
+    logged_with_source = {**logged, "macro_source": row["macro_source"]}
+    return {
+        "logged": logged_with_source,
+        "day_total": day_total,
+        "confirmation": _voice_confirmation_sentence(logged_with_source, day_total),
+    }
+
+
 KNOWN_CHAT_FOODS = """Moe's cookie 170 kcal, 2g protein, 23g carbs, 8g fat
 Fairlife 30g shake 150/30/3/2.5
 Barebells 200/20/21/7
@@ -2453,7 +2492,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             separators=(",", ":"), default=str).encode()).hexdigest()
         return await store_client().insert_meal_idempotent(
             f"voice-log-meal:{call_id}", request_hash,
-            response_builder=_idempotent_meal_response, **values,
+            response_builder=_voice_meal_response, **values,
         )
 
     async def voice_get_today_tool(_call_id: str, args: Mapping[str, Any]) -> Any:

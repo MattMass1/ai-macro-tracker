@@ -522,6 +522,48 @@ async def test_idempotent_meal_response_survives_decimal_row_values():
     assert "warning" not in payload
 
 
+async def test_voice_meal_response_is_lean_and_carries_the_spoken_confirmation():
+    """The voice path never needs the full day snapshot `_idempotent_meal_response`
+    builds for /api/log's dashboard — one row from `days` is enough for the
+    logged item plus the running total, and the confirmation sentence it
+    builds is what the delegated model relays instead of composing numbers.
+    """
+    day = date(2026, 9, 12)
+    queries: list[str] = []
+
+    class FakeConn:
+        async def fetchrow(self, sql, *args):
+            queries.append(sql)
+            assert "FROM days" in sql
+            return {
+                "calories": Decimal("791"), "protein": Decimal("87.6"),
+                "carbs": Decimal("44.1"), "fat": Decimal("30.1"), "fiber": Decimal("6.0"),
+            }
+
+    row = {
+        "id": "row-1", "name": "6 oz 93/7 ground beef", "meal": "Dinner",
+        "calories": Decimal("446"), "protein": Decimal("40.6"),
+        "carbs": Decimal("20.1"), "fat": Decimal("21.1"), "fiber": Decimal("3.0"),
+        "day": day, "created_at": "2026-09-12T20:00:00+00:00",
+        "macro_source": "FatSecret: ground beef 93/7",
+    }
+
+    payload = await srv._voice_meal_response(FakeConn(), uuid4(), row)
+
+    assert queries == ["SELECT calories,protein,carbs,fat,fiber FROM days WHERE user_id=$1 AND date=$2"]
+    assert payload["logged"]["name"] == "6 oz 93/7 ground beef"
+    assert payload["logged"]["calories"] == 446.0
+    assert payload["logged"]["macro_source"] == "FatSecret: ground beef 93/7"
+    assert payload["day_total"] == {
+        "calories": 791.0, "protein": 87.6, "carbs": 44.1, "fat": 30.1, "fiber": 6.0,
+    }
+    confirmation = payload["confirmation"]
+    assert "6 oz 93/7 ground beef" in confirmation
+    assert "446 kcal" in confirmation and "41g protein" in confirmation
+    assert "FatSecret: ground beef 93/7" in confirmation
+    assert "791 kcal" in confirmation and "88g protein" in confirmation
+
+
 async def test_undo_excludes_the_row_it_just_deleted(lagging):
     payload = await srv.undo_last_meal()
     assert lagging.deleted == [("nutrition_entries", "meal-1")]

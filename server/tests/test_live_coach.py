@@ -453,6 +453,7 @@ def test_coach_activity_events_pass_the_same_allowlist_and_hide_everything_else(
 def test_committed_meal_event_is_typed_bounded_and_hides_tool_arguments():
     event = sanitize_provider_event({
         "type": "coach.meal_committed", "operation_id": "voice-op-1",
+        "label": "  My   meal  ",
         "day_total": {"calories": 500, "protein": 60, "carbs": 20,
                       "fat": 15, "fiber": 4},
         "arguments": {"description": "private meal text", "calories": 9999},
@@ -460,6 +461,7 @@ def test_committed_meal_event_is_typed_bounded_and_hides_tool_arguments():
     })
     assert event == {
         "type": "coach.meal_committed", "operation_id": "voice-op-1",
+        "label": "My meal",
         "day_total": {"calories": 500.0, "protein": 60.0, "carbs": 20.0,
                       "fat": 15.0, "fiber": 4.0},
     }
@@ -467,6 +469,19 @@ def test_committed_meal_event_is_typed_bounded_and_hides_tool_arguments():
         "type": "coach.meal_committed", "operation_id": "voice-op-1",
         "day_total": {"calories": 1},
     }) is None
+    without_label = sanitize_provider_event({
+        "type": "coach.meal_committed", "operation_id": "voice-op-1",
+        "day_total": {"calories": 1, "protein": 2, "carbs": 3, "fat": 4, "fiber": 5},
+    })
+    assert "label" not in without_label
+    bounded = sanitize_provider_event({
+        "type": "coach.meal_committed", "operation_id": "voice-op-1",
+        "label": "x" * 5000,
+        "day_total": {"calories": 1, "protein": 2, "carbs": 3, "fat": 4, "fiber": 5},
+        "source": "secret", "arguments": {"description": "private"},
+    })
+    assert bounded["label"] == "x" * 120
+    assert set(bounded) == {"type", "operation_id", "day_total", "label"}
 
 
 def test_provider_audio_delta_must_be_bounded_even_pcm_base64():
@@ -1886,7 +1901,7 @@ async def test_bridge_streams_coach_activity_to_client_without_leaking_tool_argu
 
     async def fake_log_meal(_call_id, _args):
         return {"status": "committed", "operation_id": "voice-op-1",
-                "logged": {"calories": 258, "protein": 35},
+                "logged": {"name": "6 oz 93/7 ground beef", "calories": 258, "protein": 35},
                 "day_total": {"calories": 500, "protein": 60, "carbs": 20,
                               "fat": 15, "fiber": 4}}
 
@@ -1959,8 +1974,14 @@ async def test_bridge_streams_coach_activity_to_client_without_leaking_tool_argu
     ]
     committed = [event for event in socket.sent if event.get("type") == "coach.meal_committed"]
     assert committed == [{"type": "coach.meal_committed", "operation_id": "voice-op-1",
+                          "label": "6 oz 93/7 ground beef",
                           "day_total": {"calories": 500.0, "protein": 60.0,
                                         "carbs": 20.0, "fat": 15.0, "fiber": 4.0}}]
+    committed_index = next(i for i, event in enumerate(socket.sent)
+                           if event.get("type") == "coach.meal_committed")
+    done_index = next(i for i, event in enumerate(socket.sent)
+                      if event.get("type") == "coach.activity" and event.get("state") == "done")
+    assert committed_index < done_index
     # No tool argument, macro_source, or provider-internal id ever reaches the client.
     sent_text = json.dumps(socket.sent)
     assert "FatSecret" not in sent_text

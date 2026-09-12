@@ -1,6 +1,8 @@
 """Network-free tests for the free food-database lookup cascade."""
+import asyncio
 import json
 import os
+import time
 from uuid import uuid4
 
 import httpx
@@ -327,7 +329,7 @@ async def test_parser_unknown_food_calls_lookup_and_stamps_verified_source(monke
         calls.append(payload["messages"][:])
         return responses.pop(0)
 
-    async def fake_resolve(name):
+    async def fake_resolve(name, **_kwargs):
         assert name == "sunchoke"
         return {**BANANA_HIT, "source": "OpenFoodFacts: 170002"}
 
@@ -364,7 +366,7 @@ async def test_parser_lookup_miss_forces_estimate_source(monkeypatch):
     async def fake_post(_token, _payload):
         return responses.pop(0)
 
-    async def fake_resolve(_name):
+    async def fake_resolve(_name, **_kwargs):
         return None
 
     monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
@@ -403,7 +405,7 @@ async def test_parser_lookup_source_is_bound_to_the_item_that_triggered_it(monke
     async def fake_post(_token, _payload):
         return responses.pop(0)
 
-    async def fake_resolve(_name):
+    async def fake_resolve(_name, **_kwargs):
         return {**BANANA_HIT, "source": "OpenFoodFacts: 170002"}
 
     monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
@@ -493,7 +495,7 @@ async def test_parser_lookup_tool_executes_at_most_three_calls(monkeypatch):
         final_payload.update(payload)
         return responses.pop(0)
 
-    async def fake_resolve(name):
+    async def fake_resolve(name, **_kwargs):
         resolved.append(name)
         return None
 
@@ -509,7 +511,7 @@ async def test_coach_lookup_food_tool_returns_hit_and_not_found(monkeypatch):
     fake = FakeStore()
     monkeypatch.setattr(srv, "_client", fake)
 
-    async def fake_resolve(query):
+    async def fake_resolve(query, **_kwargs):
         assert query == "greek yogurt"
         return {**BANANA_HIT, "attribution": {"provider":"OpenFoodFacts",
             "license":"Open Database License (ODbL) 1.0",
@@ -528,7 +530,7 @@ async def test_coach_lookup_food_tool_returns_hit_and_not_found(monkeypatch):
         assert hit["source"] == "OpenFoodFacts: 4011"
         assert hit["attribution"]["attribution_text"] == "Data from OpenFoodFacts"
 
-        async def fake_miss(_query):
+        async def fake_miss(_query, **_kwargs):
             return None
 
         monkeypatch.setattr(food_lookup, "resolve_food", fake_miss)
@@ -548,7 +550,7 @@ async def test_food_path_does_not_repeat_parser_lookup(monkeypatch):
                  "fat": 1, "fiber": 3, "grams": 150, "meal": "Snack",
                  "note": "ESTIMATE"}], None
 
-    async def fake_resolve(query):
+    async def fake_resolve(query, **_kwargs):
         assert query == "sliced banana"
         return BANANA_HIT
 
@@ -587,7 +589,7 @@ async def test_food_path_gram_portion_takes_precedence_over_quantity(monkeypatch
                  "carbs": 25, "fat": 1, "fiber": 3, "quantity": 1,
                  "grams": 100, "meal": "Snack", "note": "ESTIMATE"}], None
 
-    async def fake_resolve(query, *, whole_item=False):
+    async def fake_resolve(query, *, whole_item=False, **_kwargs):
         assert query == "sliced banana"
         assert whole_item is False
         return BANANA_HIT
@@ -705,7 +707,7 @@ async def test_food_path_upgrades_whole_item_from_serving_panel(monkeypatch):
              "sourced_from": "cascade"},
         ], None
 
-    async def fake_resolve_multiple(query, *, whole_item=False):
+    async def fake_resolve_multiple(query, *, whole_item=False, **_kwargs):
         lookup_queries.append((query, whole_item))
         return None
 
@@ -723,7 +725,7 @@ async def test_food_path_upgrades_whole_item_from_serving_panel(monkeypatch):
 
 
 async def test_whole_item_per_100g_only_keeps_flagged_estimate(monkeypatch):
-    async def fake_resolve(_query):
+    async def fake_resolve(_query, **_kwargs):
         return BANANA_HIT
 
     monkeypatch.setattr(food_lookup, "resolve_food", fake_resolve)
@@ -769,7 +771,7 @@ async def test_food_path_derives_sources_from_exact_real_data_matches(monkeypatc
 
     lookup_queries = []
 
-    async def fake_resolve(query, *, whole_item=False):
+    async def fake_resolve(query, *, whole_item=False, **_kwargs):
         lookup_queries.append((query, whole_item))
         return None
 
@@ -789,7 +791,7 @@ async def test_food_path_derives_sources_from_exact_real_data_matches(monkeypatc
 
     response = await srv.api_chat(chat_request({"message": "a Barebells and a banana"}))
     assert response.status_code == 200
-    assert lookup_queries == [("bareBELLS", False)]
+    assert lookup_queries == []  # existing known-food data now wins before providers
     assert len(seen) == 1
     source, calories, protein, carbs, fat, fiber = seen[0]
     assert source.startswith("Composite: ESTIMATE; Known food: Banana")
@@ -815,7 +817,7 @@ async def test_food_path_weightless_preset_grams_use_cascade(monkeypatch):
             "carbs": 30, "fat": 15, "fiber": 9,
         }]
 
-    async def fake_resolve(name):
+    async def fake_resolve(name, **_kwargs):
         assert name == "chili"
         return {
             "name": "Chili with beans",
@@ -893,9 +895,9 @@ async def test_branded_flavor_query_resolves_via_generic_variant(monkeypatch):
     assert result is not None
     assert result["source"] == "OpenFoodFacts: 4099100179378"
     assert result["macros_per_100g"]["calories"] == 230.0
-    assert [c.url.params["search_terms"] for c in calls] == [
-        LOVEN_QUERY, "fresh Cinnamon Raisin bread", "Cinnamon Raisin bread",
-    ]
+    assert set(c.url.params["search_terms"] for c in calls) == set(
+        food_lookup._query_variants(LOVEN_QUERY)
+    )
 
 
 
@@ -929,7 +931,7 @@ async def test_parser_refusal_after_failed_lookup_still_logs_estimate(monkeypatc
     async def fake_post(_token, _payload):
         return responses.pop(0)
 
-    async def fake_resolve(_name):
+    async def fake_resolve(_name, **_kwargs):
         return None
 
     monkeypatch.setattr(srv, "_post_openai_chat", fake_post)
@@ -954,7 +956,7 @@ async def test_parser_refusal_without_lookup_runs_cascade_then_estimates(monkeyp
             "content": "[] I can't log that without the nutrition label.",
         })
 
-    async def fake_resolve(name):
+    async def fake_resolve(name, **_kwargs):
         lookups.append(name)
         return None
 
@@ -989,7 +991,7 @@ async def test_parser_refusal_after_successful_lookup_logs_lookup_macros(monkeyp
     async def fake_post(_token, _payload):
         return responses.pop(0)
 
-    async def fake_resolve(_name):
+    async def fake_resolve(_name, **_kwargs):
         return {
             "name": "L'Oven Fresh Cinnamon Raisin Bread",
             "macros_per_100g": {"calories": 230, "protein": 7.7,
@@ -1051,7 +1053,7 @@ async def test_parser_zero_items_for_food_message_forces_estimate(monkeypatch):
                        "reliable entries are hard to pin down.",
         })
 
-    async def fake_resolve(name):
+    async def fake_resolve(name, **_kwargs):
         lookups.append(name)
         return None
 
@@ -1110,7 +1112,7 @@ async def test_food_path_zero_macro_item_is_rescued_by_lookup(monkeypatch):
                  "grams": None, "meal": "Snack", "sourced_from": "estimate",
                  "note": "ESTIMATE"}], None
 
-    async def fake_resolve(name):
+    async def fake_resolve(name, **_kwargs):
         assert name == LOVEN_QUERY
         return {
             "name": "L'Oven Fresh Cinnamon Raisin Bread",
@@ -1152,7 +1154,7 @@ async def test_food_path_zero_macro_item_without_lookup_gets_default_estimate(mo
                  "carbs": 0, "fat": 0, "fiber": 0, "meal": "Snack",
                  "sourced_from": "estimate", "note": "ESTIMATE"}], None
 
-    async def fake_resolve(_name):
+    async def fake_resolve(_name, **_kwargs):
         return None
 
     async def fake_write_meal(name, calories, protein, carbs, fat, macro_source,
@@ -1463,3 +1465,137 @@ def test_extract_quantity_keeps_mid_string_fraction_but_strips_leading_unit():
     assert food_lookup._extract_quantity("93/7 ground beef") == (None, None, "93/7 ground beef")
     assert food_lookup._extract_quantity("6 oz ground beef") == (6.0, "oz", "ground beef")
     assert food_lookup._extract_quantity("1 medium sweet potato") == (1.0, "medium", "sweet potato")
+
+
+async def test_saved_preset_resolves_before_providers(monkeypatch):
+    class PresetStore:
+        async def fetch_presets(self):
+            return [{"name": "Fairlife 30g Shake", "calories": 150, "protein": 30,
+                     "carbs": 3, "fat": 2.5, "fiber": 0}]
+
+        async def lookup_catalog(self, _query):
+            return None
+
+    async def forbidden(_query):
+        raise AssertionError("external provider must not be called")
+
+    monkeypatch.setattr(srv, "_client", PresetStore())
+    monkeypatch.setattr(food_lookup, "search_fatsecret", forbidden)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", forbidden)
+    srv._resolved_food_cache.clear()
+    token = bind_user(uuid4())
+    try:
+        result = await srv.resolve_food("fairlife shake")
+    finally:
+        reset_user(token)
+    assert result["name"] == "Fairlife 30g Shake"
+    assert result["macros_per_serving"]["protein"] == 30
+
+
+@pytest.mark.parametrize("source", ["known", "catalog"])
+async def test_other_local_food_sources_short_circuit_providers(monkeypatch, source):
+    catalog_hit = {"name": "local oats", "macros_per_serving": {
+        "calories": 100, "protein": 4, "carbs": 18, "fat": 2, "fiber": 3,
+    }, "source": "Catalog: local oats"}
+
+    class LocalStore:
+        async def fetch_presets(self): return []
+        async def lookup_catalog(self, query):
+            return catalog_hit if source == "catalog" and query == "local oats" else None
+
+    async def forbidden(_query):
+        raise AssertionError("external provider must not be called")
+
+    monkeypatch.setattr(srv, "_client", LocalStore())
+    monkeypatch.setattr(food_lookup, "search_fatsecret", forbidden)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", forbidden)
+    srv._resolved_food_cache.clear()
+    token = bind_user(uuid4())
+    try:
+        result = await srv.resolve_food("Barebells" if source == "known" else "local oats")
+    finally:
+        reset_user(token)
+    assert result is not None
+
+
+async def test_provider_searches_start_concurrently_and_prefer_higher_trust(monkeypatch):
+    _enable_fatsecret(monkeypatch)
+    both_started = asyncio.Event()
+    started = set()
+
+    async def result(provider, query):
+        started.add(provider)
+        if len(started) == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=0.2)
+        return {"name": "Ground Beef 93/7", "macros_per_serving": {
+            "calories": 170, "protein": 23, "carbs": 0, "fat": 8, "fiber": 0,
+        }, "source": f"{provider}: {query}"}
+
+    monkeypatch.setattr(food_lookup, "search_fatsecret", lambda query: result("FatSecret", query))
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", lambda query: result("OpenFoodFacts", query))
+    found = await food_lookup.resolve_food("93/7 ground beef")
+    assert started == {"FatSecret", "OpenFoodFacts"}
+    assert found["source"].startswith("FatSecret:")
+
+
+async def test_slow_higher_trust_provider_does_not_hold_fast_valid_result(monkeypatch):
+    _enable_fatsecret(monkeypatch)
+
+    async def slow_fatsecret(_query):
+        await asyncio.sleep(1)
+        return None
+
+    async def fast_openfoodfacts(_query):
+        await asyncio.sleep(0.01)
+        return {"name": "Ground Beef 93/7", "macros_per_serving": {
+            "calories": 170, "protein": 23, "carbs": 0, "fat": 8, "fiber": 0,
+        }, "source": "OpenFoodFacts: fast"}
+
+    monkeypatch.setattr(food_lookup, "search_fatsecret", slow_fatsecret)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", fast_openfoodfacts)
+    started = time.monotonic()
+    found = await food_lookup.resolve_food("93/7 ground beef")
+    elapsed = time.monotonic() - started
+    assert found["source"] == "OpenFoodFacts: fast"
+    assert elapsed < 0.4
+
+
+async def test_resolved_cache_is_ttl_bounded_and_tenant_keyed(monkeypatch):
+    calls = 0
+
+    class EmptyStore:
+        async def fetch_presets(self): return []
+        async def lookup_catalog(self, _query): return None
+
+    async def provider(_query, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return dict(BANANA_HIT)
+
+    monkeypatch.setattr(srv, "_client", EmptyStore())
+    monkeypatch.setattr(food_lookup, "resolve_food", provider)
+    monkeypatch.setattr(srv, "_RESOLVED_CACHE_MAX", 2)
+    srv._resolved_food_cache.clear()
+    first_tenant, second_tenant = uuid4(), uuid4()
+    token = bind_user(first_tenant)
+    try:
+        await srv.resolve_food("food one")
+        await srv.resolve_food("food one")
+        assert calls == 1
+        key = next(iter(srv._resolved_food_cache))
+        timestamp, value = srv._resolved_food_cache[key]
+        srv._resolved_food_cache[key] = (timestamp - srv._RESOLVED_CACHE_TTL_SECONDS - 1, value)
+        await srv.resolve_food("food one")
+        assert calls == 2
+        await srv.resolve_food("food two")
+        await srv.resolve_food("food three")
+        assert len(srv._resolved_food_cache) == 2
+    finally:
+        reset_user(token)
+    token = bind_user(second_tenant)
+    try:
+        await srv.resolve_food("food three")
+    finally:
+        reset_user(token)
+    assert calls == 5

@@ -419,7 +419,11 @@ def sanitize_provider_event(event: Mapping[str, Any]) -> dict[str, Any] | None:
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 return None
             clean_totals[key] = _number(value)
-        return {"type": event_type, "operation_id": operation_id[:160], "day_total": clean_totals}
+        result = {"type": event_type, "operation_id": operation_id[:160], "day_total": clean_totals}
+        label = event.get("label")
+        if isinstance(label, str) and _short_text(label, 120):
+            result["label"] = _short_text(label, 120)
+        return result
     if event_type in {
         "session.input_transcript.delta",
         "session.output_transcript.delta",
@@ -543,6 +547,7 @@ async def dispatch_voice_tool_call(
     allowed_names: frozenset[str],
     report_activity: ActivityReporter | None = None,
     delegation_ms: float | None = None,
+    defer_log_meal_done: bool = False,
 ) -> str:
     """Execute one delegated tool call and return the `output` string for it.
 
@@ -595,7 +600,7 @@ async def dispatch_voice_tool_call(
         "Voice tool call: name=%r call_id=%r outcome=ok delegation_ms=%s handler_ms=%.1f",
         name, call_id, _format_ms(delegation_ms), handler_ms,
     )
-    if (name == "log_meal" and report_activity is not None
+    if (name == "log_meal" and not defer_log_meal_done and report_activity is not None
             and isinstance(result, Mapping)
             and result.get("status") in {"committed", "replayed"}):
         await report_activity("done", _log_meal_done_label(result))
@@ -948,6 +953,7 @@ class LiveCoachService:
                             allowed_names=allowed_tool_names,
                             report_activity=report_activity,
                             delegation_ms=delegation_ms,
+                            defer_log_meal_done=True,
                         )
                         if call_item.get("name") == "log_meal":
                             try:
@@ -960,9 +966,12 @@ class LiveCoachService:
                                     "type": "coach.meal_committed",
                                     "operation_id": result.get("operation_id"),
                                     "day_total": result.get("day_total"),
+                                    "label": (result.get("logged") or {}).get("name")
+                                    if isinstance(result.get("logged"), Mapping) else None,
                                 })
                                 if committed_event is not None:
                                     await to_client.put(committed_event)
+                                await report_activity("done", _log_meal_done_label(result))
                         dispatched_at = time.monotonic()
                         for outbound in build_tool_result_events(call_id, output):
                             await to_provider.put(outbound)

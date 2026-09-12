@@ -11,6 +11,9 @@ from restaurant_menu import restaurant_lookup
 logger = logging.getLogger(__name__)
 
 TIMEOUT = 5.0
+PROVIDER_DEADLINE_SECONDS = 2.5
+RESOLUTION_DEADLINE_SECONDS = 2.75
+PROVIDER_PREFERENCE_GRACE_SECONDS = 0.15
 USER_AGENT = "MacroCoach/1.0 (ai-macro-tracker; contact@biz21.com)"
 OFF_SEARCH_URL = "https://world.openfoodfacts.org/cgi/search.pl"
 OFF_PRODUCT_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
@@ -441,14 +444,65 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup) ->
     if curated: return curated
     fatsecret_enabled = _fatsecret_provider_mode() is not None
     providers = [search_fatsecret, search_openfoodfacts] if fatsecret_enabled else [search_openfoodfacts]
-    for variant in _query_variants(query):
-        for provider in providers:
-            found = await provider(variant)
-            candidate = {"food_name": found.get("name", "")} if found else {}
-            if (found and _full_query_relevant(query, candidate)
-                    and (not whole_item or _macros(found.get("macros_per_serving", {})))):
-                return found
-    return None
+    searches = [
+        (variant_index, provider_index, provider(variant))
+        for variant_index, variant in enumerate(_query_variants(query))
+        for provider_index, provider in enumerate(providers)
+    ]
+
+    async def validated(search):
+        variant_index, provider_index, awaitable = search
+        found = await awaitable
+        candidate = {"food_name": found.get("name", "")} if found else {}
+        if (found and _full_query_relevant(query, candidate)
+                and (not whole_item or _macros(found.get("macros_per_serving", {})))):
+            return (variant_index, provider_index), found
+        return (variant_index, provider_index), None
+
+    tasks = [asyncio.create_task(validated(search)) for search in searches]
+    task_ranks = {task: searches[index][:2] for index, task in enumerate(tasks)}
+    deadline = time.monotonic() + PROVIDER_DEADLINE_SECONDS
+    valid: list[tuple[tuple[int, int], dict[str, Any]]] = []
+    pending = set(tasks)
+    try:
+        while pending:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                break
+            done, pending = await asyncio.wait(
+                pending, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                try:
+                    rank, found = task.result()
+                except Exception:
+                    continue
+                if found is not None:
+                    valid.append((rank, found))
+            if valid:
+                # Give concurrently-issued, higher-trust searches a short tie
+                # window, but never hold a fast valid answer for a slow provider.
+                best_rank = min(rank for rank, _found in valid)
+                higher = {task for task in pending if task_ranks[task] < best_rank}
+                if higher:
+                    grace_done, _ = await asyncio.wait(
+                        higher,
+                        timeout=min(PROVIDER_PREFERENCE_GRACE_SECONDS, max(0, deadline - time.monotonic())),
+                    )
+                    for task in grace_done:
+                        try:
+                            rank, found = task.result()
+                        except Exception:
+                            continue
+                        if found is not None:
+                            valid.append((rank, found))
+                return min(valid, key=lambda item: item[0])[1]
+        return min(valid, key=lambda item: item[0])[1] if valid else None
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _scale_macros(macros: Mapping[str, Any], factor: float) -> dict[str, float]:
@@ -487,9 +541,13 @@ async def resolve_food(
     started = time.monotonic()
     text = " ".join(str(query or "").split())
     components = len(_split_components(text)) if text else 0
-    result = await _resolve_food_text(
-        text, whole_item=whole_item, catalog_lookup=catalog_lookup
-    ) if text else None
+    try:
+        result = await asyncio.wait_for(
+            _resolve_food_text(text, whole_item=whole_item, catalog_lookup=catalog_lookup),
+            timeout=RESOLUTION_DEADLINE_SECONDS,
+        ) if text else None
+    except TimeoutError:
+        result = None
     provider = str((result or {}).get("source") or "").split(":", 1)[0][:40] or None
     logger.info(
         "food lookup: chars=%d components=%d resolved=%s provider=%s elapsed_ms=%.1f",
@@ -518,16 +576,22 @@ async def _resolve_food_text(
 
     # Composite utterance: resolve, quantify, and sum each component once in
     # server arithmetic. An unresolved component is flagged, never dropped.
+    async def resolve_part(part: str):
+        quantity, unit, remainder = _clean_component(part)
+        if not remainder:
+            return part, None, None
+        found = await _resolve_component(remainder, whole_item=False, catalog_lookup=catalog_lookup)
+        quantified = _quantify(found, quantity, unit) if found else None
+        return part, found, quantified
+
+    # Components are independent identities. Resolve them together so a
+    # multi-food utterance pays one provider deadline, not one per component.
+    parts = await asyncio.gather(*(resolve_part(part) for part in raw_parts))
     totals = {key: 0.0 for key in MACRO_KEYS}
     resolved_labels: list[str] = []
     unresolved: list[str] = []
     any_resolved = False
-    for part in raw_parts:
-        quantity, unit, remainder = _clean_component(part)
-        if not remainder:
-            continue
-        found = await _resolve_component(remainder, whole_item=False, catalog_lookup=catalog_lookup)
-        quantified = _quantify(found, quantity, unit) if found else None
+    for part, found, quantified in parts:
         if quantified is None:
             unresolved.append(part)
             continue

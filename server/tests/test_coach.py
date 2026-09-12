@@ -1438,7 +1438,7 @@ async def test_coach_logs_food_through_lookup_and_meal_tools(monkeypatch):
             }))
         return text_response("Logged 2 eggs, 144 kcal.")
 
-    async def fake_resolve(query):
+    async def fake_resolve(query, **_kwargs):
         assert query == "2 eggs"
         return FOOD_HIT
 

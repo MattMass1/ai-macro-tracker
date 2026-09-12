@@ -17,7 +17,8 @@ import tempfile
 import asyncio
 import re
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
+from copy import deepcopy
 from contextlib import asynccontextmanager
 from datetime import date as _date, timedelta
 from pathlib import Path
@@ -105,6 +106,9 @@ _ZERO_MACRO_FOODS = (
 )
 
 _client: Store | None = None
+_RESOLVED_CACHE_MAX = 256
+_RESOLVED_CACHE_TTL_SECONDS = 90.0
+_resolved_food_cache: OrderedDict[tuple[str, str, bool], tuple[float, dict[str, Any]]] = OrderedDict()
 
 
 def _is_zero_macro_food(name: str) -> bool:
@@ -121,25 +125,95 @@ def store_client() -> Store:
 
 
 async def resolve_food(query: str, **kwargs):
-    """Use the authenticated tenant's verified catalog before external providers."""
+    """Use tenant-local trusted food data before any external provider."""
+    try:
+        tenant = str(current_user_id())
+    except RuntimeError:
+        # Legacy in-process parser callers predate tenant binding. They may
+        # use local sources, but must never participate in the shared cache.
+        tenant = ""
+    normalized = food_lookup.normalize_food_name(query)
+    cache_key = (tenant, normalized, bool(kwargs.get("whole_item", False)))
+    cached = _resolved_food_cache.get(cache_key) if tenant else None
+    now = time.monotonic()
+    if cached is not None:
+        if now - cached[0] <= _RESOLVED_CACHE_TTL_SECONDS:
+            _resolved_food_cache.move_to_end(cache_key)
+            return deepcopy(cached[1])
+        del _resolved_food_cache[cache_key]
+
     client = store_client()
+    try:
+        presets = await client.fetch_presets()
+    except Exception:
+        logger.exception("Preset lookup failed; continuing local resolution")
+        presets = []
     catalog_lookup = getattr(client, "lookup_catalog", None)
-    if catalog_lookup is not None:
-        try:
-            found = await catalog_lookup(query)
-            if found is not None:
-                return found
-        except Exception:
-            logger.exception("Catalog lookup failed; isolating provider")
-    found = await food_lookup.resolve_food(query, **kwargs)
-    if found is not None:
-        cache = getattr(client, "cache_provider_food", None)
-        if cache is not None:
+    async def local_lookup(local_query: str) -> dict[str, Any] | None:
+        local_normalized = food_lookup.normalize_food_name(local_query)
+        query_tokens = set(local_normalized.split())
+        preset = next(
+            (item for item in presets if _preset_matches(local_normalized, query_tokens, item)),
+            None,
+        )
+        if preset is not None:
+            return _preset_food(preset)
+        known = _short_circuit_known_food(local_query)
+        if known is not None:
+            return _known_food_result(known)
+        if catalog_lookup is not None:
             try:
-                await cache(found)
+                return await catalog_lookup(local_query)
+            except Exception:
+                logger.exception("Catalog lookup failed; isolating provider")
+        return None
+
+    found = await local_lookup(query)
+    if found is None:
+        found = await food_lookup.resolve_food(query, catalog_lookup=local_lookup, **kwargs)
+    if found is not None:
+        cache_provider = getattr(client, "cache_provider_food", None)
+        if cache_provider is not None and found.get("attribution"):
+            try:
+                await cache_provider(found)
             except Exception:
                 logger.exception("Licensed provider cache failed; returning live result")
+        if tenant:
+            _resolved_food_cache[cache_key] = (now, deepcopy(found))
+            _resolved_food_cache.move_to_end(cache_key)
+            while len(_resolved_food_cache) > _RESOLVED_CACHE_MAX:
+                _resolved_food_cache.popitem(last=False)
     return found
+
+
+def _preset_matches(normalized: str, query_tokens: set[str], preset: Mapping[str, Any]) -> bool:
+    preset_name = food_lookup.normalize_food_name(str(preset.get("name") or ""))
+    if normalized == preset_name:
+        return True
+    # Voice often omits a serving marker embedded in a saved preset name
+    # ("Fairlife shake" vs "Fairlife 30g Shake"). Require at least two exact
+    # identity tokens so a generic one-word query cannot select a preset.
+    return len(query_tokens) >= 2 and query_tokens <= set(preset_name.split())
+
+
+def _preset_food(preset: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "name": str(preset["name"]),
+        "macros_per_serving": {
+            key: float(preset.get(key, 0) or 0) for key in domain.MACRO_KEYS
+        },
+        "source": f"Meal Preset: {preset['name']}",
+    }
+
+
+def _known_food_result(item: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "name": str(item["name"]),
+        "macros_per_serving": {
+            key: float(item.get(key, 0) or 0) for key in domain.MACRO_KEYS
+        },
+        "source": str(item["note"]),
+    }
 
 
 @asynccontextmanager

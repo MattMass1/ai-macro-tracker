@@ -665,3 +665,74 @@ async def test_fetch_trends_builds_daily_weekly_and_weight_payload(monkeypatch):
          "avg_protein": 141.4, "days_logged": 1},
     ]
     assert result["weight"] == {"current_kg": 88.5, "goal_kg": 80.0}
+
+
+# --------------------------------------------------------------------------- #
+# INFO logging configured once for both entrypoints, no sensitive payloads
+# (voice-first-utterance-fix-20260912)
+# --------------------------------------------------------------------------- #
+
+def test_configure_logging_sets_info_level_exactly_once(monkeypatch):
+    import logging as logging_module
+
+    monkeypatch.setattr(srv, "_logging_configured", False)
+    root = logging_module.getLogger()
+    original_level = root.level
+    original_handlers = list(root.handlers)
+    try:
+        root.setLevel(logging_module.WARNING)
+        srv.configure_logging()
+        assert root.level == logging_module.INFO
+        assert srv._logging_configured is True
+        handler_count = len(root.handlers)
+        # A second call (e.g. a second create_app()) must not reconfigure —
+        # no duplicate handlers, no re-running basicConfig.
+        root.setLevel(logging_module.WARNING)
+        srv.configure_logging()
+        assert root.level == logging_module.WARNING  # untouched: the guard skipped it
+        assert len(root.handlers) == handler_count
+    finally:
+        root.setLevel(original_level)
+        root.handlers[:] = original_handlers
+
+
+def test_create_app_configures_logging(monkeypatch):
+    calls = []
+    monkeypatch.setattr(srv, "configure_logging", lambda: calls.append(1))
+    monkeypatch.setattr(srv, "_client", FakeStore([]))
+    srv.create_app()
+    assert calls == [1]
+
+
+def test_voice_tool_call_logs_never_include_transcript_or_credential_markers(caplog):
+    """The brief forbids logging transcripts, meal text, audio, tokens, or
+    credentials — only ids, tool names, states, timings, and counts. This
+    pins the actual log line shape for the one call site most likely to leak
+    the user's spoken food text: a successful voice tool call."""
+    import logging as logging_module
+
+    caplog.set_level(logging_module.INFO, logger="live_coach")
+    import live_coach
+
+    async def run():
+        async def handler(_call_id, _args):
+            return {"logged": {"calories": 100}}
+
+        return await live_coach.dispatch_voice_tool_call(
+            {"call_id": "call-1", "name": "log_meal",
+             "arguments": '{"name": "6 oz ground beef", "calories": 255}'},
+            tool_handlers={"log_meal": handler},
+            allowed_names=frozenset({"log_meal"}),
+        )
+
+    import asyncio
+    asyncio.run(run())
+    messages = [record.message for record in caplog.records]
+    joined = " ".join(messages)
+    # arguments/result ARE logged (the brief scopes redaction to transcripts,
+    # audio, tokens, and credentials — food names and numbers are not those,
+    # and the diagnosis ladder in voice-write-path-failures.md depends on
+    # seeing them), but no bearer token, API key, or audio payload leaks in.
+    assert "Bearer" not in joined
+    assert "sk-" not in joined
+    assert "audio" not in joined.casefold()

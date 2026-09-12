@@ -4,7 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -14,8 +16,8 @@ import food_lookup
 import migrations
 from auth import bind_user, reset_user
 from food_catalog import evidence_hash, normalize_food_name, provenance_state
-from store import (IdempotencyConflict, MAX_COMPONENT_METADATA_BYTES, Store,
-                   _component_metadata_json)
+from store import (DUPLICATE_MEAL_WINDOW_SECONDS, IdempotencyConflict,
+                   MAX_COMPONENT_METADATA_BYTES, Store, _component_metadata_json)
 
 
 def test_food_name_normalization_is_deterministic_and_unicode_aware():
@@ -473,3 +475,120 @@ async def test_component_metadata_cap_rejects_before_database_connection():
             protein=10, carbs=10, fat=2, fiber=1, day="2026-09-01",
             macro_source="Composite: labels",
             component_metadata={"name":"é" * MAX_COMPONENT_METADATA_BYTES})
+
+
+# --------------------------------------------------------------------------- #
+# 120-second duplicate meal guard (voice-first-utterance-fix-20260912)
+# --------------------------------------------------------------------------- #
+
+class DuplicateGuardConn:
+    """Fake connection backing only what `_insert_meal_conn` touches, with an
+    in-memory `nutrition_entries` the test can age by editing `created_at`
+    directly — no real sleeping needed to prove the window boundary."""
+
+    def __init__(self):
+        self.rows: list[dict] = []
+
+    async def execute(self, _sql, *_args):
+        return None
+
+    async def fetchval(self, sql, *_args):
+        if sql.startswith("INSERT INTO meals"):
+            return "meal-id"
+        return None
+
+    async def fetch(self, _sql, user_id, day, meal, window_seconds):
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+        return [dict(row) for row in self.rows
+                if row["user_id"] == user_id and row["day"] == day
+                and row["meal"] == meal and row["created_at"] >= cutoff]
+
+    async def fetchrow(self, _sql, *args):
+        (row_id, user_id, name, meal, calories, protein, carbs, fat, fiber, day,
+         meal_id, macro_source, _item_id, _observation_id, _metadata_json) = args
+        row = {"id": row_id, "user_id": user_id, "name": name, "meal": meal,
+               "calories": calories, "protein": protein, "carbs": carbs,
+               "fat": fat, "fiber": fiber, "day": day, "meal_id": meal_id,
+               "macro_source": macro_source, "created_at": datetime.now(timezone.utc)}
+        self.rows.append(row)
+        return row
+
+
+def _duplicate_guard_store(monkeypatch):
+    store = Store("postgresql://unused")
+
+    async def fake_catalog_snapshot(_conn, *, name, macros, macro_source, serving_basis=None):
+        return None, None
+
+    monkeypatch.setattr(store, "_catalog_snapshot", fake_catalog_snapshot)
+    return store
+
+
+async def test_duplicate_guard_collapses_a_repeat_within_the_window(monkeypatch, caplog):
+    store = _duplicate_guard_store(monkeypatch)
+    conn = DuplicateGuardConn()
+    values = dict(user_id="user-1", name="6 oz 93/7 Ground Beef", meal="Lunch",
+                  calories=255.0, protein=34.5, carbs=0.0, fat=17.0, fiber=0.0,
+                  day="2026-09-12", macro_source="FatSecret: 111")
+
+    with caplog.at_level(logging.INFO, logger="store"):
+        first = await store._insert_meal_conn(conn, **values)
+        second = await store._insert_meal_conn(conn, **values)
+
+    assert len(conn.rows) == 1  # the retry never inserted a second row
+    assert second["id"] == first["id"]  # the earlier confirmation, unchanged
+    assert any("duplicate meal guard fired" in record.message for record in caplog.records)
+
+
+async def test_duplicate_guard_ignores_punctuation_and_case_in_the_name():
+    store = Store("postgresql://unused")
+    async def fake_catalog_snapshot(_conn, *, name, macros, macro_source, serving_basis=None):
+        return None, None
+    store._catalog_snapshot = fake_catalog_snapshot
+    conn = DuplicateGuardConn()
+    base = dict(user_id="user-1", meal="Lunch", calories=255.0, protein=34.5,
+                carbs=0.0, fat=17.0, fiber=0.0, day="2026-09-12",
+                macro_source="FatSecret: 111")
+
+    first = await store._insert_meal_conn(conn, name="6 oz 93/7 Ground Beef", **base)
+    second = await store._insert_meal_conn(conn, name="6 OZ, 93/7 ground beef!!", **base)
+
+    assert len(conn.rows) == 1
+    assert second["id"] == first["id"]
+
+
+async def test_two_identical_logs_five_minutes_apart_both_land(monkeypatch):
+    store = _duplicate_guard_store(monkeypatch)
+    conn = DuplicateGuardConn()
+    values = dict(user_id="user-1", name="6 oz 93/7 Ground Beef", meal="Lunch",
+                  calories=255.0, protein=34.5, carbs=0.0, fat=17.0, fiber=0.0,
+                  day="2026-09-12", macro_source="FatSecret: 111")
+
+    await store._insert_meal_conn(conn, **values)
+    assert len(conn.rows) == 1
+    # Age the first row past the window instead of sleeping for real.
+    conn.rows[0]["created_at"] -= timedelta(seconds=DUPLICATE_MEAL_WINDOW_SECONDS + 180)
+
+    await store._insert_meal_conn(conn, **values)
+    assert len(conn.rows) == 2  # a real second meal, five minutes later
+
+
+async def test_duplicate_guard_does_not_collapse_different_macros_or_meal_types():
+    store = Store("postgresql://unused")
+    async def fake_catalog_snapshot(_conn, *, name, macros, macro_source, serving_basis=None):
+        return None, None
+    store._catalog_snapshot = fake_catalog_snapshot
+    conn = DuplicateGuardConn()
+    base = dict(user_id="user-1", name="6 oz 93/7 Ground Beef", day="2026-09-12",
+                macro_source="FatSecret: 111")
+
+    await store._insert_meal_conn(conn, meal="Lunch", calories=255.0, protein=34.5,
+                                  carbs=0.0, fat=17.0, fiber=0.0, **base)
+    # Different macros — a genuinely different portion, not a retry.
+    await store._insert_meal_conn(conn, meal="Lunch", calories=400.0, protein=34.5,
+                                  carbs=0.0, fat=17.0, fiber=0.0, **base)
+    # Same macros, different meal slot — also not a retry.
+    await store._insert_meal_conn(conn, meal="Dinner", calories=255.0, protein=34.5,
+                                  carbs=0.0, fat=17.0, fiber=0.0, **base)
+
+    assert len(conn.rows) == 3

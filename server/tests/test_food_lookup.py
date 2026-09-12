@@ -1209,3 +1209,159 @@ async def test_food_path_zero_calorie_foods_keep_their_zeros(monkeypatch):
     response = await srv.api_chat(chat_request({"message": "a diet coke"}))
     assert response.status_code == 200
     assert seen == {"calories": 0.0, "macro_source": "ESTIMATE"}
+
+
+# --------------------------------------------------------------------------- #
+# Composite voice-query resolution: normalize, split, quantify, sum once
+# (voice-first-utterance-fix-20260912)
+# --------------------------------------------------------------------------- #
+
+def _fatsecret_search_hit(food_id, food_name):
+    return {"foods": {"food": {"food_id": food_id, "food_name": food_name}}}
+
+
+def _fatsecret_get_hit(food_name, *, description, grams, calories, protein, carbs, fat, fiber):
+    return {"food": {"food_name": food_name, "servings": {"serving": {
+        "serving_description": description, "metric_serving_amount": str(grams),
+        "metric_serving_unit": "g", "calories": str(calories), "protein": str(protein),
+        "carbohydrate": str(carbs), "fat": str(fat), "fiber": str(fiber),
+    }}}}
+
+
+def _enable_fatsecret(monkeypatch):
+    monkeypatch.setenv("FATSECRET_ATTRIBUTION_ENABLED", "true")
+    monkeypatch.setenv("FATSECRET_CONSUMER_KEY", "consumer")
+    monkeypatch.setenv("FATSECRET_CONSUMER_SECRET", "consumer-secret")
+    monkeypatch.delenv("FATSECRET_CLIENT_ID", raising=False)
+    monkeypatch.delenv("FATSECRET_CLIENT_SECRET", raising=False)
+
+
+def test_relevance_check_never_lets_a_bare_unit_match_an_unrelated_brand():
+    # Regression for the honey-for-ground-beef bug: the stray "oz" variant a
+    # naive query-window slicer used to generate matched "Oz Miel" (a honey
+    # brand) purely because "oz" is a substring token of "Oz". A unit word
+    # must never count as meaningful overlap.
+    assert not food_lookup._relevant("6 oz", {"food_name": "Oz Miel"})
+    assert food_lookup._relevant("ground beef", {"food_name": "Ground Beef 93/7"})
+
+
+async def test_query_normalization_strips_quantity_parens_and_hedge_before_search(monkeypatch):
+    monkeypatch.delenv("FATSECRET_ATTRIBUTION_ENABLED", raising=False)
+    calls = mock_transport(monkeypatch, lambda _request: httpx.Response(200, json={"products": []}))
+    await food_lookup.resolve_food("6 oz ground beef (93/7, estimated)")
+    searched = [c.url.params["search_terms"] for c in calls]
+    assert "ground beef 93/7" in searched
+    assert not any(term in ("oz", "estimated)", "6 oz") for term in searched)
+
+
+async def test_honey_fixture_can_never_resolve_for_a_ground_beef_query(monkeypatch):
+    # Even a maximally noisy provider that returns the honey product for
+    # every search must be rejected by the deterministic relevance filter —
+    # this is not supposed to depend on the provider behaving well.
+    monkeypatch.delenv("FATSECRET_ATTRIBUTION_ENABLED", raising=False)
+
+    def handler(_request):
+        return httpx.Response(200, json={"products": [{
+            "code": "9999", "product_name": "Oz Miel",
+            "nutriments": {"energy-kcal_100g": 381, "proteins_100g": 0.3,
+                           "carbohydrates_100g": 80, "fat_100g": 0, "fiber_100g": 0},
+        }]})
+
+    mock_transport(monkeypatch, handler)
+    result = await food_lookup.resolve_food("6 oz ground beef (93/7, estimated)")
+    assert result is None  # never silently becomes honey
+
+
+async def test_clean_ground_beef_query_is_unchanged_and_six_ounces_scales_to_anchor(monkeypatch):
+    _enable_fatsecret(monkeypatch)
+
+    async def fake_request(data):
+        if data.get("method") == "foods.search":
+            return _fatsecret_search_hit("111", "93/7 Ground Beef")
+        assert data.get("food_id") == "111"
+        return _fatsecret_get_hit(
+            "93/7 Ground Beef", description="4 oz", grams=113.4,
+            calories=170, protein=23, carbs=0, fat=8, fiber=0,
+        )
+
+    monkeypatch.setattr(food_lookup, "_fatsecret_request", fake_request)
+
+    clean = await food_lookup.resolve_food("93/7 ground beef")
+    assert clean["source"] == "FatSecret: 111"
+    assert clean["macros_per_serving"] == {
+        "calories": 170.0, "protein": 23.0, "carbs": 0.0, "fat": 8.0, "fiber": 0.0,
+    }
+
+    scaled = await food_lookup.resolve_food("6 oz 93/7 ground beef")
+    macros = scaled["macros_per_serving"]
+    assert macros["calories"] == pytest.approx(255, abs=3)
+    assert macros["protein"] == pytest.approx(34.5, abs=1)
+
+
+async def test_composite_voice_query_resolves_each_component_and_sums_once(monkeypatch):
+    _enable_fatsecret(monkeypatch)
+
+    async def fake_request(data):
+        if data.get("method") == "foods.search":
+            expr = str(data.get("search_expression") or "").casefold()
+            if "beef" in expr:
+                return _fatsecret_search_hit("111", "93/7 Ground Beef")
+            if "potato" in expr:
+                return _fatsecret_search_hit("222", "Sweet Potato")
+            return {"foods": {}}
+        if data.get("food_id") == "111":
+            return _fatsecret_get_hit(
+                "93/7 Ground Beef", description="4 oz", grams=113.4,
+                calories=170, protein=23, carbs=0, fat=8, fiber=0,
+            )
+        return _fatsecret_get_hit(
+            "Sweet Potato", description="1 medium", grams=130,
+            calories=112, protein=2, carbs=26, fat=0, fiber=4,
+        )
+
+    monkeypatch.setattr(food_lookup, "_fatsecret_request", fake_request)
+
+    result = await food_lookup.resolve_food(
+        "6 ounces 93/7 ground beef and 1 medium sweet potato"
+    )
+    assert result is not None
+    assert "FatSecret: 111" in result["source"]
+    assert "FatSecret: 222" in result["source"]
+    assert "UNRESOLVED" not in result["source"]
+    macros = result["macros_per_serving"]
+    # 6 oz ground beef (~255 cal / ~34.5 g protein) + 1 medium sweet potato (112 cal / 2 g)
+    assert macros["calories"] == pytest.approx(255 + 112, abs=3)
+    assert macros["protein"] == pytest.approx(34.5 + 2, abs=1)
+
+
+async def test_composite_with_one_unresolved_component_sums_the_rest_and_flags_it(monkeypatch):
+    monkeypatch.delenv("FATSECRET_ATTRIBUTION_ENABLED", raising=False)
+
+    def handler(request):
+        terms = request.url.params.get("search_terms", "").casefold()
+        if "banana" in terms:
+            return httpx.Response(200, json={"products": [{
+                "code": "4011", "product_name": "Bananas, raw",
+                "nutriments": {"energy-kcal_100g": 89, "proteins_100g": 1.09,
+                               "carbohydrates_100g": 22.84, "fat_100g": 0.33, "fiber_100g": 2.6},
+            }]})
+        return httpx.Response(200, json={"products": []})
+
+    mock_transport(monkeypatch, handler)
+    result = await food_lookup.resolve_food("1 medium banana and some unobtainium paste")
+    assert result is not None
+    assert "UNRESOLVED: some unobtainium paste" in result["source"]
+    assert result["macros_per_serving"]["calories"] > 0
+
+
+def test_split_components_respects_parenthetical_boundaries():
+    assert food_lookup._split_components(
+        "6 oz ground beef (93/7, estimated) and 1 medium sweet potato"
+    ) == ["6 oz ground beef (93/7, estimated)", "1 medium sweet potato"]
+    assert food_lookup._split_components("93/7 ground beef") == ["93/7 ground beef"]
+
+
+def test_extract_quantity_keeps_mid_string_fraction_but_strips_leading_unit():
+    assert food_lookup._extract_quantity("93/7 ground beef") == (None, None, "93/7 ground beef")
+    assert food_lookup._extract_quantity("6 oz ground beef") == (6.0, "oz", "ground beef")
+    assert food_lookup._extract_quantity("1 medium sweet potato") == (1.0, "medium", "sweet potato")

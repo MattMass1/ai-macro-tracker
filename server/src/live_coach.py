@@ -52,13 +52,15 @@ _LIVE_INSTRUCTIONS = (
     "and conversational. Delegate questions that need the user's saved nutrition "
     "or workout context. Whenever the user says they ate or drank something, or "
     "asks you to log, check, or look up food or macros, delegate that turn to "
-    "your backend and let it log it."
+    "your backend and let it log it — do not ask the user to repeat or confirm "
+    "what they ate, and do not claim it was logged until your backend confirms."
 )
 _BACKEND_INSTRUCTIONS = (
     "Give bounded nutrition and strength coaching from the supplied context. "
     "When the user says they ate or drank something, or asks you to log, check, "
     "or look up food or macros, call the matching tool in THIS reply and use its "
-    "result. When logging food, call lookup_food FIRST and cite the source "
+    "result — never say you are about to log, or ask the user to repeat or "
+    "confirm a food report, before a tool result confirms the write. When logging food, call lookup_food FIRST and cite the source "
     "string it returns as macro_source; only when lookup genuinely fails, call "
     "log_meal with a detailed flagged estimate as macro_source (e.g. 'ESTIMATE "
     "— 6 oz 93/7 ground beef, typical values') — never a bare word like "
@@ -786,6 +788,7 @@ class LiveCoachService:
         # dispatched so a later turn is timed from its own start, not this
         # one's.
         turn_started_at: float | None = None
+        turn_had_tool_call = False
 
         async def report_activity(state: str, label: str) -> None:
             event = sanitize_provider_event({
@@ -843,7 +846,7 @@ class LiveCoachService:
                     return
 
         async def read_provider() -> str:
-            nonlocal turn_started_at
+            nonlocal turn_started_at, turn_had_tool_call
             try:
                 while True:
                     raw = await provider.recv()
@@ -853,14 +856,19 @@ class LiveCoachService:
                     if not isinstance(event, Mapping):
                         continue
                     touch()
+                    if event.get("type") == "session.delegation.created":
+                        logger.info("Voice delegation created: user_id=%s", user_id)
                     if event.get("type") == "response.event":
                         inner = event.get("event")
-                        if (
-                            isinstance(inner, Mapping)
-                            and inner.get("type") == "response.created"
-                            and turn_started_at is None
-                        ):
+                        inner_type = inner.get("type") if isinstance(inner, Mapping) else None
+                        if inner_type == "response.created" and turn_started_at is None:
                             turn_started_at = time.monotonic()
+                            turn_had_tool_call = False
+                        elif inner_type in {"response.completed", "response.done"}:
+                            logger.info(
+                                "Voice delegated turn completed: tool_call=%s",
+                                turn_had_tool_call,
+                            )
                     call_item = extract_function_call(event)
                     if call_item is not None:
                         call_id = call_item.get("call_id")
@@ -879,6 +887,7 @@ class LiveCoachService:
                             if turn_started_at is not None else None
                         )
                         turn_started_at = None
+                        turn_had_tool_call = True
                         output = await dispatch_voice_tool_call(
                             call_item,
                             tool_handlers=self.tool_handlers,

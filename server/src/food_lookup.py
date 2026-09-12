@@ -1,12 +1,14 @@
 """Catalog, curated menu, FatSecret, and OpenFoodFacts food lookup."""
 from __future__ import annotations
 
-import asyncio, base64, hashlib, hmac, json, math, os, re, secrets, time
+import asyncio, base64, hashlib, hmac, json, logging, math, os, re, secrets, time
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
 import httpx
 from food_catalog import normalize_food_name
 from restaurant_menu import restaurant_lookup
+
+logger = logging.getLogger(__name__)
 
 TIMEOUT = 5.0
 USER_AGENT = "MacroCoach/1.0 (ai-macro-tracker; contact@biz21.com)"
@@ -17,6 +19,44 @@ FATSECRET_API_URL = "https://platform.fatsecret.com/rest/server.api"
 OFF_LICENSE_NAME = "Open Database License (ODbL) 1.0"
 OFF_LICENSE_URL = "https://opendatacommons.org/licenses/odbl/1-0/"
 MACRO_KEYS = ("calories", "protein", "carbs", "fat", "fiber")
+# Hedging language the model or a transcript adds around an uncertain amount —
+# stripped before a provider search, never treated as part of the food identity.
+_HEDGE_RE = re.compile(
+    r"\b(?:estimated|estimate|about|roughly|approximately|approx|probably|around|ish)\b",
+    re.IGNORECASE,
+)
+# Portion units that precede or follow a quantity, never the food itself —
+# excluded from provider search text and from relevance-matching tokens.
+_UNIT_WORDS = frozenset({
+    "oz", "ounce", "ounces", "g", "gram", "grams", "lb", "lbs", "pound", "pounds",
+    "cup", "cups", "tbsp", "tablespoon", "tablespoons", "tsp", "teaspoon", "teaspoons",
+    "ml", "milliliter", "milliliters", "l", "liter", "liters", "kg", "kilogram", "kilograms",
+    "medium", "large", "small", "slice", "slices", "piece", "pieces", "serving", "servings",
+    "can", "cans", "bottle", "bottles", "bar", "bars", "scoop", "scoops", "fillet", "fillets",
+    "whole", "half",
+})
+_NUMBER_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "twelve": 12, "dozen": 12,
+}
+# Weight/volume units convertible to grams for deterministic portion scaling
+# (volumes approximate water density — acceptable for the common-food cases here).
+_GRAMS_PER_UNIT = {
+    "oz": 28.3495, "ounce": 28.3495, "ounces": 28.3495,
+    "g": 1.0, "gram": 1.0, "grams": 1.0,
+    "lb": 453.592, "lbs": 453.592, "pound": 453.592, "pounds": 453.592,
+    "kg": 1000.0, "kilogram": 1000.0, "kilograms": 1000.0,
+    "ml": 1.0, "milliliter": 1.0, "milliliters": 1.0,
+    "l": 1000.0, "liter": 1000.0, "liters": 1000.0,
+    "cup": 236.588, "cups": 236.588,
+    "tbsp": 14.787, "tablespoon": 14.787, "tablespoons": 14.787,
+    "tsp": 4.929, "teaspoon": 4.929, "teaspoons": 4.929,
+}
+_NUM_TOKEN = r"(?:\d+(?:\.\d+)?(?:/\d+)?|" + "|".join(_NUMBER_WORDS) + r")"
+_UNIT_TOKEN = "|".join(sorted(_UNIT_WORDS, key=len, reverse=True))
+_LEADING_QTY_RE = re.compile(rf"^\s*({_NUM_TOKEN})\s+({_UNIT_TOKEN})\b\s*", re.IGNORECASE)
+_TRAILING_QTY_RE = re.compile(rf"\s*({_NUM_TOKEN})\s+({_UNIT_TOKEN})\s*$", re.IGNORECASE)
+_COMPONENT_SPLIT_RE = re.compile(r"(\(|\)|\band\b|,|\+)", re.IGNORECASE)
 _OFF_NUTRIMENTS = {"energy-kcal_100g":"calories", "proteins_100g":"protein",
     "carbohydrates_100g":"carbs", "fat_100g":"fat", "fiber_100g":"fiber"}
 _OFF_SERVING = {"energy-kcal_serving":"calories", "proteins_serving":"protein",
@@ -169,7 +209,7 @@ def _fatsecret_relevant(query: str, food: Mapping[str, Any]) -> bool:
 
 def _relevant(query: str, food: Mapping[str, Any]) -> bool:
     """Conservative token relevance for non-trusted OFF text search results."""
-    query_words = set(normalize_food_name(query).split())
+    query_words = set(normalize_food_name(query).split()) - _UNIT_WORDS
     candidate = normalize_food_name(" ".join(
         str(food.get(key) or "") for key in ("food_name", "brand_name", "food_description")
     ))
@@ -281,7 +321,73 @@ def _query_variants(query: str) -> list[str]:
     return list(dict.fromkeys(value for value in candidates if value))
 
 
-async def resolve_food(query: str, classify: bool = True, *, whole_item: bool = False, catalog_lookup=None) -> dict[str, Any] | None:
+def _quantity_value(token: str) -> float:
+    lowered = token.casefold()
+    if lowered in _NUMBER_WORDS:
+        return float(_NUMBER_WORDS[lowered])
+    if "/" in token:
+        whole, _, frac = token.partition("/")
+        try:
+            return float(whole) / float(frac)
+        except (ValueError, ZeroDivisionError):
+            return 1.0
+    try:
+        return float(token)
+    except ValueError:
+        return 1.0
+
+
+def _extract_quantity(text: str) -> tuple[float | None, str | None, str]:
+    """Pull a LEADING or TRAILING quantity+unit off search text, never a mid-string one.
+
+    `93/7 ground beef` keeps its fat ratio (no unit word follows it); `6 oz
+    ground beef` and `ground beef, 200 g` both give up their quantity.
+    """
+    match = _LEADING_QTY_RE.match(text)
+    if match:
+        return _quantity_value(match.group(1)), match.group(2).casefold(), text[match.end():].strip()
+    match = _TRAILING_QTY_RE.search(text)
+    if match:
+        remainder = (text[:match.start()] + text[match.end():]).strip()
+        return _quantity_value(match.group(1)), match.group(2).casefold(), remainder
+    return None, None, text
+
+
+def _clean_component(text: str) -> tuple[float | None, str | None, str]:
+    """Strip parenthetical wrapping, hedging words, and stray punctuation, then
+    pull off any explicit quantity — the remainder is what gets searched."""
+    unwrapped = text.replace("(", " ").replace(")", " ")
+    dehedged = _HEDGE_RE.sub(" ", unwrapped)
+    depunctuated = re.sub(r"[,;]+", " ", dehedged)
+    collapsed = " ".join(depunctuated.split())
+    quantity, unit, remainder = _extract_quantity(collapsed)
+    return quantity, unit, remainder.strip(" .")
+
+
+def _split_components(query: str) -> list[str]:
+    """Split a compound utterance on `and`/`,`/`+` at the top level only —
+    never inside parentheses, so `(93/7, estimated)` stays one unit."""
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for token in _COMPONENT_SPLIT_RE.split(query):
+        if not token:
+            continue
+        if token == "(":
+            depth += 1; current.append(token)
+        elif token == ")":
+            depth = max(0, depth - 1); current.append(token)
+        elif depth == 0 and (token.casefold() == "and" or token in (",", "+")):
+            parts.append("".join(current)); current = []
+        else:
+            current.append(token)
+    parts.append("".join(current))
+    return [part.strip() for part in parts if part.strip()]
+
+
+async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup) -> dict[str, Any] | None:
+    """The single-food cascade: catalog, curated menu, then provider search
+    over normalized-query variants. Shared by the simple and composite paths."""
     if catalog_lookup:
         try:
             found = await catalog_lookup(query)
@@ -296,6 +402,101 @@ async def resolve_food(query: str, classify: bool = True, *, whole_item: bool = 
             found = await provider(variant)
             if found and (not whole_item or _macros(found.get("macros_per_serving", {}))): return found
     return None
+
+
+def _scale_macros(macros: Mapping[str, Any], factor: float) -> dict[str, float]:
+    return {key: round(float(macros.get(key, 0) or 0) * factor, 2) for key in MACRO_KEYS}
+
+
+def _quantify(
+    found: Mapping[str, Any], quantity: float | None, unit: str | None
+) -> tuple[dict[str, float], str] | None:
+    """Apply a parsed quantity to a resolved food AFTER resolution — the only
+    place portion arithmetic happens, so voice, chat, and presets agree."""
+    if quantity is not None and unit in _GRAMS_PER_UNIT:
+        scaled = portion_from_grams(found, quantity * _GRAMS_PER_UNIT[unit])
+        if scaled is not None:
+            return scaled
+    base = portion_from_serving(found)
+    if base is None and found.get("macros_per_100g"):
+        base = portion_from_grams(found, 100)
+    if base is None:
+        return None
+    macros, source = base
+    if not quantity or quantity == 1:
+        return macros, source
+    return _scale_macros(macros, quantity), f"{source} x{quantity:g}"
+
+
+async def resolve_food(
+    query: str, classify: bool = True, *, whole_item: bool = False, catalog_lookup=None
+) -> dict[str, Any] | None:
+    """Resolve one query or `and`/`,`/`+`-joined composite to real macro data.
+
+    Logs the lookup outcome (never the query text itself — length and
+    component count only) so a stuck or silently-estimating lookup is visible
+    in production instead of indistinguishable from a healthy one.
+    """
+    started = time.monotonic()
+    text = " ".join(str(query or "").split())
+    components = len(_split_components(text)) if text else 0
+    result = await _resolve_food_text(
+        text, whole_item=whole_item, catalog_lookup=catalog_lookup
+    ) if text else None
+    provider = str((result or {}).get("source") or "").split(":", 1)[0][:40] or None
+    logger.info(
+        "food lookup: chars=%d components=%d resolved=%s provider=%s elapsed_ms=%.1f",
+        len(text), components, result is not None, provider,
+        (time.monotonic() - started) * 1000,
+    )
+    return result
+
+
+async def _resolve_food_text(
+    text: str, *, whole_item: bool, catalog_lookup
+) -> dict[str, Any] | None:
+    raw_parts = _split_components(text)
+    if len(raw_parts) <= 1:
+        quantity, unit, remainder = _clean_component(raw_parts[0] if raw_parts else text)
+        found = await _resolve_component(remainder or text, whole_item=whole_item, catalog_lookup=catalog_lookup)
+        if not found or quantity is None:
+            return found
+        quantified = _quantify(found, quantity, unit)
+        if quantified is None:
+            return found
+        macros, label = quantified
+        return {**found, "macros_per_serving": macros, "serving_size": label}
+
+    # Composite utterance: resolve, quantify, and sum each component once in
+    # server arithmetic. An unresolved component is flagged, never dropped.
+    totals = {key: 0.0 for key in MACRO_KEYS}
+    resolved_labels: list[str] = []
+    unresolved: list[str] = []
+    any_resolved = False
+    for part in raw_parts:
+        quantity, unit, remainder = _clean_component(part)
+        if not remainder:
+            continue
+        found = await _resolve_component(remainder, whole_item=False, catalog_lookup=catalog_lookup)
+        quantified = _quantify(found, quantity, unit) if found else None
+        if quantified is None:
+            unresolved.append(part)
+            continue
+        macros, label = quantified
+        for key in MACRO_KEYS:
+            totals[key] += macros.get(key, 0.0)
+        resolved_labels.append(label)
+        any_resolved = True
+    if not any_resolved:
+        return None
+    source_bits = list(resolved_labels)
+    if unresolved:
+        source_bits.append("UNRESOLVED: " + "; ".join(unresolved))
+    return {
+        "name": text,
+        "macros_per_serving": {key: round(value, 2) for key, value in totals.items()},
+        "source": "Composite: " + "; ".join(source_bits),
+    }
 
 
 def portion_from_grams(found: Mapping[str, Any], grams: Any):

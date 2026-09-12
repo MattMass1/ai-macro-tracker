@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import secrets
 from datetime import date, datetime
@@ -17,6 +18,14 @@ from auth import current_user_id
 from domain import effective_day_window, validate_macro_source
 from food_catalog import evidence_hash, normalize_food_name, provenance_state
 from migrations import MigrationError, migration_status
+
+logger = logging.getLogger(__name__)
+
+# The user repeating himself because he heard no confirmation must not double
+# his day: an identical meal (same user, normalized name, meal type, and
+# macros) inside this window returns the earlier row instead of inserting a
+# second one. Two identical logs further apart than this are two real meals.
+DUPLICATE_MEAL_WINDOW_SECONDS = 120
 
 
 class StoreError(RuntimeError):
@@ -314,9 +323,26 @@ class Store:
     async def _insert_meal_conn(self, conn, *, user_id, name, meal, calories, protein,
                                 carbs, fat, fiber, day, macro_source,
                                 component_metadata_json=None):
-        """Insert one nutrition row using the caller's transaction."""
+        """Insert one nutrition row using the caller's transaction.
+
+        Returns the earlier row unchanged, without inserting, when an
+        identical meal (same normalized name, meal type, and macros) for this
+        user was logged inside `DUPLICATE_MEAL_WINDOW_SECONDS` — the coach
+        promising a log before the write, then repeating itself when no
+        confirmation arrived, must not double the day's totals.
+        """
         await conn.execute("INSERT INTO days(user_id,date) VALUES($1,$2) ON CONFLICT(user_id,date) DO NOTHING", user_id, day)
         await conn.fetchval("SELECT date FROM days WHERE user_id=$1 AND date=$2 FOR UPDATE", user_id, day)
+        duplicate = await self._find_recent_duplicate_meal(
+            conn, user_id=user_id, name=name, meal=meal, calories=calories,
+            protein=protein, carbs=carbs, fat=fat, fiber=fiber, day=day,
+        )
+        if duplicate is not None:
+            logger.info(
+                "duplicate meal guard fired: user_id=%s meal=%s window_s=%s",
+                user_id, meal, DUPLICATE_MEAL_WINDOW_SECONDS,
+            )
+            return duplicate
         meal_id = await conn.fetchval(
             "INSERT INTO meals(id,user_id,day,meal_type) VALUES($1,$2,$3,$4) "
             "ON CONFLICT(user_id,day,meal_type) DO UPDATE SET meal_type=EXCLUDED.meal_type RETURNING id",
@@ -330,6 +356,32 @@ class Store:
             str(uuid4()), user_id, name, meal, calories, protein, carbs, fat, fiber, day,
             meal_id, macro_source, item_id, observation_id, component_metadata_json)
         return row
+
+    @staticmethod
+    async def _find_recent_duplicate_meal(conn, *, user_id, name, meal, calories,
+                                          protein, carbs, fat, fiber, day):
+        """Return the most recent matching row inside the duplicate window, or None.
+
+        Candidates are narrowed in SQL by user/day/meal-type/recency only;
+        name normalization and macro equality are checked in Python so this
+        never depends on `NUMERIC` (`Decimal`) and `float` comparing bit-for-bit.
+        """
+        candidates = await conn.fetch(
+            "SELECT * FROM nutrition_entries WHERE user_id=$1 AND day=$2 AND meal=$3 "
+            "AND created_at >= now() - make_interval(secs => $4) ORDER BY created_at DESC",
+            user_id, day, meal, DUPLICATE_MEAL_WINDOW_SECONDS,
+        )
+        target_name = normalize_food_name(name)
+        target_macros = (calories, protein, carbs, fat, fiber)
+        for candidate in candidates:
+            if normalize_food_name(candidate["name"]) != target_name:
+                continue
+            candidate_macros = (candidate["calories"], candidate["protein"],
+                                candidate["carbs"], candidate["fat"], candidate["fiber"])
+            if all(round(float(a or 0), 2) == round(float(b or 0), 2)
+                   for a, b in zip(target_macros, candidate_macros)):
+                return candidate
+        return None
 
     async def insert_meals(self, rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
         """Insert one validated food turn atomically for the authenticated user.

@@ -52,6 +52,32 @@ from live_coach import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+_logging_configured = False
+
+
+def configure_logging() -> None:
+    """Turn on INFO logging exactly once, for both `python src/server.py`
+    and a uvicorn factory launch (e.g. `uvicorn server:create_app`) — both
+    paths call `create_app()`, which is where this is invoked.
+
+    Without this the root logger sits at WARNING and every `logger.info` in
+    this codebase — tool calls, gate acquire/release, lookup outcomes — is
+    invisible in Render, so a working session and a broken one look
+    identical. The module-level flag keeps re-importing under pytest (many
+    test files import this module) from reconfiguring repeatedly or fighting
+    pytest's own log-capture handlers. Never logs transcripts, meal text,
+    audio, tokens, or credentials — every logger.info call in this codebase
+    is scoped by convention to ids, names, states, timings, and counts only;
+    this function only controls the level.
+    """
+    global _logging_configured
+    if _logging_configured:
+        return
+    _logging_configured = True
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger().setLevel(logging.INFO)
+
+
 _ZERO_MACRO_FOODS = (
     "alcohol",
     "vodka",
@@ -2422,13 +2448,14 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
         return search_workout_library(rows, str(args["query"]))
     async def lookup_food_tool(args):
         current_user_id()  # fail closed: only run inside an authenticated tenant context
-        found = await resolve_food(str(args["query"]))
+        query = str(args["query"])
+        found = await resolve_food(query)
         if not found:
             return {"result": "not found",
-                    "guidance": "No free-database match. Log your best estimate "
-                                "NOW with log_meal (macro_source like 'ESTIMATE — "
-                                "typical serving'); never ask the user for a "
-                                "nutrition label or refuse to log."}
+                    "guidance": f"No verified match for {query!r}. Log your best estimate "
+                                f"NOW with log_meal (macro_source must name what was tried, "
+                                f"e.g. 'ESTIMATE — could not find {query!r}, typical values'); "
+                                "never ask the user for a nutrition label or refuse to log."}
         return found
     async def readiness_tool(_args):
         workouts, plan, integration = await asyncio.gather(
@@ -3202,6 +3229,7 @@ async def readiness(request: Request) -> Any:
 
 def create_app(*, live_service: LiveCoachService | None = None) -> Any:
     """Build the production ASGI app with MCP, HTTP APIs, and native Live."""
+    configure_logging()
     service = live_service or LiveCoachService(
         store=store_client(),
         provider_connect=connect_openai_live,

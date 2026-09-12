@@ -285,7 +285,9 @@ def test_session_start_uses_exact_gpt_live_contract_with_the_voice_write_unlock(
                 "practical, and conversational. Delegate questions that need the "
                 "user's saved nutrition or workout context. Whenever the user says "
                 "they ate or drank something, or asks you to log, check, or look up "
-                "food or macros, delegate that turn to your backend and let it log it."
+                "food or macros, delegate that turn to your backend and let it log it "
+                "— do not ask the user to repeat or confirm what they ate, and do not "
+                "claim it was logged until your backend confirms."
             ),
             "audio": {
                 "format": {"type": "audio/pcm", "rate": 24000},
@@ -299,7 +301,10 @@ def test_session_start_uses_exact_gpt_live_contract_with_the_voice_write_unlock(
                         "Give bounded nutrition and strength coaching from the supplied "
                         "context. When the user says they ate or drank something, or asks "
                         "you to log, check, or look up food or macros, call the matching "
-                        "tool in THIS reply and use its result. When logging food, call "
+                        "tool in THIS reply and use its result — never say you are "
+                        "about to log, or ask the user to repeat or confirm a food "
+                        "report, before a tool result confirms the write. When "
+                        "logging food, call "
                         "lookup_food FIRST and cite the source string it returns as "
                         "macro_source; only when lookup genuinely fails, call log_meal "
                         "with a detailed flagged estimate as macro_source (e.g. 'ESTIMATE "
@@ -2419,3 +2424,18 @@ async def test_voice_undo_removes_entry_and_reverts_totals(monkeypatch):
     assert fake.deleted == [("nutrition_entries", "row-1")]
     assert empty_day["totals"]["calories"] == 0
     assert empty_day["meals"] == []
+
+
+def test_instructions_forbid_promising_or_asking_the_user_to_repeat():
+    """Matt's exact report: the coach says it will log, then nothing happens
+    until he speaks again. The fix is the wiring, but the instructions must
+    also stop the coach from announcing a write that has not happened, or
+    handing the confirmation step back to the user.
+    """
+    from live_coach import _BACKEND_INSTRUCTIONS, _LIVE_INSTRUCTIONS
+
+    for text in (_LIVE_INSTRUCTIONS, _BACKEND_INSTRUCTIONS):
+        lowered = text.casefold()
+        assert "repeat or confirm" in lowered, text
+    assert "before a tool result confirms the write" in _BACKEND_INSTRUCTIONS.casefold()
+    assert "until your backend confirms" in _LIVE_INSTRUCTIONS.casefold()

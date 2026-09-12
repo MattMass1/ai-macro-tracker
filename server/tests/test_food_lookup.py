@@ -512,7 +512,7 @@ async def test_coach_lookup_food_tool_returns_hit_and_not_found(monkeypatch):
     monkeypatch.setattr(srv, "_client", fake)
 
     async def fake_resolve(query, **_kwargs):
-        assert query == "greek yogurt"
+        assert query == "rice noodles"
         return {**BANANA_HIT, "attribution": {"provider":"OpenFoodFacts",
             "license":"Open Database License (ODbL) 1.0",
             "attribution_text":"Data from OpenFoodFacts"}}
@@ -522,11 +522,11 @@ async def test_coach_lookup_food_tool_returns_hit_and_not_found(monkeypatch):
 
     # Fails closed like every other tool: no tenant context, no lookup.
     with pytest.raises(RuntimeError):
-        await handler({"query": "greek yogurt"})
+        await handler({"query": "rice noodles"})
 
     token = bind_user(uuid4())
     try:
-        hit = await handler({"query": "greek yogurt"})
+        hit = await handler({"query": "rice noodles"})
         assert hit["source"] == "OpenFoodFacts: 4011"
         assert hit["attribution"]["attribution_text"] == "Data from OpenFoodFacts"
 
@@ -1639,6 +1639,50 @@ async def test_slow_higher_trust_provider_does_not_hold_fast_valid_result(monkey
     elapsed = time.monotonic() - started
     assert found["source"] == "OpenFoodFacts: fast"
     assert elapsed < 0.4
+
+
+@pytest.mark.parametrize(("spoken", "normalized"), [
+    ("a hundred grams of sweet potato", "100 grams of sweet potato"),
+    ("two hundred grams of sweet potato", "200 grams of sweet potato"),
+    ("a hundred and fifty grams of sweet potato", "150 grams of sweet potato"),
+    ("twenty grams of strawberries", "20 grams of strawberries"),
+    ("one thousand grams of sweet potato", "1000 grams of sweet potato"),
+])
+def test_spelled_out_quantities_normalize_before_unit_stripping(spoken, normalized):
+    assert food_lookup._normalize_query_text(spoken) == normalized
+
+
+@pytest.mark.parametrize("query", [
+    "six ounces of 93/7 ground beef",
+    "6 oz 93 7 ground beef",
+    "ninety three seven ground beef, six ounces",
+    "a hundred grams of sweet potato",
+    "100 grams of sweet potato",
+    "sweet potato",
+    "one sweet potato",
+    "8 oz steak",
+    "an apple",
+    "strawberries",
+    "2 eggs",
+])
+async def test_generic_whole_food_acceptance_never_calls_a_provider(monkeypatch, query):
+    async def forbidden(_query):
+        raise AssertionError("generic whole food must not call a provider")
+    monkeypatch.setattr(food_lookup, "search_fatsecret", forbidden)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", forbidden)
+    found = food_lookup.resolve_generic_whole_food(query)
+    assert found is not None
+    assert found["source"].startswith("Generic:")
+    assert found["basis"]
+    assert found["macros_per_serving"]["calories"] > 0
+
+
+def test_generic_whole_food_does_not_capture_brands_composites_or_mixed_fractions():
+    for query in ("Big Mac", "Chick-Fil-A sandwich", "Quaker oats"):
+        assert food_lookup.resolve_generic_whole_food(query) is None
+    rice = food_lookup.resolve_generic_whole_food("2 1/2 cups white rice")
+    assert rice is not None
+    assert food_lookup._clean_component("2 1/2 cups white rice")[:2] == (2.5, "cups")
 
 
 async def test_resolved_cache_is_ttl_bounded_and_tenant_keyed(monkeypatch):

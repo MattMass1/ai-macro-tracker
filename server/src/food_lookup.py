@@ -6,6 +6,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import quote
 import httpx
 from food_catalog import normalize_food_name
+from generic_foods import FOODS as GENERIC_WHOLE_FOODS
 from restaurant_menu import restaurant_lookup
 
 logger = logging.getLogger(__name__)
@@ -53,17 +54,30 @@ _CARDINAL_TENS = {
     "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
     "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
 }
-_NUMBER_PHRASES = {
-    **_CARDINAL_ONES,
-    **_CARDINAL_TENS,
+_UNDER_HUNDRED_PHRASES = {
+    **_CARDINAL_ONES, **_CARDINAL_TENS,
     **{
         f"{tens_word} {one_word}": tens_value + one_value
         for tens_word, tens_value in _CARDINAL_TENS.items()
         for one_word, one_value in _CARDINAL_ONES.items()
         if 0 < one_value < 10
     },
-    "one hundred": 100,
 }
+_NUMBER_PHRASES = {**_UNDER_HUNDRED_PHRASES,
+                   "a hundred": 100, "one thousand": 1000}
+for _hundred_word, _hundred_value in {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9,
+}.items():
+    _NUMBER_PHRASES[f"{_hundred_word} hundred"] = _hundred_value * 100
+    for _phrase, _value in _UNDER_HUNDRED_PHRASES.items():
+        if 0 < _value < 100:
+            _NUMBER_PHRASES[f"{_hundred_word} hundred and {_phrase}"] = _hundred_value * 100 + _value
+            _NUMBER_PHRASES[f"{_hundred_word} hundred {_phrase}"] = _hundred_value * 100 + _value
+for _phrase, _value in _UNDER_HUNDRED_PHRASES.items():
+    if 0 < _value < 100:
+        _NUMBER_PHRASES[f"a hundred and {_phrase}"] = 100 + _value
+        _NUMBER_PHRASES[f"a hundred {_phrase}"] = 100 + _value
 _NUMBER_PHRASE_RE = re.compile(
     r"\b(?:" + "|".join(
         re.escape(phrase) for phrase in sorted(_NUMBER_PHRASES, key=len, reverse=True)
@@ -432,9 +446,17 @@ def _extract_quantity(text: str) -> tuple[float | None, str | None, str]:
 def _normalize_query_text(text: str) -> str:
     """Canonicalize spoken numbers and common meat lean/fat ratios."""
     words = re.sub(r"(?<=[A-Za-z])-(?=[A-Za-z])", " ", text)
+    protected: dict[str, str] = {}
+    for index, phrase in enumerate(("half a", "a half", "a quarter")):
+        marker = f"__fraction_{index}__"
+        if phrase in words.casefold():
+            words = re.sub(rf"\b{re.escape(phrase)}\b", marker, words, flags=re.I)
+            protected[marker] = phrase
     words = _NUMBER_PHRASE_RE.sub(
         lambda match: str(_NUMBER_PHRASES[match.group(0).casefold()]), words
     )
+    for marker, phrase in protected.items():
+        words = words.replace(marker, phrase)
     for lean, fat in _LEAN_FAT_PAIRS:
         words = re.sub(
             rf"(?<![\d/])\.?{lean}\s*(?:/|-|\s)\s*{fat}(?!\d)",
@@ -453,6 +475,55 @@ def _clean_component(text: str) -> tuple[float | None, str | None, str]:
     collapsed = " ".join(depunctuated.split())
     quantity, unit, remainder = _extract_quantity(collapsed)
     return quantity, unit, remainder.strip(" .")
+
+
+def _generic_whole_food(query: str) -> dict[str, Any] | None:
+    """Resolve an exact generic whole-food identity without network access."""
+    normalized = normalize_food_name(query)
+    explicit_basis = None
+    for marker in ("raw", "cooked"):
+        if re.search(rf"\b{marker}\b", normalized):
+            explicit_basis = marker
+            normalized = " ".join(re.sub(rf"\b{marker}\b", " ", normalized).split())
+            break
+    entry = GENERIC_WHOLE_FOODS.get(normalized)
+    count = 1.0
+    counted = re.fullmatch(r"(\d+(?:\.\d+)?|a|an)\s+(.+)", normalized)
+    if entry is None and counted:
+        count = (1.0 if counted.group(1) in ("a", "an")
+                 else float(counted.group(1)))
+        normalized = counted.group(2)
+        entry = GENERIC_WHOLE_FOODS.get(normalized)
+    if entry and entry.get("alias_of"):
+        entry = GENERIC_WHOLE_FOODS[str(entry["alias_of"])]
+    if not entry:
+        return None
+    if explicit_basis == "cooked" and "cooked" not in str(entry["basis"]):
+        return None
+    macros = dict(zip(MACRO_KEYS, entry["macros"]))
+    grams = float(entry["grams"]) * count
+    source = (f"Generic: {entry['name']}, per 100 g, {entry['basis']}; "
+              f"source: {entry['source']}")
+    return {"name":entry["name"], "macros_per_100g":macros,
+            "macros_per_serving":_scale_macros(macros, grams / 100),
+            "serving_size":f"{source} — {grams:g} g", "source":source,
+            "basis":entry["basis"]}
+
+
+def resolve_generic_whole_food(query: str) -> dict[str, Any] | None:
+    """Resolve and portion one generic whole food, or return ``None``."""
+    text = _normalize_query_text(" ".join(str(query or "").split()))
+    quantity, unit, remainder = _clean_component(text)
+    found = _generic_whole_food(remainder or text)
+    if not found and len(_split_components(text)) != 1:
+        return None
+    if not found or quantity is None:
+        return found
+    quantified = _quantify(found, quantity, unit)
+    if quantified is None:
+        return found
+    macros, label = quantified
+    return {**found, "macros_per_serving":macros, "serving_size":label}
 
 
 def _split_components(query: str) -> list[str]:
@@ -680,4 +751,6 @@ def portion_from_grams(found: Mapping[str, Any], grams: Any):
 def portion_from_serving(found: Mapping[str, Any]):
     macros = _macros(found.get("macros_per_serving", {})) if isinstance(found, Mapping) else None
     source = str(found.get("source") or "").strip() if isinstance(found, Mapping) else ""
+    if source.startswith("Generic:") and found.get("serving_size"):
+        source = str(found["serving_size"])
     return (macros, source) if macros and source else None

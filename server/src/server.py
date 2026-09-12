@@ -126,6 +126,9 @@ def store_client() -> Store:
 
 async def resolve_food(query: str, **kwargs):
     """Use tenant-local trusted food data before any external provider."""
+    generic = food_lookup.resolve_generic_whole_food(query)
+    if generic is not None:
+        return generic
     try:
         tenant = str(current_user_id())
     except RuntimeError:
@@ -150,6 +153,9 @@ async def resolve_food(query: str, **kwargs):
         presets = []
     catalog_lookup = getattr(client, "lookup_catalog", None)
     async def local_lookup(local_query: str) -> dict[str, Any] | None:
+        generic_local = food_lookup.resolve_generic_whole_food(local_query)
+        if generic_local is not None:
+            return generic_local
         local_normalized = food_lookup.normalize_food_name(local_query)
         query_tokens = set(local_normalized.split())
         preset = next(

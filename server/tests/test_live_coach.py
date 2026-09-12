@@ -2195,6 +2195,40 @@ async def test_voice_log_meal_persists_one_entry_and_echoes_macros(monkeypatch):
     assert logged["macro_source"] == "Catalog: ground beef 93/7"
 
 
+@pytest.mark.parametrize("description", [
+    "six ounces of 93/7 ground beef", "6 oz 93 7 ground beef",
+    "ninety three seven ground beef, six ounces",
+    "a hundred grams of sweet potato", "100 grams of sweet potato",
+    "sweet potato", "one sweet potato", "8 oz steak", "an apple",
+    "strawberries", "2 eggs",
+])
+@pytest.mark.asyncio
+async def test_voice_whole_foods_commit_without_clarification_or_provider(
+    monkeypatch, description
+):
+    srv = _import_server(monkeypatch)
+    fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+
+    async def forbidden(_query):
+        raise AssertionError("whole-food local hit must not call a provider")
+    monkeypatch.setattr(srv.food_lookup, "search_fatsecret", forbidden)
+    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts", forbidden)
+    token = bind_user(uuid4())
+    try:
+        result = await srv._voice_tool_handlers()["log_meal"](
+            "whole-" + description, {"description":description, "meal_type":"Dinner"}
+        )
+    finally:
+        reset_user(token)
+
+    assert result["status"] == "committed"
+    assert result["logged"]["macro_source"].startswith("Generic:")
+    assert "raw" in result["logged"]["macro_source"]
+    assert " g" in result["logged"]["macro_source"]
+    assert fake.insert_count == 1
+
+
 @pytest.mark.asyncio
 async def test_voice_log_meal_repeat_tool_call_id_does_not_double_log(monkeypatch):
     srv = _import_server(monkeypatch)

@@ -94,6 +94,8 @@ class LiveCoachPolicy:
     close_timeout: float = 15.0
     max_duration: float = 600.0
     idle_timeout: float = 90.0
+    duration_warning: float = 30.0
+    duration_grace: float = 30.0
     max_event_bytes: int = 65_536
     max_audio_bytes: int = 24_000
     queue_size: int = 16
@@ -839,7 +841,19 @@ class LiveCoachService:
             maxsize=self.policy.queue_size
         )
         resolved_call_ids: set[str] = set()
-        last_activity = time.monotonic()
+        session_started_at = time.monotonic()
+        last_client_activity = session_started_at
+        last_provider_activity = session_started_at
+        tool_calls_in_flight = 0
+        assistant_audio_in_flight = False
+        response_finished = asyncio.Event()
+        response_finished.set()
+        accepting_new_work = True
+        barge_in_count = 0
+        barge_in_recorded_for_response = False
+        teardown_reason = "provider_error"
+        provider_close_code: str | int | None = None
+        provider_close_reason: str | None = None
         # First sign of the current delegated turn (the Responses API's own
         # "response.created" event, wrapped in response.event) to the moment
         # its tool call arrives — the round trip the brief calls out as "a
@@ -856,9 +870,26 @@ class LiveCoachService:
             if event is not None:
                 await to_client.put(event)
 
-        def touch() -> None:
-            nonlocal last_activity
-            last_activity = time.monotonic()
+        def touch_client() -> None:
+            nonlocal last_client_activity
+            last_client_activity = time.monotonic()
+
+        def touch_provider() -> None:
+            nonlocal last_provider_activity
+            last_provider_activity = time.monotonic()
+
+        def safe_close_code(value: Any) -> str | int | None:
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+            if isinstance(value, str) and value.replace("_", "").isalnum():
+                return value[:32]
+            return None
+
+        def safe_close_reason(value: Any) -> str | None:
+            if not isinstance(value, str):
+                return None
+            normalized = value.replace("_", "").replace("-", "")
+            return value[:64] if normalized.isalnum() else "other"
 
         async def put_terminal(queue: asyncio.Queue, event: Any) -> bool:
             try:
@@ -871,14 +902,41 @@ class LiveCoachService:
 
         async def wait_for_idle() -> None:
             while True:
+                now = time.monotonic()
                 remaining = self.policy.idle_timeout - (
-                    time.monotonic() - last_activity
+                    now - max(last_client_activity, last_provider_activity)
                 )
                 if remaining <= 0:
-                    return
-                await asyncio.sleep(remaining)
+                    if tool_calls_in_flight == 0:
+                        return
+                    remaining = min(self.policy.idle_timeout, 0.05)
+                await asyncio.sleep(max(remaining, 0.001))
+
+        async def wait_for_duration() -> None:
+            nonlocal accepting_new_work
+            warning_at = max(0.0, self.policy.max_duration - self.policy.duration_warning)
+            await asyncio.sleep(warning_at)
+            if self.policy.duration_warning > 0 and warning_at > 0:
+                await to_client.put({
+                    "type": "warning",
+                    "code": "duration_warning",
+                    "message": "This voice session will end soon. Finish your thought.",
+                })
+            await asyncio.sleep(max(0.0, self.policy.max_duration - warning_at))
+            accepting_new_work = False
+            if not response_finished.is_set() or tool_calls_in_flight:
+                try:
+                    await asyncio.wait_for(
+                        response_finished.wait(), timeout=self.policy.duration_grace
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "live duration grace expired: user_id=%s response_in_flight=%s tool_calls_in_flight=%d",
+                        user_id, not response_finished.is_set(), tool_calls_in_flight,
+                    )
 
         async def read_client() -> str:
+            nonlocal barge_in_count, barge_in_recorded_for_response
             try:
                 while True:
                     event = await websocket.receive_json()
@@ -889,7 +947,18 @@ class LiveCoachService:
                     )
                     if normalized is None:
                         continue
-                    touch()
+                    touch_client()
+                    if normalized["type"] == "session.input_audio.append":
+                        if assistant_audio_in_flight and not barge_in_recorded_for_response:
+                            barge_in_count += 1
+                            barge_in_recorded_for_response = True
+                            if barge_in_count <= 20:
+                                logger.info(
+                                    "live assistant response truncated by input audio: user_id=%s count=%d",
+                                    user_id, barge_in_count,
+                                )
+                        if not accepting_new_work:
+                            continue
                     await to_provider.put(normalized)
                     if normalized["type"] == "session.close":
                         return "close"
@@ -905,7 +974,9 @@ class LiveCoachService:
                     return
 
         async def read_provider() -> str:
-            nonlocal turn_started_at, turn_had_tool_call
+            nonlocal turn_started_at, turn_had_tool_call, tool_calls_in_flight
+            nonlocal assistant_audio_in_flight, provider_close_code
+            nonlocal provider_close_reason, barge_in_recorded_for_response
             try:
                 while True:
                     raw = await provider.recv()
@@ -914,7 +985,13 @@ class LiveCoachService:
                     event = json.loads(raw)
                     if not isinstance(event, Mapping):
                         continue
-                    touch()
+                    touch_provider()
+                    event_type = event.get("type")
+                    if event_type == "session.output_audio.delta":
+                        if not assistant_audio_in_flight:
+                            barge_in_recorded_for_response = False
+                        assistant_audio_in_flight = True
+                        response_finished.clear()
                     if event.get("type") == "session.delegation.created":
                         logger.info("Voice delegation created: user_id=%s", user_id)
                     if event.get("type") == "response.event":
@@ -923,7 +1000,11 @@ class LiveCoachService:
                         if inner_type == "response.created" and turn_started_at is None:
                             turn_started_at = time.monotonic()
                             turn_had_tool_call = False
+                            response_finished.clear()
                         elif inner_type in {"response.completed", "response.done"}:
+                            assistant_audio_in_flight = False
+                            barge_in_recorded_for_response = False
+                            response_finished.set()
                             logger.info(
                                 "Voice delegated turn completed: tool_call=%s",
                                 turn_had_tool_call,
@@ -947,14 +1028,19 @@ class LiveCoachService:
                         )
                         turn_started_at = None
                         turn_had_tool_call = True
-                        output = await dispatch_voice_tool_call(
-                            call_item,
-                            tool_handlers=self.tool_handlers,
-                            allowed_names=allowed_tool_names,
-                            report_activity=report_activity,
-                            delegation_ms=delegation_ms,
-                            defer_log_meal_done=True,
-                        )
+                        tool_calls_in_flight += 1
+                        response_finished.clear()
+                        try:
+                            output = await dispatch_voice_tool_call(
+                                call_item,
+                                tool_handlers=self.tool_handlers,
+                                allowed_names=allowed_tool_names,
+                                report_activity=report_activity,
+                                delegation_ms=delegation_ms,
+                                defer_log_meal_done=True,
+                            )
+                        finally:
+                            tool_calls_in_flight -= 1
                         if call_item.get("name") == "log_meal":
                             try:
                                 result = json.loads(output)
@@ -984,13 +1070,17 @@ class LiveCoachService:
                     if safe is not None:
                         await to_client.put(safe)
                     if event.get("type") == "session.closed":
-                        await put_terminal(to_client, None)
+                        provider_close_code = safe_close_code(event.get("code"))
+                        provider_close_reason = safe_close_reason(event.get("reason"))
                         return "closed"
-            except Exception:
+            except Exception as exc:
+                provider_close_code = safe_close_code(getattr(exc, "code", None))
+                provider_close_reason = safe_close_reason(getattr(exc, "reason", None))
                 await put_terminal(to_client, {
                     "type": "error",
-                    "code": "connection_lost",
-                    "message": "The voice coach connection was lost.",
+                    "code": "provider_error",
+                    "message": "The voice coach connection was lost. Reconnect to continue.",
+                    "retryable": True,
                 })
                 await put_terminal(to_client, None)
                 return "connection_lost"
@@ -1009,7 +1099,7 @@ class LiveCoachService:
         provider_writer = asyncio.create_task(write_provider())
         provider_reader = asyncio.create_task(read_provider())
         client_writer = asyncio.create_task(write_client())
-        duration = asyncio.create_task(asyncio.sleep(self.policy.max_duration))
+        duration = asyncio.create_task(wait_for_duration())
         idle = asyncio.create_task(wait_for_idle())
         supersede = (
             asyncio.create_task(session.superseded.wait())
@@ -1033,9 +1123,7 @@ class LiveCoachService:
         try:
             done, _ = await asyncio.wait(set(tasks), return_when=asyncio.FIRST_COMPLETED)
             if supersede is not None and supersede in done:
-                logger.info(
-                    "live bridge closing: user_id=%s reason=superseded", user_id
-                )
+                teardown_reason = "superseded"
                 await put_terminal(to_client, {
                     "type": "error",
                     "code": "superseded",
@@ -1043,6 +1131,7 @@ class LiveCoachService:
                 })
                 await put_terminal(to_provider, {"type": "session.close"})
             elif duration in done:
+                teardown_reason = "duration_limit"
                 await put_terminal(to_client, {
                     "type": "error",
                     "code": "duration_limit",
@@ -1050,13 +1139,29 @@ class LiveCoachService:
                 })
                 await put_terminal(to_provider, {"type": "session.close"})
             elif idle in done:
+                teardown_reason = "idle_timeout"
                 await put_terminal(to_client, {
                     "type": "error",
                     "code": "idle_timeout",
                     "message": "The voice session ended after being idle.",
                 })
                 await put_terminal(to_provider, {"type": "session.close"})
+            elif client_reader in done:
+                teardown_reason = "client_disconnect"
+                client_can_receive = client_reader.result() != "disconnect"
             elif provider_reader in done:
+                provider_result = provider_reader.result()
+                teardown_reason = (
+                    "provider_closed" if provider_result == "closed" else "provider_error"
+                )
+                if provider_result == "closed":
+                    await put_terminal(to_client, {
+                        "type": "error",
+                        "code": "provider_closed",
+                        "message": "The voice provider ended this session. Reconnect to continue.",
+                        "retryable": True,
+                    })
+                    await put_terminal(to_client, None)
                 try:
                     await asyncio.wait_for(
                         client_writer, timeout=self.policy.close_timeout
@@ -1064,16 +1169,16 @@ class LiveCoachService:
                 except TimeoutError:
                     pass
                 return
-            elif client_reader in done:
-                client_can_receive = client_reader.result() != "disconnect"
             elif provider_writer in done:
+                teardown_reason = "provider_error"
                 try:
                     provider_writer.result()
                 except Exception:
                     delivered = await put_terminal(to_client, {
                         "type": "error",
-                        "code": "connection_lost",
-                        "message": "The voice coach connection was lost.",
+                        "code": "provider_error",
+                        "message": "The voice coach connection was lost. Reconnect to continue.",
+                        "retryable": True,
                     })
                     delivered = await put_terminal(to_client, None) and delivered
                     if delivered:
@@ -1082,11 +1187,13 @@ class LiveCoachService:
                         )
                 return
             elif client_writer in done:
+                teardown_reason = "client_disconnect"
                 client_can_receive = False
                 await put_terminal(to_provider, {"type": "session.close"})
 
             await asyncio.wait_for(provider_writer, timeout=self.policy.close_timeout)
             await asyncio.wait_for(provider_reader, timeout=self.policy.close_timeout)
+            await put_terminal(to_client, None)
             await asyncio.wait_for(client_writer, timeout=self.policy.close_timeout)
         except TimeoutError:
             if client_can_receive:
@@ -1104,6 +1211,17 @@ class LiveCoachService:
                     pass
             return
         finally:
+            now = time.monotonic()
+            logger.info(
+                "live bridge teardown: user_id=%s reason=%s elapsed_seconds=%.3f "
+                "since_client_seconds=%.3f since_provider_seconds=%.3f "
+                "assistant_audio_in_flight=%s tool_calls_in_flight=%d "
+                "provider_close_code=%r provider_close_reason=%r barge_in_count=%d",
+                user_id, teardown_reason, now - session_started_at,
+                now - last_client_activity, now - last_provider_activity,
+                assistant_audio_in_flight, tool_calls_in_flight,
+                provider_close_code, provider_close_reason, barge_in_count,
+            )
             for task in tasks:
                 if not task.done():
                     task.cancel()

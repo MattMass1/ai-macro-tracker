@@ -22,6 +22,7 @@ from live_coach import (
     VOICE_TOOL_NAMES,
     LiveCoachService,
     LiveCoachPolicy,
+    LiveSession,
     LiveSessionGate,
     OPENAI_LIVE_URL,
     authenticate_live_websocket,
@@ -812,8 +813,9 @@ async def test_provider_writer_failure_ends_and_closes_session_within_close_time
         {"type": "session.started"},
         {
             "type": "error",
-            "code": "connection_lost",
-            "message": "The voice coach connection was lost.",
+            "code": "provider_error",
+            "message": "The voice coach connection was lost. Reconnect to continue.",
+            "retryable": True,
         },
     ]
     assert "private" not in json.dumps(socket.sent)
@@ -1513,8 +1515,254 @@ async def test_provider_expiration_is_forwarded_as_ended_session():
     assert socket.sent == [
         {"type": "session.started"},
         {"type": "session.closed", "reason": "expired"},
+        {
+            "type": "error",
+            "code": "provider_closed",
+            "message": "The voice provider ended this session. Reconnect to continue.",
+            "retryable": True,
+        },
     ]
     assert socket.closed == [(1000, "Voice session ended")]
+
+
+class _LifecycleProvider:
+    def __init__(self):
+        self.incoming = asyncio.Queue()
+        self.sent = []
+
+    async def send(self, text):
+        event = json.loads(text)
+        self.sent.append(event)
+        if event["type"] == "session.close":
+            await self.incoming.put(json.dumps({
+                "type": "session.closed", "reason": "close_requested"
+            }))
+
+    async def recv(self):
+        return await self.incoming.get()
+
+
+def _lifecycle_service(policy, tool_handlers=None):
+    return LiveCoachService(
+        store=None,
+        provider_connect=lambda *args, **kwargs: None,
+        api_key="unused",
+        policy=policy,
+        tool_handlers=tool_handlers,
+    )
+
+
+@pytest.mark.asyncio
+async def test_idle_survives_pure_provider_activity_past_timeout():
+    provider = _LifecycleProvider()
+    socket = FakeClientWebSocket()
+    service = _lifecycle_service(LiveCoachPolicy(
+        idle_timeout=0.025, max_duration=1, close_timeout=0.1
+    ))
+    task = asyncio.create_task(service._bridge(socket, provider))
+
+    for _ in range(4):
+        await provider.incoming.put(json.dumps({
+            "type": "session.output_transcript.delta", "delta": "active"
+        }))
+        await asyncio.sleep(0.015)
+
+    assert not task.done()
+    await socket.incoming.put({"type": "session.close"})
+    await asyncio.wait_for(task, 0.3)
+    assert not any(event.get("code") == "idle_timeout" for event in socket.sent)
+
+
+@pytest.mark.asyncio
+async def test_idle_survives_delegated_tool_call_in_flight():
+    release_tool = asyncio.Event()
+
+    async def slow_tool(call_id, arguments):
+        await release_tool.wait()
+        return {"status": "ok"}
+
+    provider = _LifecycleProvider()
+    socket = FakeClientWebSocket()
+    service = _lifecycle_service(
+        LiveCoachPolicy(idle_timeout=0.02, max_duration=1, close_timeout=0.1),
+        {"get_today": slow_tool},
+    )
+    task = asyncio.create_task(service._bridge(
+        socket, provider, frozenset({"get_today"})
+    ))
+    await provider.incoming.put(json.dumps({
+        "type": "response.event",
+        "event": {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call", "call_id": "safe-call",
+                "name": "get_today", "arguments": "{}",
+            },
+        },
+    }))
+    await asyncio.sleep(0.06)
+
+    assert not task.done()
+    release_tool.set()
+    await socket.incoming.put({"type": "session.close"})
+    await asyncio.wait_for(task, 0.3)
+    assert not any(event.get("code") == "idle_timeout" for event in socket.sent)
+
+
+@pytest.mark.asyncio
+async def test_idle_teardown_log_has_timings_and_never_payload_data(caplog):
+    provider = _LifecycleProvider()
+    socket = FakeClientWebSocket()
+    service = _lifecycle_service(LiveCoachPolicy(
+        idle_timeout=0.01, max_duration=1, close_timeout=0.1
+    ))
+
+    with caplog.at_level(logging.INFO, logger="live_coach"):
+        await service._bridge(socket, provider, user_id=uuid4())
+
+    teardown = [r.getMessage() for r in caplog.records if "live bridge teardown:" in r.getMessage()]
+    assert len(teardown) == 1
+    assert "reason=idle_timeout" in teardown[0]
+    assert "elapsed_seconds=" in teardown[0]
+    assert "since_client_seconds=" in teardown[0]
+    assert "since_provider_seconds=" in teardown[0]
+    assert "assistant_audio_in_flight=False" in teardown[0]
+    forbidden = ("private transcript", "secret meal", "AAABAA==", "secret-token")
+    assert all(value not in "\n".join(r.getMessage() for r in caplog.records) for value in forbidden)
+
+
+@pytest.mark.asyncio
+async def test_duration_waits_for_in_flight_response_and_logs_reason(caplog):
+    provider = _LifecycleProvider()
+    socket = FakeClientWebSocket()
+    service = _lifecycle_service(LiveCoachPolicy(
+        idle_timeout=1, max_duration=0.02, duration_warning=0,
+        duration_grace=0.2, close_timeout=0.1,
+    ))
+    with caplog.at_level(logging.INFO, logger="live_coach"):
+        task = asyncio.create_task(service._bridge(socket, provider, user_id=uuid4()))
+        await provider.incoming.put(json.dumps({
+            "type": "session.output_audio.delta", "delta": "AAABAA=="
+        }))
+        await asyncio.sleep(0.06)
+        assert not task.done()
+        assert not any(event["type"] == "session.close" for event in provider.sent)
+        await provider.incoming.put(json.dumps({
+            "type": "response.event", "event": {"type": "response.done"}
+        }))
+        await asyncio.wait_for(task, 0.3)
+
+    assert any(event.get("code") == "duration_limit" for event in socket.sent)
+    teardown = [r.getMessage() for r in caplog.records if "live bridge teardown:" in r.getMessage()]
+    assert len(teardown) == 1 and "reason=duration_limit" in teardown[0]
+    assert "assistant_audio_in_flight=False" in teardown[0]
+
+
+@pytest.mark.asyncio
+async def test_provider_close_is_retryable_and_logged_with_safe_close_fields(caplog):
+    provider = _LifecycleProvider()
+    socket = FakeClientWebSocket()
+    service = _lifecycle_service(LiveCoachPolicy(close_timeout=0.1))
+    await provider.incoming.put(json.dumps({
+        "type": "session.closed", "reason": "expired", "code": 1000,
+        "transcript": "private transcript", "token": "secret-token",
+    }))
+
+    with caplog.at_level(logging.INFO, logger="live_coach"):
+        await service._bridge(socket, provider, user_id=uuid4())
+
+    assert any(
+        event.get("code") == "provider_closed" and event.get("retryable") is True
+        for event in socket.sent
+    )
+    logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reason=provider_closed" in logs
+    assert "provider_close_code=1000" in logs
+    assert "provider_close_reason='expired'" in logs
+    assert "private transcript" not in logs
+    assert "secret-token" not in logs
+
+
+@pytest.mark.asyncio
+async def test_overlapping_input_audio_has_bounded_barge_in_counter_log(caplog):
+    provider = _LifecycleProvider()
+    socket = FakeClientWebSocket()
+    service = _lifecycle_service(LiveCoachPolicy(
+        idle_timeout=1, max_duration=1, close_timeout=0.1, queue_size=64
+    ))
+    with caplog.at_level(logging.INFO, logger="live_coach"):
+        task = asyncio.create_task(service._bridge(socket, provider, user_id=uuid4()))
+        await provider.incoming.put(json.dumps({
+            "type": "session.output_audio.delta", "delta": "AAABAA=="
+        }))
+        for _ in range(100):
+            if any(e.get("type") == "session.output_audio.delta" for e in socket.sent):
+                break
+            await asyncio.sleep(0.001)
+        assert any(e.get("type") == "session.output_audio.delta" for e in socket.sent)
+        for _ in range(25):
+            await socket.incoming.put({
+                "type": "session.input_audio.append", "audio": "AAABAA=="
+            })
+        for _ in range(100):
+            overlap_count = sum(
+                "truncated by input audio" in r.getMessage() for r in caplog.records
+            )
+            if len(provider.sent) == 25 and overlap_count == 1:
+                break
+            await asyncio.sleep(0.001)
+        assert len(provider.sent) == 25
+        await socket.incoming.put({"type": "session.close"})
+        await asyncio.wait_for(task, 0.3)
+
+    overlap_logs = [
+        r.getMessage() for r in caplog.records
+        if "truncated by input audio" in r.getMessage()
+    ]
+    assert len(overlap_logs) == 1
+    teardown = next(
+        r.getMessage() for r in caplog.records if "live bridge teardown:" in r.getMessage()
+    )
+    assert "barge_in_count=1" in teardown
+    assert "AAABAA==" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_remaining_teardown_branches_log_superseded_and_provider_error(caplog):
+    service = _lifecycle_service(LiveCoachPolicy(close_timeout=0.1))
+
+    superseded_provider = _LifecycleProvider()
+    superseded_session = LiveSession()
+    superseded_session.superseded.set()
+    with caplog.at_level(logging.INFO, logger="live_coach"):
+        await service._bridge(
+            FakeClientWebSocket(), superseded_provider,
+            user_id=uuid4(), session=superseded_session,
+        )
+    assert any(
+        "live bridge teardown:" in r.getMessage()
+        and "reason=superseded" in r.getMessage()
+        for r in caplog.records
+    )
+
+    class BrokenProvider(_LifecycleProvider):
+        async def recv(self):
+            raise ConnectionError("private transcript secret-token AAABAA==")
+
+    caplog.clear()
+    socket = FakeClientWebSocket()
+    with caplog.at_level(logging.INFO, logger="live_coach"):
+        await service._bridge(socket, BrokenProvider(), user_id=uuid4())
+    assert any(
+        event.get("code") == "provider_error"
+        and event.get("retryable") is True
+        for event in socket.sent
+    )
+    logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reason=provider_error" in logs
+    assert "private transcript" not in logs
+    assert "secret-token" not in logs
+    assert "AAABAA==" not in logs
 
 
 def test_production_asgi_app_mounts_unauthorized_live_websocket(monkeypatch):

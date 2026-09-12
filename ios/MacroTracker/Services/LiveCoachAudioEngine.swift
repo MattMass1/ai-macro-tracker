@@ -3,7 +3,7 @@ import Foundation
 
 enum LiveCoachPlaybackEnqueueResult: Equatable {
     case accepted(generation: Int, becameActive: Bool)
-    case flushed(generation: Int)
+    case droppedNewest(pendingCount: Int)
 }
 
 struct LiveCoachPlaybackQueueState {
@@ -17,9 +17,7 @@ struct LiveCoachPlaybackQueueState {
 
     mutating func enqueue() -> LiveCoachPlaybackEnqueueResult {
         if pendingCount >= capacity {
-            generation += 1
-            pendingCount = 1
-            return .flushed(generation: generation)
+            return .droppedNewest(pendingCount: pendingCount)
         }
         let becameActive = pendingCount == 0
         pendingCount += 1
@@ -94,6 +92,8 @@ final class LiveCoachAudioEngine: LiveCoachAudioHandling {
     private var lifecycleContinuation: AsyncStream<LiveCoachAudioLifecycleEvent>.Continuation
     private let muteState = LiveCoachMuteState()
     private var playbackQueue = LiveCoachPlaybackQueueState(capacity: 24)
+    private(set) var droppedPlaybackBufferCount = 0
+    private(set) var discardedPlaybackBufferCount = 0
     private var tapInstalled = false
     private var playerConnected = false
     private var notificationTokens: [NSObjectProtocol] = []
@@ -162,11 +162,14 @@ final class LiveCoachAudioEngine: LiveCoachAudioHandling {
         case .accepted(let currentGeneration, let becameActive):
             generation = currentGeneration
             if becameActive { playbackContinuation.yield(true) }
-        case .flushed(let currentGeneration):
-            generation = currentGeneration
-            player.stop()
-            playbackContinuation.yield(false)
-            playbackContinuation.yield(true)
+        case .droppedNewest(let pendingCount):
+            droppedPlaybackBufferCount += 1
+            NSLog(
+                "LiveCoach playback queue saturated; dropped newest buffer (pending=%d, dropped_total=%d)",
+                pendingCount,
+                droppedPlaybackBufferCount
+            )
+            return
         }
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             DispatchQueue.main.async {
@@ -277,6 +280,15 @@ final class LiveCoachAudioEngine: LiveCoachAudioHandling {
     }
 
     private func stopPlaybackForRouteSafety() {
+        let discardedCount = playbackQueue.pendingCount
+        if discardedCount > 0 {
+            discardedPlaybackBufferCount += discardedCount
+            NSLog(
+                "LiveCoach audio reconfiguration discarded scheduled buffers (pending=%d, discarded_total=%d)",
+                discardedCount,
+                discardedPlaybackBufferCount
+            )
+        }
         player.stop()
         playbackQueue.reset()
         playbackContinuation.yield(false)

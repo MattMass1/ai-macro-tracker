@@ -58,7 +58,6 @@ struct LiveCoachPresentation: Equatable {
 @MainActor
 struct LiveCoachView: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var store: AppStore
     @StateObject private var controller: LiveCoachController
 
@@ -108,11 +107,11 @@ struct LiveCoachView: View {
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbarColorScheme(.light, for: .navigationBar)
         }
-        .interactiveDismissDisabled(controller.state == .connecting)
-        .onDisappear { Task { await controller.end() } }
-        .onChange(of: scenePhase) { _, phase in
-            if phase != .active { Task { await controller.end() } }
-        }
+        .interactiveDismissDisabled(
+            controller.state == .connecting ||
+            controller.state == .listening ||
+            controller.state == .speaking
+        )
         .onChange(of: controller.committedMealOperationID) { _, operationID in
             if operationID != nil { Task { await store.loadDay() } }
         }

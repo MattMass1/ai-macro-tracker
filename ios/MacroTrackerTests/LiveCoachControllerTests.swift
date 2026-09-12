@@ -599,14 +599,14 @@ final class LiveCoachControllerTests: XCTestCase {
         XCTAssertEqual(LiveCoachPresentation(state: subject.state).primaryAction, "Reconnect")
     }
 
-    func testPlaybackQueueFlushesAtBoundAndIgnoresOldCompletions() {
+    func testPlaybackQueueDropsNewestAtBoundAndPreservesScheduledBuffers() {
         var queue = LiveCoachPlaybackQueueState(capacity: 2)
 
         XCTAssertEqual(queue.enqueue(), .accepted(generation: 0, becameActive: true))
         XCTAssertEqual(queue.enqueue(), .accepted(generation: 0, becameActive: false))
-        XCTAssertEqual(queue.enqueue(), .flushed(generation: 1))
+        XCTAssertEqual(queue.enqueue(), .droppedNewest(pendingCount: 2))
         XCTAssertFalse(queue.complete(generation: 0))
-        XCTAssertTrue(queue.complete(generation: 1))
+        XCTAssertTrue(queue.complete(generation: 0))
         XCTAssertEqual(queue.pendingCount, 0)
     }
 
@@ -737,7 +737,7 @@ final class LiveCoachControllerTests: XCTestCase {
         )))
     }
 
-    func testBenignStartupRouteChangeKeepsSessionOpen() async {
+    func testBenignStartupRouteChangeRecoversAndKeepsSessionOpen() async {
         let calls = CallRecorder()
         let transport = TransportStub(calls: calls)
         let audio = AudioStub(calls: calls)
@@ -758,6 +758,7 @@ final class LiveCoachControllerTests: XCTestCase {
         XCTAssertEqual(subject.state, .listening)
         XCTAssertEqual(audio.stopCount, 0)
         XCTAssertEqual(transport.closeCount, 0)
+        XCTAssertEqual(audio.recoveryCount, 1)
     }
 
     func testViableNewDeviceAndCategoryRoutesKeepSessionOpen() async {
@@ -784,17 +785,45 @@ final class LiveCoachControllerTests: XCTestCase {
 
             XCTAssertEqual(subject.state, .listening)
             XCTAssertEqual(transport.closeCount, 0)
+            XCTAssertEqual(audio.recoveryCount, 1)
             await subject.end()
         }
     }
 
-    func testRemovedDeviceMissingIOAndUnsafeReasonsEndSession() async {
+    func testUsableRemovedDeviceAndUnknownRoutesRecover() async {
+        for reason in [
+            LiveCoachAudioRouteChangeReason.oldDeviceUnavailable,
+            .noSuitableRouteForCategory,
+            .unknown,
+        ] {
+            let calls = CallRecorder()
+            let transport = TransportStub(calls: calls)
+            let audio = AudioStub(calls: calls)
+            let subject = LiveCoachController(
+                permission: PermissionStub(granted: true, calls: calls),
+                transport: transport,
+                audio: audio
+            )
+            await subject.start()
+
+            audio.emitLifecycle(.routeEvaluated(.init(
+                reason: reason,
+                hasInput: true,
+                hasOutput: true
+            )))
+            await drainTasks()
+
+            XCTAssertEqual(subject.state, .listening)
+            XCTAssertEqual(audio.recoveryCount, 1)
+            XCTAssertEqual(transport.closeCount, 0)
+            await subject.end()
+        }
+    }
+
+    func testMissingRouteIOFailsRetryablyInsteadOfEndingNormally() async {
         for change in [
-            LiveCoachAudioRouteChange(reason: .oldDeviceUnavailable, hasInput: true, hasOutput: true),
             LiveCoachAudioRouteChange(reason: .newDeviceAvailable, hasInput: false, hasOutput: true),
             LiveCoachAudioRouteChange(reason: .newDeviceAvailable, hasInput: true, hasOutput: false),
-            LiveCoachAudioRouteChange(reason: .noSuitableRouteForCategory, hasInput: true, hasOutput: true),
-            LiveCoachAudioRouteChange(reason: .unknown, hasInput: true, hasOutput: true),
         ] {
             let calls = CallRecorder()
             let transport = TransportStub(calls: calls)
@@ -809,7 +838,10 @@ final class LiveCoachControllerTests: XCTestCase {
             audio.emitLifecycle(.routeEvaluated(change))
             await drainTasks()
 
-            XCTAssertEqual(subject.state, .ended)
+            XCTAssertEqual(subject.state, .failed(
+                message: "The audio route is unavailable. Reconnect when audio is available.",
+                retryable: true
+            ))
             XCTAssertEqual(audio.stopCount, 1)
             XCTAssertEqual(transport.closeCount, 1)
         }
@@ -837,7 +869,31 @@ final class LiveCoachControllerTests: XCTestCase {
         await continuing.end()
     }
 
-    func testEngineConfigurationRecoveryFailureEndsSession() async {
+    func testRunningEngineConfigurationChangeDoesNotRebuildAgain() async {
+        let calls = CallRecorder()
+        let transport = TransportStub(calls: calls)
+        let audio = AudioStub(calls: calls)
+        let subject = LiveCoachController(
+            permission: PermissionStub(granted: true, calls: calls),
+            transport: transport,
+            audio: audio
+        )
+        await subject.start()
+
+        audio.emitLifecycle(.engineConfigurationChanged(
+            hasInput: true,
+            hasOutput: true,
+            engineRunning: true
+        ))
+        await drainTasks()
+
+        XCTAssertEqual(subject.state, .listening)
+        XCTAssertEqual(audio.recoveryCount, 0)
+        XCTAssertEqual(transport.closeCount, 0)
+        await subject.end()
+    }
+
+    func testEngineConfigurationRecoveryFailureIsRetryable() async {
         let endingCalls = CallRecorder()
         let endingTransport = TransportStub(calls: endingCalls)
         let endingAudio = AudioStub(calls: endingCalls)
@@ -854,12 +910,15 @@ final class LiveCoachControllerTests: XCTestCase {
             engineRunning: false
         ))
         await drainTasks()
-        XCTAssertEqual(ending.state, .ended)
+        XCTAssertEqual(ending.state, .failed(
+            message: "Voice audio stopped. Reconnect to continue.",
+            retryable: true
+        ))
         XCTAssertEqual(endingTransport.closeCount, 1)
         XCTAssertEqual(endingAudio.recoveryCount, 1)
     }
 
-    func testAudioInterruptionEndsMicrophoneAndSession() async {
+    func testAudioInterruptionStopsAudioAndOffersReconnect() async {
         let calls = CallRecorder()
         let transport = TransportStub(calls: calls)
         let audio = AudioStub(calls: calls)
@@ -873,7 +932,10 @@ final class LiveCoachControllerTests: XCTestCase {
         audio.emitLifecycle(.interrupted)
         await drainTasks()
 
-        XCTAssertEqual(subject.state, .ended)
+        XCTAssertEqual(subject.state, .failed(
+            message: "Voice audio was interrupted. Reconnect to continue.",
+            retryable: true
+        ))
         XCTAssertEqual(audio.stopCount, 1)
         XCTAssertEqual(transport.closeCount, 1)
     }

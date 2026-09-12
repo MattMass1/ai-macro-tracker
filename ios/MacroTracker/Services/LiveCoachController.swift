@@ -49,24 +49,6 @@ enum LiveCoachAudioLifecycleEvent: Equatable {
     case interrupted
     case routeEvaluated(LiveCoachAudioRouteChange)
     case engineConfigurationChanged(hasInput: Bool, hasOutput: Bool, engineRunning: Bool)
-
-    var requiresSessionEnd: Bool {
-        switch self {
-        case .interrupted:
-            return true
-        case .routeEvaluated(let change):
-            guard change.hasInput, change.hasOutput else { return true }
-            switch change.reason {
-            case .newDeviceAvailable, .categoryChange, .override,
-                 .wakeFromSleep, .routeConfigurationChange:
-                return false
-            case .oldDeviceUnavailable, .noSuitableRouteForCategory, .unknown:
-                return true
-            }
-        case .engineConfigurationChanged(let hasInput, let hasOutput, _):
-            return !hasInput || !hasOutput
-        }
-    }
 }
 
 struct LiveCoachConnectionError: Error, Equatable {
@@ -308,20 +290,51 @@ final class LiveCoachController: ObservableObject {
                 for await event in audio.lifecycleEvents {
                     guard !Task.isCancelled else { return }
                     guard self?.sessionGeneration == generation else { return }
-                    if case .engineConfigurationChanged(let hasInput, let hasOutput, _) = event,
-                       hasInput, hasOutput {
+                    switch event {
+                    case .routeEvaluated(let change):
+                        guard change.hasInput, change.hasOutput else {
+                            self?.failCurrentSession(
+                                message: "The audio route is unavailable. Reconnect when audio is available.",
+                                retryable: true
+                            )
+                            return
+                        }
                         do {
                             try audio.recoverFromConfigurationChange()
                             continue
                         } catch {
-                            // A viable route is not enough if its rebuilt graph cannot start.
-                            await self?.end()
+                            self?.failCurrentSession(
+                                message: "Voice audio stopped. Reconnect to continue.",
+                                retryable: true
+                            )
                             return
                         }
+                    case .engineConfigurationChanged(let hasInput, let hasOutput, let engineRunning):
+                        guard hasInput, hasOutput else {
+                            self?.failCurrentSession(
+                                message: "The audio route is unavailable. Reconnect when audio is available.",
+                                retryable: true
+                            )
+                            return
+                        }
+                        guard !engineRunning else { continue }
+                        do {
+                            try audio.recoverFromConfigurationChange()
+                            continue
+                        } catch {
+                            self?.failCurrentSession(
+                                message: "Voice audio stopped. Reconnect to continue.",
+                                retryable: true
+                            )
+                            return
+                        }
+                    case .interrupted:
+                        self?.failCurrentSession(
+                            message: "Voice audio was interrupted. Reconnect to continue.",
+                            retryable: true
+                        )
+                        return
                     }
-                    guard event.requiresSessionEnd else { continue }
-                    await self?.end()
-                    return
                 }
             },
         ]

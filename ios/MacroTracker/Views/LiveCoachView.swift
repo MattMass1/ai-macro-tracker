@@ -73,9 +73,10 @@ struct LiveCoachView: View {
                 ScrollView {
                     VStack(spacing: 20) {
                         statusCard(presentation)
+                        activityChip
                         captions
                         controls(presentation)
-                        Text("Voice coaching is read-only. Use typed Coach to log or change anything.")
+                        Text("You can ask the coach to log meals. It will confirm what it logged.")
                             .font(.footnote)
                             .foregroundStyle(Theme.muted)
                             .multilineTextAlignment(.center)
@@ -153,6 +154,40 @@ struct LiveCoachView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .appCard()
+    }
+
+    @ViewBuilder
+    private var activityChip: some View {
+        if let activityState = controller.activityState, !controller.activityLabel.isEmpty {
+            HStack(spacing: 8) {
+                Image(systemName: activityIcon(activityState))
+                    .font(.footnote.weight(.semibold))
+                    .symbolEffect(.pulse, isActive: activityState == .resolving || activityState == .logging)
+                Text(controller.activityLabel)
+                    .font(.footnote.weight(.medium))
+                    .lineLimit(2)
+            }
+            .foregroundStyle(activityColor(activityState))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(activityColor(activityState).opacity(0.1), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .transition(.opacity)
+            .animation(.easeInOut(duration: 0.2), value: controller.activityState)
+        }
+    }
+
+    private func activityIcon(_ activityState: LiveCoachActivityState) -> String {
+        switch activityState {
+        case .resolving: return "arrow.triangle.2.circlepath"
+        case .logging: return "square.and.pencil"
+        case .done: return "checkmark.circle.fill"
+        case .error: return "exclamationmark.circle.fill"
+        }
+    }
+
+    private func activityColor(_ activityState: LiveCoachActivityState) -> Color {
+        activityState == .error ? Theme.danger : Theme.accent
     }
 
     @ViewBuilder

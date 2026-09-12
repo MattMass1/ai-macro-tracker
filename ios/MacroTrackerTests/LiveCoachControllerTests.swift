@@ -138,6 +138,95 @@ final class LiveCoachControllerTests: XCTestCase {
         XCTAssertEqual(transport.closeCount, 1)
     }
 
+    func testEndImmediatelyStopsLocallyAndShowsEndedWhileRemoteCloseStalls() async {
+        let calls = CallRecorder()
+        let transport = TransportStub(calls: calls)
+        transport.suspendClose = true
+        let audio = AudioStub(calls: calls)
+        let subject = LiveCoachController(
+            permission: PermissionStub(granted: true, calls: calls),
+            transport: transport,
+            audio: audio
+        )
+        await subject.start()
+
+        let end = Task { await subject.end() }
+        for _ in 0..<100 where !transport.isClosePending {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(subject.state, .ended)
+        XCTAssertEqual(audio.stopCount, 1)
+        XCTAssertTrue(transport.isClosePending)
+
+        transport.completeClose()
+        await end.value
+    }
+
+    func testStaleEventsCannotResurrectSessionWhileRemoteCloseStalls() async {
+        let calls = CallRecorder()
+        let transport = TransportStub(calls: calls)
+        transport.suspendClose = true
+        let audio = AudioStub(calls: calls)
+        let subject = LiveCoachController(
+            permission: PermissionStub(granted: true, calls: calls),
+            transport: transport,
+            audio: audio
+        )
+        await subject.start()
+
+        let end = Task { await subject.end() }
+        for _ in 0..<100 where !transport.isClosePending {
+            await Task.yield()
+        }
+        transport.emit(.outputTranscript("stale"))
+        transport.emit(.outputAudio(Data([0, 0])))
+        audio.emitPlayback(true)
+        await drainTasks()
+
+        XCTAssertEqual(subject.state, .ended)
+        XCTAssertEqual(subject.coachCaption, "")
+        XCTAssertTrue(audio.played.isEmpty)
+
+        transport.completeClose()
+        await end.value
+    }
+
+    func testStartAfterCompletedEndOpensFreshSession() async {
+        let calls = CallRecorder()
+        let transport = TransportStub(calls: calls)
+        let subject = LiveCoachController(
+            permission: PermissionStub(granted: true, calls: calls),
+            transport: transport,
+            audio: AudioStub(calls: calls)
+        )
+
+        await subject.start()
+        await subject.end()
+        await subject.start()
+
+        XCTAssertEqual(subject.state, .listening)
+        XCTAssertEqual(calls.values.filter { $0 == "connect" }.count, 2)
+        XCTAssertEqual(transport.closeCount, 1)
+    }
+
+    func testCloseDeadlineReturnsWhenOperationNeverCompletes() async {
+        let operation = Task<Void, Never> {
+            try? await Task.sleep(for: .seconds(60))
+        }
+        let clock = ContinuousClock()
+        let started = clock.now
+
+        let completed = await LiveCoachCloseDeadline.wait(
+            for: operation,
+            timeout: .milliseconds(20)
+        )
+
+        XCTAssertFalse(completed)
+        XCTAssertLessThan(started.duration(to: clock.now), .seconds(1))
+        operation.cancel()
+    }
+
     func testConcurrentEndCallsShareCleanupBeforeReconnect() async {
         let calls = CallRecorder()
         let transport = TransportStub(calls: calls)

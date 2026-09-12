@@ -35,6 +35,11 @@ enum LiveCoachWireCodec {
             return .inputMuted(true)
         case "session.input_audio.unmuted":
             return .inputMuted(false)
+        case "coach.activity":
+            guard let stateRaw = object["state"] as? String,
+                  let activityState = LiveCoachActivityState(rawValue: stateRaw),
+                  let label = object["label"] as? String else { return nil }
+            return .activity(state: activityState, label: String(label.prefix(160)))
         case "session.closed":
             let allowed = ["close_requested", "expired", "content", "remote_hangup", "connection_lost", "ended"]
             let reason = object["reason"] as? String
@@ -77,6 +82,42 @@ enum LiveCoachWireCodec {
         let data = try JSONSerialization.data(withJSONObject: event)
         guard data.count <= maximumEventBytes else { throw LiveCoachWireError.invalidEvent }
         return data
+    }
+}
+
+actor LiveCoachCloseRace {
+    private var result: Bool?
+    private var waiters: [CheckedContinuation<Bool, Never>] = []
+
+    func resolve(_ result: Bool) {
+        guard self.result == nil else { return }
+        self.result = result
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume(returning: result) }
+    }
+
+    func value() async -> Bool {
+        if let result { return result }
+        return await withCheckedContinuation { waiters.append($0) }
+    }
+}
+
+enum LiveCoachCloseDeadline {
+    static func wait<Success>(
+        for operation: Task<Success, Never>,
+        timeout: Duration
+    ) async -> Bool {
+        let race = LiveCoachCloseRace()
+        Task {
+            _ = await operation.value
+            await race.resolve(true)
+        }
+        Task {
+            try? await Task.sleep(for: timeout)
+            await race.resolve(false)
+        }
+        return await race.value()
     }
 }
 
@@ -220,16 +261,22 @@ final class LiveCoachWebSocketTransport: NSObject, LiveCoachTransporting {
 
     func close() async {
         guard let socket else { return }
-        do {
-            let event = try LiveCoachWireCodec.encodeClose()
-            try await socket.send(.string(String(decoding: event, as: UTF8.self)))
-            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        let event = try? LiveCoachWireCodec.encodeClose()
+        let sendTask = Task {
+            guard let event else { return }
+            try? await socket.send(.string(String(decoding: event, as: UTF8.self)))
+        }
+        let sendFinished = await LiveCoachCloseDeadline.wait(
+            for: sendTask,
+            timeout: .milliseconds(500)
+        )
+        if sendFinished {
+            let deadline = ContinuousClock.now.advanced(by: .milliseconds(1_500))
             while !receivedClosed && ContinuousClock.now < deadline {
                 try? await Task.sleep(for: .milliseconds(25))
             }
-        } catch {
-            // The server may already be gone. Transport cancellation still follows.
         }
+        sendTask.cancel()
         cleanUpSocket()
     }
 

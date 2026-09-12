@@ -15,8 +15,16 @@ enum LiveCoachServerEvent: Equatable {
     case outputTranscript(String)
     case outputAudio(Data)
     case inputMuted(Bool)
+    case activity(state: LiveCoachActivityState, label: String)
     case closed(reason: String)
     case failure(code: String, message: String)
+}
+
+enum LiveCoachActivityState: String, Equatable {
+    case resolving
+    case logging
+    case done
+    case error
 }
 
 enum LiveCoachAudioRouteChangeReason: Equatable {
@@ -97,12 +105,15 @@ final class LiveCoachController: ObservableObject {
     @Published private(set) var isMuted = false
     @Published private(set) var userCaption = ""
     @Published private(set) var coachCaption = ""
+    @Published private(set) var activityState: LiveCoachActivityState?
+    @Published private(set) var activityLabel = ""
 
     private let permission: LiveCoachPermissionChecking
     private let transport: LiveCoachTransporting
     private let audio: LiveCoachAudioHandling
     private var sessionGeneration = UUID()
     private var sessionTasks: [Task<Void, Never>] = []
+    private var activityClearTask: Task<Void, Never>?
     private var closeTask: Task<Void, Never>?
     private var endTask: Task<Void, Never>?
     private var endTaskID: UUID?
@@ -144,6 +155,7 @@ final class LiveCoachController: ObservableObject {
         isMuted = false
         userCaption = ""
         coachCaption = ""
+        clearActivity()
 
         let pendingClose = closeTask
         closeTask = nil
@@ -227,11 +239,14 @@ final class LiveCoachController: ObservableObject {
         let hadTransport = transportIsOpen
         sessionGeneration = UUID()
         guard hadTransport || audioIsRunning || !sessionTasks.isEmpty || pendingClose != nil else {
+            clearActivity()
             state = .ended
             return
         }
         stopLocalSession()
         transportIsOpen = false
+        clearActivity()
+        state = .ended
         let taskID = UUID()
         endTaskID = taskID
         let task = Task { [weak self, transport] in
@@ -244,7 +259,6 @@ final class LiveCoachController: ObservableObject {
             guard let self, self.endTaskID == taskID else { return }
             self.endTask = nil
             self.endTaskID = nil
-            self.state = .ended
         }
         endTask = task
         await task.value
@@ -327,6 +341,8 @@ final class LiveCoachController: ObservableObject {
         case .inputMuted(let muted):
             isMuted = muted
             audio.setMuted(muted)
+        case .activity(let activityState, let label):
+            updateActivity(activityState, label: label, generation: generation)
         case .closed:
             finishRemoteSession(generation: generation)
         case .failure(let code, let message):
@@ -336,6 +352,31 @@ final class LiveCoachController: ObservableObject {
                 retryable: !terminalCodes.contains(code)
             )
         }
+    }
+
+    private func updateActivity(_ activityState: LiveCoachActivityState, label: String, generation: UUID) {
+        activityClearTask?.cancel()
+        self.activityState = activityState
+        activityLabel = label
+        switch activityState {
+        case .resolving, .logging:
+            activityClearTask = nil
+        case .done, .error:
+            activityClearTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled else { return }
+                guard self?.sessionGeneration == generation else { return }
+                self?.activityState = nil
+                self?.activityLabel = ""
+            }
+        }
+    }
+
+    private func clearActivity() {
+        activityClearTask?.cancel()
+        activityClearTask = nil
+        activityState = nil
+        activityLabel = ""
     }
 
     private func handlePlayback(active: Bool, generation: UUID) {
@@ -357,6 +398,7 @@ final class LiveCoachController: ObservableObject {
         transportIsOpen = false
         sessionGeneration = UUID()
         stopLocalSession()
+        clearActivity()
         state = .failed(
             message: message,
             retryable: retryable,
@@ -372,6 +414,7 @@ final class LiveCoachController: ObservableObject {
         sessionGeneration = UUID()
         transportIsOpen = false
         stopLocalSession()
+        clearActivity()
         state = .ended
     }
 

@@ -22,6 +22,7 @@ from contextlib import asynccontextmanager
 from datetime import date as _date, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
+from uuid import uuid4
 
 import httpx  # noqa: E402
 
@@ -849,14 +850,13 @@ async def _voice_meal_response(conn, user_id, row) -> dict[str, Any]:
         "SELECT calories,protein,carbs,fat,fiber FROM days WHERE user_id=$1 AND date=$2",
         user_id, row["day"],
     )
-    day_total = ({key: float(day_row[key]) for key in domain.MACRO_KEYS} if day_row
-                 else {key: float(logged[key]) for key in domain.MACRO_KEYS})
     logged_with_source = {**logged, "macro_source": row["macro_source"]}
-    return {
-        "logged": logged_with_source,
-        "day_total": day_total,
-        "confirmation": _voice_confirmation_sentence(logged_with_source, day_total),
-    }
+    result = {"logged": logged_with_source}
+    if day_row:
+        result["day_total"] = {
+            key: float(day_row[key]) for key in domain.MACRO_KEYS
+        }
+    return result
 
 
 KNOWN_CHAT_FOODS = """Moe's cookie 170 kcal, 2g protein, 23g carbs, 8g fat
@@ -2501,32 +2501,167 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
     dropped socket cannot double-log the same entry.
     """
     base = _coach_tool_handlers()
+    resolution_cache: dict[str, tuple[Any, str, dict[str, Any]]] = {}
 
-    def _zero_if_null(args: Mapping[str, Any], key: str) -> Any:
-        """A macro that can legitimately be zero: JSON null means absent, not invalid."""
-        value = args.get(key)
-        return 0 if value is None else value
+    async def resolve_component(component: Mapping[str, Any]) -> dict[str, Any] | None:
+        description = domain.validate_name(str(component.get("description") or ""))
+        portion = " ".join(str(component.get("portion") or "").split())
+        grams = component.get("grams")
+        quantity = component.get("quantity")
+        query = f"{portion} {description}".strip() if portion else description
+        resolution_ref = str(component.get("resolution_ref") or "")
+        cached = resolution_cache.get(resolution_ref) if resolution_ref else None
+        found = (cached[2] if cached is not None
+                 and cached[0] == current_user_id()
+                 and food_lookup.normalize_food_name(cached[1]) == food_lookup.normalize_food_name(query)
+                 else None)
+        if resolution_ref and found is None:
+            return None
+        if found is None:
+            found = await resolve_food(query)
+        if not found or "UNRESOLVED:" in str(found.get("source") or ""):
+            return None
+        if grams is not None:
+            portioned = food_lookup.portion_from_grams(found, grams)
+        else:
+            portioned = food_lookup.portion_from_serving(found)
+        if portioned is None:
+            return None
+        macros, source = portioned
+        if quantity is not None:
+            try:
+                count = float(quantity)
+            except (TypeError, ValueError):
+                return None
+            if not 0 < count <= 100:
+                return None
+            macros = {
+                key: round(float(macros.get(key, 0)) * count, 2)
+                for key in domain.MACRO_KEYS
+            }
+            source = f"{source} x{count:g}"
+        return {"name": query, "macro_source": source, **macros}
 
     async def voice_log_meal_tool(call_id: str, args: Mapping[str, Any]) -> Any:
-        values = _validated_meal_values(
-            str(args.get("name", "")), args.get("calories"),
-            _zero_if_null(args, "protein"), _zero_if_null(args, "carbs"),
-            _zero_if_null(args, "fat"), _zero_if_null(args, "fiber"),
-            str(args.get("macro_source") or ""), args.get("meal_type"), None,
-        )
+        operation_id = "voice-" + hashlib.sha256(
+            f"{current_user_id()}:{call_id}".encode()
+        ).hexdigest()[:24]
+        raw_components = args.get("components")
+        if isinstance(raw_components, list) and raw_components:
+            components = [item for item in raw_components if isinstance(item, Mapping)]
+            if len(components) != len(raw_components) or len(components) > 12:
+                return {"status": "failed", "operation_id": operation_id,
+                        "confirmation": "I couldn't read every food component."}
+        else:
+            description = str(args.get("description") or "").strip()
+            if not description:
+                return {"status": "needs_clarification", "operation_id": operation_id,
+                        "question": "What food and portion should I log?",
+                        "confirmation": "What food and portion should I log?"}
+            components = [{"description": description}]
+
+        semaphore = asyncio.Semaphore(4)
+
+        async def bounded(component: Mapping[str, Any]) -> dict[str, Any] | None:
+            async with semaphore:
+                try:
+                    return await resolve_component(component)
+                except Exception as exc:
+                    logger.warning(
+                        "Voice food resolution failed: operation_id=%s error_type=%s",
+                        operation_id, type(exc).__name__,
+                    )
+                    return None
+
+        resolved = await asyncio.gather(*(bounded(component) for component in components))
+        unresolved = [str(component.get("description") or "food")
+                      for component, result in zip(components, resolved) if result is None]
+        if unresolved:
+            question = f"I couldn't verify {unresolved[0]}. What exact food or label should I use?"
+            return {"status": "needs_clarification", "operation_id": operation_id,
+                    "question": question, "confirmation": question}
+        resolved_components = [item for item in resolved if item is not None]
+        name = " + ".join(item["name"] for item in resolved_components)
+        totals = {key: round(sum(float(item[key]) for item in resolved_components), 2)
+                  for key in domain.MACRO_KEYS}
+        source = (resolved_components[0]["macro_source"] if len(resolved_components) == 1
+                  else "Composite: " + "; ".join(item["macro_source"] for item in resolved_components))
+        try:
+            values = _validated_meal_values(
+                name, *(totals[key] for key in domain.MACRO_KEYS), source,
+                args.get("meal_type"), None,
+            )
+        except (MacroError, TypeError, ValueError) as exc:
+            return {"status": "failed", "operation_id": operation_id,
+                    "confirmation": str(exc)}
         request_hash = hashlib.sha256(json.dumps(
             {**values, "day": values["day"].isoformat()}, sort_keys=True,
             separators=(",", ":"), default=str).encode()).hexdigest()
-        return await store_client().insert_meal_idempotent(
-            f"voice-log-meal:{call_id}", request_hash,
-            response_builder=_voice_meal_response, origin="voice", **values,
-        )
+        try:
+            stored = await store_client().insert_meal_idempotent(
+                f"voice-log-meal:{call_id}", request_hash,
+                response_builder=_voice_meal_response, origin="voice",
+                replay_marker=True,
+                component_metadata=resolved_components, **values,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Voice meal write outcome uncertain: operation_id=%s error_type=%s",
+                operation_id, type(exc).__name__,
+            )
+            return {
+                "status": "unknown", "operation_id": operation_id,
+                "confirmation": "The save outcome is not verified yet. Check Today before trying again.",
+            }
+        replayed = bool(stored.pop("_operation_replayed", False))
+        try:
+            meals, day_rollups = await asyncio.gather(
+                store_client().fetch_meals(values["day"]),
+                store_client().fetch_day_rollups(values["day"], values["day"]),
+            )
+            logged = next((row for row in meals if str(row.get("id")) == str(stored["logged"]["id"])), None)
+            day_row = next((row for row in day_rollups
+                            if str(row.get("date")) == values["day"].isoformat()), None)
+            if logged is None or day_row is None:
+                raise LookupError("committed write readback was incomplete")
+            logged_with_source = {**stored["logged"], "macro_source": source}
+            day_total = {key: float(day_row.get(key) or 0) for key in domain.MACRO_KEYS}
+        except Exception as exc:
+            logger.warning(
+                "Voice meal outcome unverified: operation_id=%s error_type=%s",
+                operation_id, type(exc).__name__,
+            )
+            return {
+                "status": "unknown", "operation_id": operation_id,
+                "confirmation": "The save outcome is not verified yet. Check Today before trying again.",
+            }
+        return {
+            "status": "replayed" if replayed else "committed",
+            "operation_id": operation_id,
+            "logged": logged_with_source,
+            "day_total": day_total,
+            "confirmation": _voice_confirmation_sentence(logged_with_source, day_total),
+        }
 
     async def voice_get_today_tool(_call_id: str, args: Mapping[str, Any]) -> Any:
         return await base["get_today"](args)
 
     async def voice_lookup_food_tool(_call_id: str, args: Mapping[str, Any]) -> Any:
-        return await base["lookup_food"](args)
+        current_user_id()
+        found = await resolve_food(str(args.get("query") or ""))
+        if not found or "UNRESOLVED:" in str(found.get("source") or ""):
+            return {
+                "result": "not found",
+                "status": "needs_clarification",
+                "question": "What exact food or nutrition label should I use?",
+            }
+        resolution_ref = uuid4().hex
+        if len(resolution_cache) >= 128:
+            resolution_cache.pop(next(iter(resolution_cache)))
+        resolution_cache[resolution_ref] = (
+            current_user_id(), str(args.get("query") or ""), dict(found)
+        )
+        return {**found, "resolution_ref": resolution_ref}
 
     async def voice_undo_tool(_call_id: str, args: Mapping[str, Any]) -> Any:
         return await base["undo_last_meal"](args)

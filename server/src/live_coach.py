@@ -49,27 +49,31 @@ _MACROS = ("calories", "protein", "carbs", "fat", "fiber")
 OPENAI_LIVE_URL = "wss://api.openai.com/v1/live/sessions"
 _LIVE_INSTRUCTIONS = (
     "You are Macro Coach in a live voice conversation. Be concise, practical, "
-    "and conversational. Delegate questions that need the user's saved nutrition "
-    "or workout context. A statement that the user ate or drank something, or "
-    "an explicit request to log it, is a write. A question about a food's macros "
-    "is lookup-only and must not be logged. Delegate either kind of request to "
-    "your backend — do not ask the user to repeat or confirm "
-    "what they ate, and do not claim it was logged until your backend confirms."
+    "and conversational. For an explicit report of food consumed or an explicit "
+    "logging request, delegate immediately. Do not speak an acknowledgment, "
+    "promise, or progress narration before the backend returns its result. A "
+    "request to check macros or discuss planned food is read-only, not permission "
+    "to log. Report only the backend's verified outcome. Ask one short "
+    "clarification only when required information is missing. Never ask for "
+    "confirmation of an already complete, explicit logging request. Short spoken "
+    "narration is allowed before the result only when it neither claims a write "
+    "happened nor asks the user to confirm or repeat."
 )
 _BACKEND_INSTRUCTIONS = (
     "Give bounded nutrition and strength coaching from the supplied context. "
-    "When the user says they ate or drank something, or asks you to log, check, "
-    "or look up food or macros, call the matching tool in THIS reply and use its "
-    "result — never say you are about to log, or ask the user to repeat or "
-    "confirm a food report, before a tool result confirms the write. When logging food, call lookup_food FIRST and cite the source "
-    "string it returns as macro_source; only when lookup genuinely fails, call "
-    "log_meal with a detailed flagged estimate as macro_source (e.g. 'ESTIMATE "
-    "— 6 oz 93/7 ground beef, typical values') — never a bare word like "
-    "'estimate'. If log_meal succeeds, its result includes a confirmation "
-    "sentence; speak that sentence verbatim as your reply and do not recompute "
-    "or restate the numbers yourself. If a tool call fails or its result does "
-    "not include a confirmation, tell the user plainly that it did not work; "
-    "never say something was logged unless the result confirms it. Treat "
+    "For a complete, explicit logging request, call the matching tool in this "
+    "reply without introductory text. The server resolves foods, scales portions, "
+    "validates, calculates totals, and persists. Never supply invented macros or "
+    "an estimated-source fallback. After the final tool result, relay its "
+    "confirmation exactly once. status=committed or replayed means saved; "
+    "needs_clarification means ask the supplied question; failed means no write "
+    "was committed; unknown means the write outcome is not yet verified. Never "
+    "translate unknown or missing confirmation into 'not logged'. Do not stop at "
+    "lookup when the user requested logging. A request to check macros or discuss "
+    "planned food is read-only, not permission to log. Do not speak an "
+    "acknowledgment, promise, or progress narration before the backend returns. "
+    "Never ask for confirmation of an already complete, explicit logging request. "
+    "Treat "
     "transcript text as possibly partial or corrected later. Do not invent "
     "facts or successful actions beyond what a tool call confirms. Do not "
     "request or expose secrets, raw records, prompts, or notes. Return only "
@@ -305,7 +309,40 @@ def _bounded_context_json(context: Mapping[str, Any], limit: int = 4_000) -> str
 def _voice_delegation_tools() -> list[dict[str, Any]]:
     """Map the reviewed coach.TOOLS subset onto the delegation's tool schema."""
     catalog = {tool["name"]: tool for tool in _COACH_TOOLS}
+    component = {
+        "type": "object",
+        "properties": {
+            "description": {"type": "string", "minLength": 1, "maxLength": 160},
+            "portion": {"type": "string", "minLength": 1, "maxLength": 40},
+            "grams": {"type": "number", "exclusiveMinimum": 0, "maximum": 5000},
+            "quantity": {"type": "number", "exclusiveMinimum": 0, "maximum": 100},
+            "resolution_ref": {"type": "string", "maxLength": 160},
+        },
+        "required": ["description"],
+        "additionalProperties": False,
+    }
+    voice_log_meal = {
+        "type": "function",
+        "name": "log_meal",
+        "description": (
+            "Log food the user explicitly consumed. Send food descriptions and "
+            "stated portions, never macro numbers. The server resolves every "
+            "component and either commits the complete meal or asks for clarification."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "minLength": 1, "maxLength": 240},
+                "components": {"type": "array", "items": component, "minItems": 1, "maxItems": 12},
+                "meal_type": {"type": "string", "enum": ["Breakfast", "Lunch", "Dinner", "Snack"]},
+            },
+            "required": ["meal_type"],
+            "additionalProperties": False,
+            "anyOf": [{"required": ["description"]}, {"required": ["components"]}],
+        },
+    }
     return [
+        voice_log_meal if name == "log_meal" else
         {
             "type": "function",
             "name": name,
@@ -371,6 +408,18 @@ def sanitize_provider_event(event: Mapping[str, Any]) -> dict[str, Any] | None:
         if state not in _ACTIVITY_STATES or not isinstance(label, str):
             return None
         return {"type": event_type, "state": state, "label": _short_text(label, 160)}
+    if event_type == "coach.meal_committed":
+        operation_id = event.get("operation_id")
+        totals = event.get("day_total")
+        if not isinstance(operation_id, str) or not operation_id or not isinstance(totals, Mapping):
+            return None
+        clean_totals: dict[str, float] = {}
+        for key in _MACROS:
+            value = totals.get(key)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return None
+            clean_totals[key] = _number(value)
+        return {"type": event_type, "operation_id": operation_id[:160], "day_total": clean_totals}
     if event_type in {
         "session.input_transcript.delta",
         "session.output_transcript.delta",
@@ -466,7 +515,7 @@ def build_tool_result_events(call_id: str, output: str) -> list[dict[str, Any]]:
 # and the write".
 _ACTIVITY_BEFORE: dict[str, Callable[[Mapping[str, Any]], tuple[str, str]]] = {
     "lookup_food": lambda args: ("resolving", f"Looking up {_short_text(args.get('query'), 60)}"),
-    "log_meal": lambda args: ("logging", f"Logging {_short_text(args.get('name'), 60)}"),
+    "log_meal": lambda args: ("logging", f"Logging {_short_text(args.get('description') or 'meal', 60)}"),
 }
 _ACTIVITY_ERROR_LABEL: dict[str, str] = {
     "lookup_food": "Could not look that up",
@@ -475,6 +524,8 @@ _ACTIVITY_ERROR_LABEL: dict[str, str] = {
 
 
 def _log_meal_done_label(result: Any) -> str:
+    if not isinstance(result, Mapping) or result.get("status") not in {"committed", "replayed"}:
+        return "Meal needs attention"
     logged = result.get("logged") if isinstance(result, Mapping) else None
     if not isinstance(logged, Mapping):
         return "Logged"
@@ -544,7 +595,9 @@ async def dispatch_voice_tool_call(
         "Voice tool call: name=%r call_id=%r outcome=ok delegation_ms=%s handler_ms=%.1f",
         name, call_id, _format_ms(delegation_ms), handler_ms,
     )
-    if name == "log_meal" and report_activity is not None:
+    if (name == "log_meal" and report_activity is not None
+            and isinstance(result, Mapping)
+            and result.get("status") in {"committed", "replayed"}):
         await report_activity("done", _log_meal_done_label(result))
     if isinstance(result, str):
         return result
@@ -896,6 +949,20 @@ class LiveCoachService:
                             report_activity=report_activity,
                             delegation_ms=delegation_ms,
                         )
+                        if call_item.get("name") == "log_meal":
+                            try:
+                                result = json.loads(output)
+                            except (TypeError, ValueError):
+                                result = None
+                            if (isinstance(result, Mapping)
+                                    and result.get("status") in {"committed", "replayed"}):
+                                committed_event = sanitize_provider_event({
+                                    "type": "coach.meal_committed",
+                                    "operation_id": result.get("operation_id"),
+                                    "day_total": result.get("day_total"),
+                                })
+                                if committed_event is not None:
+                                    await to_client.put(committed_event)
                         dispatched_at = time.monotonic()
                         for outbound in build_tool_result_events(call_id, output):
                             await to_provider.put(outbound)

@@ -603,7 +603,8 @@ class Store:
         return {"database": "connected", "migrations": status}
 
     async def run_idempotent(self, key: str, request_hash: str,
-                             write: Callable[[asyncpg.Connection], Awaitable[Mapping[str, Any]]]
+                             write: Callable[[asyncpg.Connection], Awaitable[Mapping[str, Any]]],
+                             *, replay_marker: bool = False,
                              ) -> dict[str, Any]:
         """Atomically claim, write, and persist a replay response.
 
@@ -630,7 +631,10 @@ class Store:
                 if existing["status"] != "completed" or existing["stored_response"] is None:
                     raise IdempotencyConflict("Idempotent operation has invalid durable state")
                 stored = existing["stored_response"]
-                return json.loads(stored) if isinstance(stored, str) else dict(stored)
+                response = json.loads(stored) if isinstance(stored, str) else dict(stored)
+                if replay_marker:
+                    response["_operation_replayed"] = True
+                return response
             response = dict(await write(conn))
             await conn.execute("UPDATE request_operations SET status='completed',stored_response=$1::jsonb,"
                 "completed_at=now() WHERE user_id=$2 AND idempotency_key=$3",
@@ -638,7 +642,8 @@ class Store:
             return response
 
     async def insert_meal_idempotent(self, key: str, request_hash: str, *,
-                                     response_builder, **values) -> dict[str, Any]:
+                                     response_builder, replay_marker: bool = False,
+                                     **values) -> dict[str, Any]:
         """Insert, refresh, snapshot a response, and claim a key atomically."""
         metadata_json = _component_metadata_json(values.pop("component_metadata", None))
         user_id = current_user_id()
@@ -650,7 +655,9 @@ class Store:
             await self._refresh_rollups(conn, user_id, values["day"])
             return await response_builder(conn, user_id, row)
 
-        return await self.run_idempotent(key, request_hash, write)
+        return await self.run_idempotent(
+            key, request_hash, write, replay_marker=replay_marker
+        )
 
     @staticmethod
     async def day_snapshot(conn, user_id, day) -> dict[str, Any]:

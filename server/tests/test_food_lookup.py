@@ -1383,6 +1383,10 @@ async def test_named_and_foods_resolve_as_one_food(monkeypatch, query):
 async def test_unresolved_split_falls_back_to_whole_food(monkeypatch):
     calls = []
 
+    async def no_provider(_query): return None
+    monkeypatch.setattr(food_lookup, "search_fatsecret", no_provider)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", no_provider)
+
     async def catalog(name):
         calls.append(name)
         if name == "peanut butter and jelly":

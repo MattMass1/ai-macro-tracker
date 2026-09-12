@@ -557,11 +557,21 @@ async def test_voice_meal_response_is_lean_and_carries_the_spoken_confirmation()
     assert payload["day_total"] == {
         "calories": 791.0, "protein": 87.6, "carbs": 44.1, "fat": 30.1, "fiber": 6.0,
     }
-    confirmation = payload["confirmation"]
-    assert "6 oz 93/7 ground beef" in confirmation
-    assert "446 kcal" in confirmation and "41g protein" in confirmation
-    assert "FatSecret: ground beef 93/7" in confirmation
-    assert "791 kcal" in confirmation and "88g protein" in confirmation
+    assert "confirmation" not in payload
+
+
+async def test_voice_meal_response_missing_rollup_never_fabricates_meal_as_day_total():
+    class MissingRollup:
+        async def fetchrow(self, sql, *args): return None
+
+    row = {"id": "row-1", "name": "eggs", "meal": "Breakfast",
+           "calories": 140, "protein": 12, "carbs": 1, "fat": 10, "fiber": 0,
+           "day": date(2026, 9, 12), "created_at": "2026-09-12T12:00:00+00:00",
+           "macro_source": "Catalog: eggs"}
+    payload = await srv._voice_meal_response(MissingRollup(), uuid4(), row)
+
+    assert "day_total" not in payload
+    assert payload["logged"]["calories"] == 140
 
 
 async def test_undo_excludes_the_row_it_just_deleted(lagging):

@@ -16,6 +16,7 @@ enum LiveCoachServerEvent: Equatable {
     case outputAudio(Data)
     case inputMuted(Bool)
     case activity(state: LiveCoachActivityState, label: String)
+    case mealCommitted(operationID: String, label: String, dayTotal: MacroTotals)
     case closed(reason: String)
     case failure(code: String, message: String)
 }
@@ -107,6 +108,8 @@ final class LiveCoachController: ObservableObject {
     @Published private(set) var coachCaption = ""
     @Published private(set) var activityState: LiveCoachActivityState?
     @Published private(set) var activityLabel = ""
+    @Published private(set) var committedMealOperationID: String?
+    @Published private(set) var committedMealLabel = ""
 
     private let permission: LiveCoachPermissionChecking
     private let transport: LiveCoachTransporting
@@ -114,6 +117,7 @@ final class LiveCoachController: ObservableObject {
     private var sessionGeneration = UUID()
     private var sessionTasks: [Task<Void, Never>] = []
     private var activityClearTask: Task<Void, Never>?
+    private var committedMealClearTask: Task<Void, Never>?
     private var closeTask: Task<Void, Never>?
     private var endTask: Task<Void, Never>?
     private var endTaskID: UUID?
@@ -156,6 +160,7 @@ final class LiveCoachController: ObservableObject {
         userCaption = ""
         coachCaption = ""
         clearActivity()
+        clearCommittedMeal()
 
         let pendingClose = closeTask
         closeTask = nil
@@ -240,12 +245,14 @@ final class LiveCoachController: ObservableObject {
         sessionGeneration = UUID()
         guard hadTransport || audioIsRunning || !sessionTasks.isEmpty || pendingClose != nil else {
             clearActivity()
+            clearCommittedMeal()
             state = .ended
             return
         }
         stopLocalSession()
         transportIsOpen = false
         clearActivity()
+        clearCommittedMeal()
         state = .ended
         let taskID = UUID()
         endTaskID = taskID
@@ -343,6 +350,8 @@ final class LiveCoachController: ObservableObject {
             audio.setMuted(muted)
         case .activity(let activityState, let label):
             updateActivity(activityState, label: label, generation: generation)
+        case .mealCommitted(let operationID, let label, _):
+            updateCommittedMeal(operationID: operationID, label: label, generation: generation)
         case .closed:
             finishRemoteSession(generation: generation)
         case .failure(let code, let message):
@@ -379,6 +388,26 @@ final class LiveCoachController: ObservableObject {
         activityLabel = ""
     }
 
+    private func updateCommittedMeal(operationID: String, label: String, generation: UUID) {
+        committedMealClearTask?.cancel()
+        committedMealOperationID = operationID
+        committedMealLabel = label
+        committedMealClearTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            guard self?.sessionGeneration == generation else { return }
+            self?.committedMealOperationID = nil
+            self?.committedMealLabel = ""
+        }
+    }
+
+    private func clearCommittedMeal() {
+        committedMealClearTask?.cancel()
+        committedMealClearTask = nil
+        committedMealOperationID = nil
+        committedMealLabel = ""
+    }
+
     private func handlePlayback(active: Bool, generation: UUID) {
         guard generation == sessionGeneration else { return }
         guard state == .listening || state == .speaking else { return }
@@ -399,6 +428,7 @@ final class LiveCoachController: ObservableObject {
         sessionGeneration = UUID()
         stopLocalSession()
         clearActivity()
+        clearCommittedMeal()
         state = .failed(
             message: message,
             retryable: retryable,
@@ -415,6 +445,7 @@ final class LiveCoachController: ObservableObject {
         transportIsOpen = false
         stopLocalSession()
         clearActivity()
+        clearCommittedMeal()
         state = .ended
     }
 

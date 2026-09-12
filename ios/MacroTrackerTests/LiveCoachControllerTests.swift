@@ -523,6 +523,62 @@ final class LiveCoachControllerTests: XCTestCase {
         }
     }
 
+    func testWireCodecDecodesMealCommittedAndIgnoresExtraFields() throws {
+        let event = try XCTUnwrap(LiveCoachWireCodec.decode(Data(#"{
+            "type":"coach.meal_committed",
+            "operation_id":"meal-op-1",
+            "label":"Chicken and rice",
+            "day_total":{"calories":1428,"protein":132,"carbs":146,"fat":41,"fiber":24,"future_metric":9},
+            "future_field":{"ignored":true}
+        }"#.utf8)))
+
+        XCTAssertEqual(
+            event,
+            .mealCommitted(
+                operationID: "meal-op-1",
+                label: "Chicken and rice",
+                dayTotal: MacroTotals(calories: 1428, protein: 132, carbs: 146, fat: 41, fiber: 24)
+            )
+        )
+    }
+
+    func testWireCodecIgnoresMealCommittedWithoutUsableLabel() throws {
+        let events = [
+            #"{"type":"coach.meal_committed","operation_id":"meal-op-1","day_total":{"calories":1,"protein":2,"carbs":3,"fat":4,"fiber":5}}"#,
+            #"{"type":"coach.meal_committed","operation_id":"meal-op-1","label":"","day_total":{"calories":1,"protein":2,"carbs":3,"fat":4,"fiber":5}}"#,
+            #"{"type":"coach.meal_committed","operation_id":"meal-op-1","label":" \n\t","day_total":{"calories":1,"protein":2,"carbs":3,"fat":4,"fiber":5}}"#,
+        ]
+
+        for event in events {
+            XCTAssertNil(try LiveCoachWireCodec.decode(Data(event.utf8)))
+        }
+    }
+
+    func testMealCommittedIsSurfacedThenClearedAfterThreeSeconds() async {
+        let calls = CallRecorder()
+        let transport = TransportStub(calls: calls)
+        let subject = LiveCoachController(
+            permission: PermissionStub(granted: true, calls: calls),
+            transport: transport,
+            audio: AudioStub(calls: calls)
+        )
+        await subject.start()
+
+        transport.emit(.mealCommitted(
+            operationID: "meal-op-1",
+            label: "Chicken and rice",
+            dayTotal: .zero
+        ))
+        await drainTasks()
+        XCTAssertEqual(subject.committedMealOperationID, "meal-op-1")
+        XCTAssertEqual(subject.committedMealLabel, "Chicken and rice")
+
+        try? await Task.sleep(for: .milliseconds(3_100))
+        XCTAssertNil(subject.committedMealOperationID)
+        XCTAssertEqual(subject.committedMealLabel, "")
+        await subject.end()
+    }
+
     func testSupersededFailureUsesServerMessageAndOffersReconnect() async throws {
         let calls = CallRecorder()
         let transport = TransportStub(calls: calls)
@@ -1080,6 +1136,7 @@ final class LiveCoachControllerTests: XCTestCase {
         let bounds = CGRect(x: 0, y: 0, width: 393, height: 852)
         let host = UIHostingController(
             rootView: LiveCoachView(controller: controller)
+                .environmentObject(AppStore())
                 .tint(Theme.accent)
                 .preferredColorScheme(.light)
         )

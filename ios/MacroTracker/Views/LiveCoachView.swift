@@ -59,6 +59,7 @@ struct LiveCoachPresentation: Equatable {
 struct LiveCoachView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    @EnvironmentObject private var store: AppStore
     @StateObject private var controller: LiveCoachController
 
     init(controller: LiveCoachController? = nil) {
@@ -79,6 +80,7 @@ struct LiveCoachView: View {
                     VStack(spacing: 20) {
                         statusCard(presentation)
                         activityChip
+                        committedMealCard
                         captions
                         controls(presentation)
                         Text("You can ask the coach to log meals. It will confirm what it logged.")
@@ -110,6 +112,9 @@ struct LiveCoachView: View {
         .onDisappear { Task { await controller.end() } }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { Task { await controller.end() } }
+        }
+        .onChange(of: controller.committedMealOperationID) { _, operationID in
+            if operationID != nil { Task { await store.loadDay() } }
         }
     }
 
@@ -194,6 +199,36 @@ struct LiveCoachView: View {
 
     private func activityColor(_ activityState: LiveCoachActivityState) -> Color {
         activityState == .error ? Theme.carbs : Theme.accent
+    }
+
+    @ViewBuilder
+    private var committedMealCard: some View {
+        if controller.committedMealOperationID != nil,
+           let label = LiveCoachPresentation.activityLabel(controller.committedMealLabel) {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.footnote.weight(.semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Logged")
+                        .font(.footnote.weight(.semibold))
+                    Text(label)
+                        .font(.footnote.weight(.medium))
+                        .lineLimit(2)
+                }
+            }
+            .foregroundStyle(Theme.accent)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Theme.accent.opacity(0.25), lineWidth: 1)
+            }
+            .transition(.opacity)
+            .animation(.easeInOut(duration: 0.2), value: controller.committedMealOperationID)
+            .accessibilityElement(children: .combine)
+        }
     }
 
     @ViewBuilder

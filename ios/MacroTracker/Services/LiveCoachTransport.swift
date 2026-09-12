@@ -40,6 +40,19 @@ enum LiveCoachWireCodec {
                   let activityState = LiveCoachActivityState(rawValue: stateRaw),
                   let label = object["label"] as? String else { return nil }
             return .activity(state: activityState, label: String(label.prefix(160)))
+        case "coach.meal_committed":
+            guard let operationID = object["operation_id"] as? String,
+                  let rawLabel = object["label"] as? String,
+                  let dayTotalObject = object["day_total"] as? [String: Any],
+                  let dayTotalData = try? JSONSerialization.data(withJSONObject: dayTotalObject),
+                  let dayTotal = try? JSONDecoder().decode(MacroTotals.self, from: dayTotalData) else { return nil }
+            let label = rawLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !operationID.isEmpty, !label.isEmpty else { return nil }
+            return .mealCommitted(
+                operationID: operationID,
+                label: String(label.prefix(120)),
+                dayTotal: dayTotal
+            )
         case "session.closed":
             let allowed = ["close_requested", "expired", "content", "remote_hangup", "connection_lost", "ended"]
             let reason = object["reason"] as? String

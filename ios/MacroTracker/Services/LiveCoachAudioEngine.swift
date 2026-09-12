@@ -126,7 +126,7 @@ final class LiveCoachAudioEngine: LiveCoachAudioHandling {
         try audioSession.setCategory(
             .playAndRecord,
             mode: .voiceChat,
-            options: [.defaultToSpeaker, .allowBluetoothHFP]
+            options: [.defaultToSpeaker, .allowBluetoothHFP, .overrideMutedMicrophoneInterruption]
         )
         try audioSession.setPreferredSampleRate(48_000)
         try audioSession.setPreferredIOBufferDuration(0.02)
@@ -231,6 +231,10 @@ final class LiveCoachAudioEngine: LiveCoachAudioHandling {
 
     private func rebuildGraph(targetFormat: AVAudioFormat) throws {
         let input = engine.inputNode
+        if !playerConnected {
+            engine.connect(player, to: engine.mainMixerNode, format: targetFormat)
+            playerConnected = true
+        }
         if !input.isVoiceProcessingEnabled {
             try input.setVoiceProcessingEnabled(true)
         }
@@ -239,10 +243,6 @@ final class LiveCoachAudioEngine: LiveCoachAudioHandling {
               inputFormat.channelCount > 0,
               let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
             throw LiveCoachAudioError.unsupportedFormat
-        }
-        if !playerConnected {
-            engine.connect(player, to: engine.mainMixerNode, format: targetFormat)
-            playerConnected = true
         }
         let continuation = capturedContinuation
         let muteState = muteState

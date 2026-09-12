@@ -48,6 +48,11 @@ struct LiveCoachPresentation: Equatable {
             showsSettingsAction = false
         }
     }
+
+    static func activityLabel(_ label: String) -> String? {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 }
 
 @MainActor
@@ -158,12 +163,13 @@ struct LiveCoachView: View {
 
     @ViewBuilder
     private var activityChip: some View {
-        if let activityState = controller.activityState, !controller.activityLabel.isEmpty {
+        if let activityState = controller.activityState,
+           let activityLabel = LiveCoachPresentation.activityLabel(controller.activityLabel) {
             HStack(spacing: 8) {
                 Image(systemName: activityIcon(activityState))
                     .font(.footnote.weight(.semibold))
                     .symbolEffect(.pulse, isActive: activityState == .resolving || activityState == .logging)
-                Text(controller.activityLabel)
+                Text(activityLabel)
                     .font(.footnote.weight(.medium))
                     .lineLimit(2)
             }
@@ -187,7 +193,7 @@ struct LiveCoachView: View {
     }
 
     private func activityColor(_ activityState: LiveCoachActivityState) -> Color {
-        activityState == .error ? Theme.danger : Theme.accent
+        activityState == .error ? Theme.carbs : Theme.accent
     }
 
     @ViewBuilder

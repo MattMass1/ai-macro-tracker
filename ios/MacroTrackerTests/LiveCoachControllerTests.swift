@@ -445,6 +445,110 @@ final class LiveCoachControllerTests: XCTestCase {
         )
     }
 
+    func testWireCodecDecodesCoachActivityStatesAndLabels() async throws {
+        let calls = CallRecorder()
+        let transport = TransportStub(calls: calls)
+        let subject = LiveCoachController(
+            permission: PermissionStub(granted: true, calls: calls),
+            transport: transport,
+            audio: AudioStub(calls: calls)
+        )
+        await subject.start()
+
+        XCTAssertNil(
+            try LiveCoachWireCodec.decode(
+                Data(#"{"type":"coach.activity","state":"unknown","label":"Ignore me"}"#.utf8)
+            )
+        )
+        XCTAssertNil(subject.activityState)
+        XCTAssertEqual(subject.activityLabel, "")
+
+        for (state, label) in [
+            (LiveCoachActivityState.resolving, "Finding that meal"),
+            (.logging, "Logging breakfast"),
+            (.done, "Breakfast logged"),
+            (.error, "Could not log breakfast"),
+        ] {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "type": "coach.activity",
+                "state": state.rawValue,
+                "label": label,
+            ])
+
+            let event = try XCTUnwrap(LiveCoachWireCodec.decode(data))
+            transport.emit(event)
+            await drainTasks()
+
+            XCTAssertEqual(subject.activityState, state)
+            XCTAssertEqual(subject.activityLabel, label)
+        }
+
+        for label in ["", " \n\t "] {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "type": "coach.activity",
+                "state": "logging",
+                "label": label,
+            ])
+            transport.emit(try XCTUnwrap(LiveCoachWireCodec.decode(data)))
+            await drainTasks()
+
+            XCTAssertEqual(subject.activityState, .logging)
+            XCTAssertEqual(subject.activityLabel, label)
+            XCTAssertNil(LiveCoachPresentation.activityLabel(subject.activityLabel))
+        }
+        XCTAssertEqual(LiveCoachPresentation.activityLabel("  Logging breakfast  "), "Logging breakfast")
+        await subject.end()
+    }
+
+    func testCompletedCoachActivityClearsStateAndLabelAfterThreeSeconds() async {
+        for activityState in [LiveCoachActivityState.done, .error] {
+            let calls = CallRecorder()
+            let transport = TransportStub(calls: calls)
+            let subject = LiveCoachController(
+                permission: PermissionStub(granted: true, calls: calls),
+                transport: transport,
+                audio: AudioStub(calls: calls)
+            )
+            await subject.start()
+
+            transport.emit(.activity(state: activityState, label: "Meal update"))
+            await drainTasks()
+            XCTAssertEqual(subject.activityState, activityState)
+            XCTAssertEqual(subject.activityLabel, "Meal update")
+
+            try? await Task.sleep(for: .milliseconds(3_100))
+            XCTAssertNil(subject.activityState)
+            XCTAssertEqual(subject.activityLabel, "")
+            await subject.end()
+        }
+    }
+
+    func testSupersededFailureUsesServerMessageAndOffersReconnect() async throws {
+        let calls = CallRecorder()
+        let transport = TransportStub(calls: calls)
+        let subject = LiveCoachController(
+            permission: PermissionStub(granted: true, calls: calls),
+            transport: transport,
+            audio: AudioStub(calls: calls)
+        )
+        await subject.start()
+        let event = try XCTUnwrap(LiveCoachWireCodec.decode(
+            Data(#"{"type":"error","code":"superseded","message":"Voice coach reconnected from another session."}"#.utf8)
+        ))
+
+        transport.emit(event)
+        await drainTasks()
+
+        XCTAssertEqual(
+            subject.state,
+            .failed(
+                message: "Voice coach reconnected from another session.",
+                retryable: true
+            )
+        )
+        XCTAssertEqual(LiveCoachPresentation(state: subject.state).primaryAction, "Reconnect")
+    }
+
     func testPlaybackQueueFlushesAtBoundAndIgnoresOldCompletions() {
         var queue = LiveCoachPlaybackQueueState(capacity: 2)
 

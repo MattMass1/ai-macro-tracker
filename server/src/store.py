@@ -5,9 +5,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
 import secrets
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Mapping
 from uuid import UUID, uuid4
@@ -47,6 +48,7 @@ class IdempotencyConflict(StoreError):
 
 
 MAX_COMPONENT_METADATA_BYTES = 16 * 1024
+_DEGRADED_COMPONENT_METADATA = {"degraded": True, "reason": "provenance_unavailable"}
 
 
 def hash_device_token(token: str) -> str:
@@ -68,14 +70,63 @@ def _dict(row: asyncpg.Record | None) -> dict[str, Any] | None:
     return None if row is None else {key: _value(value) for key, value in row.items()}
 
 
+def _component_metadata_default(value: Any) -> Any:
+    """Coerce realistic database and resolver values to stable JSON values."""
+    if isinstance(value, Decimal):
+        if value.is_finite():
+            if value == value.to_integral_value():
+                return int(value)
+            converted = float(value)
+            return converted if math.isfinite(converted) else str(value)
+        return str(value)
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (set, frozenset)):
+        return sorted(
+            value,
+            key=lambda item: (
+                f"{type(item).__module__}.{type(item).__qualname__}",
+                json.dumps(
+                    item, sort_keys=True, separators=(",", ":"),
+                    ensure_ascii=False, default=_component_metadata_default,
+                ),
+            ),
+        )
+    if isinstance(value, bytes):
+        return {"encoding": "hex", "value": value.hex()}
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def _component_metadata_json(value: Any) -> str | None:
-    """Serialize bounded component provenance before opening a transaction."""
+    """Serialize component provenance without allowing it to block a meal write.
+
+    Unserializable or oversized diagnostic provenance is replaced with a small,
+    explicit degradation marker. The meal itself remains the authoritative data.
+    """
     if value is None:
         return None
-    serialized = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    try:
+        serialized = json.dumps(
+            value, separators=(",", ":"), ensure_ascii=False,
+            default=_component_metadata_default,
+        )
+    except (TypeError, ValueError, RecursionError) as exc:
+        logger.warning(
+            "Component metadata degraded before meal write: reason=unserializable error_type=%s",
+            type(exc).__name__,
+        )
+        return json.dumps(
+            _DEGRADED_COMPONENT_METADATA, separators=(",", ":"), ensure_ascii=False
+        )
     if len(serialized.encode("utf-8")) > MAX_COMPONENT_METADATA_BYTES:
-        raise ValueError(
-            f"component_metadata exceeds {MAX_COMPONENT_METADATA_BYTES} serialized bytes"
+        logger.warning(
+            "Component metadata degraded before meal write: reason=oversized limit_bytes=%d",
+            MAX_COMPONENT_METADATA_BYTES,
+        )
+        return json.dumps(
+            _DEGRADED_COMPONENT_METADATA, separators=(",", ":"), ensure_ascii=False
         )
     return serialized
 

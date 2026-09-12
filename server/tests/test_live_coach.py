@@ -6,6 +6,7 @@ import asyncio
 import base64
 import contextlib
 from datetime import date
+from decimal import Decimal
 import json
 import logging
 from uuid import uuid4
@@ -16,6 +17,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from collections import defaultdict
 
+import store as store_module
 from auth import bind_user, current_user_id, reset_user
 from coach import TOOLS as _COACH_TOOLS
 from live_coach import (
@@ -2444,6 +2446,74 @@ async def test_voice_log_meal_persists_one_entry_and_echoes_macros(monkeypatch):
     assert logged["calories"] == 255
     assert logged["protein"] == 35
     assert logged["macro_source"] == "Catalog: ground beef 93/7"
+
+
+@pytest.mark.asyncio
+async def test_voice_log_meal_with_decimal_components_uses_real_serializer_and_commits(
+    monkeypatch,
+):
+    srv = _import_server(monkeypatch)
+
+    class RealSerializerVoiceStore(srv.Store):
+        def __init__(self):
+            super().__init__("postgresql://unused")
+            self.idempotent_calls = 0
+
+        async def run_idempotent(self, _key, _request_hash, _write, **_kwargs):
+            self.idempotent_calls += 1
+            return {"logged": {
+                "id": "decimal-row", "name": "ground beef 93/7", "meal": "Dinner",
+                "calories": 255.0, "protein": 35.0, "carbs": 0.0, "fat": 13.0,
+                "fiber": 0.0, "date": "2026-09-12",
+                "created_time": "2026-09-12T19:17:29+00:00",
+            }}
+
+        async def fetch_meals(self, _start, end=None):
+            return [{
+                "id": "decimal-row", "name": "ground beef 93/7", "meal": "Dinner",
+                "calories": 255.0, "protein": 35.0, "carbs": 0.0, "fat": 13.0,
+                "fiber": 0.0, "date": "2026-09-12",
+                "created_time": "2026-09-12T19:17:29+00:00",
+            }]
+
+        async def fetch_day_rollups(self, _start=None, _end=None):
+            return [{"date": "2026-09-12", "calories": 255.0, "protein": 35.0,
+                     "carbs": 0.0, "fat": 13.0, "fiber": 0.0}]
+
+    real_serializer_store = RealSerializerVoiceStore()
+    monkeypatch.setattr(srv, "_client", real_serializer_store)
+    real_serializer = store_module._component_metadata_json
+    serialized_payloads = []
+
+    def serializer_spy(value):
+        serialized_payloads.append(value)
+        return real_serializer(value)
+
+    monkeypatch.setattr(store_module, "_component_metadata_json", serializer_spy)
+    monkeypatch.setattr(
+        srv, "resolve_food",
+        lambda _query: asyncio.sleep(0, result=_resolved_food()),
+    )
+    monkeypatch.setattr(
+        srv.food_lookup, "portion_from_serving",
+        lambda _found: ({
+            "calories": Decimal("255.0"), "protein": Decimal("35.0"),
+            "carbs": Decimal("0"), "fat": Decimal("13.0"), "fiber": Decimal("0"),
+        }, "Catalog: ground beef 93/7"),
+    )
+    monkeypatch.setattr(srv.domain, "effective_date", lambda: date(2026, 9, 12))
+    token = bind_user(uuid4())
+    try:
+        result = await srv._voice_tool_handlers()["log_meal"](
+            "call-decimal", dict(_MEAL_ARGS)
+        )
+    finally:
+        reset_user(token)
+
+    assert real_serializer_store.idempotent_calls == 1
+    assert serialized_payloads
+    assert serialized_payloads[0][0]["calories"] == Decimal("255.0")
+    assert result["status"] == "committed"
 
 
 @pytest.mark.parametrize("description", [

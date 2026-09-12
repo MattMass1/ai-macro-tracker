@@ -6,8 +6,9 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
-from uuid import uuid4
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
+from uuid import UUID, uuid4
 
 import pytest
 import httpx
@@ -459,22 +460,58 @@ async def test_provider_id_relink_requires_all_macros_and_available_basis():
     assert linked == ("community-item", "community-observation")
 
 
-def test_component_metadata_has_strict_utf8_serialized_size_cap():
-    assert _component_metadata_json({"name": "x"})
-    with pytest.raises(ValueError, match="serialized bytes"):
-        _component_metadata_json({"name": "é" * MAX_COMPONENT_METADATA_BYTES})
+def test_component_metadata_serializes_real_resolution_types_deterministically():
+    value = {
+        "calories": Decimal("123.4"),
+        "count": Decimal("2"),
+        "day": date(2026, 9, 12),
+        "created_at": datetime(2026, 9, 12, 19, 17, 29),
+        "time": time(19, 17, 29),
+        "id": UUID("12345678-1234-5678-1234-567812345678"),
+        "tags": {"z", "a"},
+        "frozen": frozenset({2, 1}),
+        "raw": b"\x00\xff",
+    }
+
+    serialized = _component_metadata_json(value)
+
+    assert serialized == _component_metadata_json(value)
+    assert json.loads(serialized) == {
+        "calories": 123.4, "count": 2, "day": "2026-09-12",
+        "created_at": "2026-09-12T19:17:29", "time": "19:17:29",
+        "id": "12345678-1234-5678-1234-567812345678",
+        "tags": ["a", "z"], "frozen": [1, 2],
+        "raw": {"encoding": "hex", "value": "00ff"},
+    }
 
 
-async def test_component_metadata_cap_rejects_before_database_connection():
+async def test_component_metadata_cap_degrades_and_continues_database_write():
     store = Store("postgresql://unused")
-    async def unexpected_connect():
-        pytest.fail("oversized metadata must be rejected before a DB write")
-    store.connect = unexpected_connect
-    with pytest.raises(ValueError, match="serialized bytes"):
-        await store.insert_meal(name="Composite", meal="Lunch", calories=100,
+    calls = []
+
+    async def run_idempotent(_key, _request_hash, write, **_kwargs):
+        calls.append(write)
+        return {"logged": {"id": "meal-one"}}
+
+    store.run_idempotent = run_idempotent
+    token = bind_user(uuid4())
+    try:
+        result = await store.insert_meal_idempotent(
+            "meal-key", "request-hash", response_builder=lambda *_args: None,
+            name="Composite", meal="Lunch", calories=100,
             protein=10, carbs=10, fat=2, fiber=1, day="2026-09-01",
             macro_source="Composite: labels",
             component_metadata={"name":"é" * MAX_COMPONENT_METADATA_BYTES})
+    finally:
+        reset_user(token)
+
+    assert json.loads(_component_metadata_json(
+        {"name": "é" * MAX_COMPONENT_METADATA_BYTES}
+    )) == {
+        "degraded": True, "reason": "provenance_unavailable",
+    }
+    assert len(calls) == 1
+    assert result == {"logged": {"id": "meal-one"}}
 
 
 # --------------------------------------------------------------------------- #

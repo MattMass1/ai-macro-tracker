@@ -524,13 +524,7 @@ final class LiveCoachControllerTests: XCTestCase {
     }
 
     func testWireCodecDecodesMealCommittedAndIgnoresExtraFields() throws {
-        let event = try XCTUnwrap(LiveCoachWireCodec.decode(Data(#"{
-            "type":"coach.meal_committed",
-            "operation_id":"meal-op-1",
-            "label":"Chicken and rice",
-            "day_total":{"calories":1428,"protein":132,"carbs":146,"fat":41,"fiber":24,"future_metric":9},
-            "future_field":{"ignored":true}
-        }"#.utf8)))
+        let event = try XCTUnwrap(LiveCoachWireCodec.decode(Data(#"{"type":"coach.meal_committed","operation_id":"meal-op-1","label":"Chicken and rice","day_total":{"calories":1428,"protein":132,"carbs":146,"fat":41,"fiber":24,"future_metric":9},"future_field":{"ignored":true}}"#.utf8)))
 
         XCTAssertEqual(
             event,

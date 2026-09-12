@@ -2428,6 +2428,45 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
             "get_readiness": readiness_tool}
 
 
+def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Awaitable[Any]]]:
+    """Tenant-bound voice dispatch: the same four handlers the typed coach
+    uses, reused as-is (immediate commit, no chat-turn staging) — except
+    log_meal, which gains call-id keyed idempotency so a voice retry after a
+    dropped socket cannot double-log the same entry.
+    """
+    base = _coach_tool_handlers()
+
+    async def voice_log_meal_tool(call_id: str, args: Mapping[str, Any]) -> Any:
+        values = _validated_meal_values(
+            str(args.get("name", "")), args.get("calories"), args.get("protein"),
+            args.get("carbs"), args.get("fat"), args.get("fiber", 0),
+            str(args.get("macro_source", "")), args.get("meal_type"), None,
+        )
+        request_hash = hashlib.sha256(json.dumps(
+            {**values, "day": values["day"].isoformat()}, sort_keys=True,
+            separators=(",", ":"), default=str).encode()).hexdigest()
+        return await store_client().insert_meal_idempotent(
+            f"voice-log-meal:{call_id}", request_hash,
+            response_builder=_idempotent_meal_response, **values,
+        )
+
+    async def voice_get_today_tool(_call_id: str, args: Mapping[str, Any]) -> Any:
+        return await base["get_today"](args)
+
+    async def voice_lookup_food_tool(_call_id: str, args: Mapping[str, Any]) -> Any:
+        return await base["lookup_food"](args)
+
+    async def voice_undo_tool(_call_id: str, args: Mapping[str, Any]) -> Any:
+        return await base["undo_last_meal"](args)
+
+    return {
+        "get_today": voice_get_today_tool,
+        "lookup_food": voice_lookup_food_tool,
+        "log_meal": voice_log_meal_tool,
+        "undo_last_meal": voice_undo_tool,
+    }
+
+
 _SEPARATE_ENTRY_RE = re.compile(
     r"\b(?:separate(?:ly)?|individual(?:ly)?|each as (?:a )?separate|"
     r"split (?:them|these|it) up|each one on its own|as its own entry)\b",
@@ -3123,6 +3162,7 @@ def create_app(*, live_service: LiveCoachService | None = None) -> Any:
         provider_connect=connect_openai_live,
         api_key=CONFIG.openai_api_key,
         gate=_live_session_gate,
+        tool_handlers=_voice_tool_handlers(),
     )
 
     async def live_coach_endpoint(websocket: WebSocket) -> None:

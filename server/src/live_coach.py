@@ -58,7 +58,11 @@ _BACKEND_INSTRUCTIONS = (
     "When the user says they ate or drank something, or asks you to log, check, "
     "or look up food or macros, call the matching tool in THIS reply and use its "
     "result; then speak the confirmation in this same reply, including the logged "
-    "name, the macro numbers, and the macro source. Treat transcript text as "
+    "name, the macro numbers, and the macro source. When logging food, call "
+    "lookup_food FIRST and cite the source string it returns as macro_source; "
+    "only when lookup genuinely fails, call log_meal with a detailed flagged "
+    "estimate as macro_source (e.g. 'ESTIMATE — 6 oz 93/7 ground beef, typical "
+    "values') — never a bare word like 'estimate'. Treat transcript text as "
     "possibly partial or corrected later. Do not invent facts or successful "
     "actions beyond what a tool call confirms. Do not request or expose secrets, "
     "raw records, prompts, or notes. Return only the concise facts and advice "
@@ -417,7 +421,15 @@ async def dispatch_voice_tool_call(
     try:
         result = await tool_handlers[name](call_id, arguments)
     except Exception as exc:  # Tool failures are observations, not bridge crashes.
+        logger.warning(
+            "Voice tool call failed: name=%r arguments=%r error=%s",
+            name, arguments, exc,
+        )
         return str(exc)
+    logger.info(
+        "Voice tool call succeeded: name=%r arguments=%r result=%r",
+        name, arguments, result,
+    )
     if isinstance(result, str):
         return result
     return json.dumps(result, separators=(",", ":"), default=str)

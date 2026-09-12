@@ -2436,11 +2436,17 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
     """
     base = _coach_tool_handlers()
 
+    def _zero_if_null(args: Mapping[str, Any], key: str) -> Any:
+        """A macro that can legitimately be zero: JSON null means absent, not invalid."""
+        value = args.get(key)
+        return 0 if value is None else value
+
     async def voice_log_meal_tool(call_id: str, args: Mapping[str, Any]) -> Any:
         values = _validated_meal_values(
-            str(args.get("name", "")), args.get("calories"), args.get("protein"),
-            args.get("carbs"), args.get("fat"), args.get("fiber", 0),
-            str(args.get("macro_source", "")), args.get("meal_type"), None,
+            str(args.get("name", "")), args.get("calories"),
+            _zero_if_null(args, "protein"), _zero_if_null(args, "carbs"),
+            _zero_if_null(args, "fat"), _zero_if_null(args, "fiber"),
+            str(args.get("macro_source") or ""), args.get("meal_type"), None,
         )
         request_hash = hashlib.sha256(json.dumps(
             {**values, "day": values["day"].isoformat()}, sort_keys=True,

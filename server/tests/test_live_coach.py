@@ -284,7 +284,7 @@ def test_session_start_uses_exact_gpt_live_read_only_contract():
                     ),
                     "tools": [],
                     "tool_choice": "none",
-                    "max_output_tokens": 256,
+                    "max_output_tokens": 2048,
                 },
             },
         },

@@ -248,7 +248,7 @@ def build_session_start(context: Mapping[str, Any]) -> dict[str, Any]:
                     "instructions": _BACKEND_INSTRUCTIONS + _bounded_context_json(context),
                     "tools": [],
                     "tool_choice": "none",
-                    "max_output_tokens": 256,
+                    "max_output_tokens": 2048,
                 },
             },
         },

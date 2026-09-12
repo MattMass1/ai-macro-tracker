@@ -47,6 +47,10 @@ class IdempotencyConflict(StoreError):
     """An idempotency key was reused with a different request body."""
 
 
+class IdempotencyStateError(StoreError):
+    """An idempotency claim could not be read back from durable state."""
+
+
 MAX_COMPONENT_METADATA_BYTES = 16 * 1024
 _DEGRADED_COMPONENT_METADATA = {"degraded": True, "reason": "provenance_unavailable"}
 
@@ -128,6 +132,30 @@ def _component_metadata_json(value: Any) -> str | None:
         return json.dumps(
             _DEGRADED_COMPONENT_METADATA, separators=(",", ":"), ensure_ascii=False
         )
+    return serialized
+
+
+def _component_metadata_with_origin_json(
+    component_metadata_json: str | None, origin: str | None
+) -> str | None:
+    """Return bounded metadata with provenance stored in a mapping shape."""
+    if not origin:
+        return component_metadata_json
+    try:
+        metadata = json.loads(component_metadata_json) if component_metadata_json else None
+    except (TypeError, ValueError):
+        metadata = dict(_DEGRADED_COMPONENT_METADATA)
+    if isinstance(metadata, Mapping):
+        wrapped = {**metadata, "origin": origin}
+    elif metadata is None:
+        wrapped = {"origin": origin}
+    else:
+        wrapped = {"components": metadata, "origin": origin}
+    serialized = _component_metadata_json(wrapped)
+    if serialized == json.dumps(
+        _DEGRADED_COMPONENT_METADATA, separators=(",", ":"), ensure_ascii=False
+    ):
+        return _component_metadata_json({**_DEGRADED_COMPONENT_METADATA, "origin": origin})
     return serialized
 
 
@@ -399,10 +427,9 @@ class Store:
         item_id, observation_id = await self._catalog_snapshot(
             conn, name=name, macros={"calories": calories, "protein": protein,
             "carbs": carbs, "fat": fat, "fiber": fiber}, macro_source=macro_source)
-        metadata = json.loads(component_metadata_json) if component_metadata_json else {}
-        if origin:
-            metadata["origin"] = origin
-        stored_metadata_json = json.dumps(metadata) if metadata else None
+        stored_metadata_json = _component_metadata_with_origin_json(
+            component_metadata_json, origin
+        )
         row = await conn.fetchrow(
             "INSERT INTO nutrition_entries(id,user_id,name,meal,calories,protein,carbs,fat,fiber,day,meal_id,macro_source,food_item_id,food_observation_id,component_metadata) "
             "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb) RETURNING *",
@@ -677,6 +704,10 @@ class Store:
                     "SELECT request_hash,status,stored_response FROM request_operations "
                     "WHERE user_id=$1 AND idempotency_key=$2 FOR UPDATE", user_id, key,
                 )
+                if existing is None:
+                    raise IdempotencyStateError(
+                        "Idempotency claim exists but its durable state could not be read"
+                    )
                 if existing["request_hash"] != request_hash:
                     raise IdempotencyConflict("Idempotency key was already used for a different request")
                 if existing["status"] != "completed" or existing["stored_response"] is None:
@@ -689,7 +720,7 @@ class Store:
             response = dict(await write(conn))
             await conn.execute("UPDATE request_operations SET status='completed',stored_response=$1::jsonb,"
                 "completed_at=now() WHERE user_id=$2 AND idempotency_key=$3",
-                json.dumps(response), user_id, key)
+                json.dumps(response, default=str), user_id, key)
             return response
 
     async def insert_meal_idempotent(self, key: str, request_hash: str, *,

@@ -18,7 +18,8 @@ import migrations
 from auth import bind_user, reset_user
 from food_catalog import evidence_hash, normalize_food_name, provenance_state
 from store import (DUPLICATE_MEAL_WINDOW_SECONDS, IdempotencyConflict,
-                   MAX_COMPONENT_METADATA_BYTES, Store, _component_metadata_json)
+                   IdempotencyStateError, MAX_COMPONENT_METADATA_BYTES, Store,
+                   _component_metadata_json)
 
 
 def test_food_name_normalization_is_deterministic_and_unicode_aware():
@@ -391,6 +392,40 @@ async def test_atomic_idempotency_concurrent_replay_conflict_and_failure_rollbac
         reset_user(token)
 
 
+async def test_idempotency_missing_claim_row_raises_typed_state_error():
+    class MissingClaimConnection(AtomicConnection):
+        async def fetchrow(self, sql, user_id, key, request_hash=None):
+            return None
+
+    conn = MissingClaimConnection(); store = Store("postgresql://unused")
+    async def connect(): return AtomicPool(conn)
+    store.connect = connect
+    token = bind_user(uuid4())
+    try:
+        with pytest.raises(IdempotencyStateError, match="durable state"):
+            await store.run_idempotent("missing-key", "hash", lambda _conn: None)
+    finally:
+        reset_user(token)
+
+
+async def test_idempotent_response_snapshot_safely_coerces_json_values():
+    conn = AtomicConnection(); store = Store("postgresql://unused")
+    async def connect(): return AtomicPool(conn)
+    store.connect = connect
+    token = bind_user(uuid4())
+    response = {"day": date(2026, 9, 12), "operation_id": uuid4()}
+    try:
+        result = await store.run_idempotent(
+            "json-safe-key", "hash", lambda _conn: asyncio.sleep(0, result=response)
+        )
+    finally:
+        reset_user(token)
+
+    stored = conn.operations[(next(iter(conn.operations))[0], "json-safe-key")]["stored_response"]
+    assert result == response
+    assert stored == {"day": "2026-09-12", "operation_id": str(response["operation_id"])}
+
+
 async def test_idempotent_meal_wrapper_uses_claim_insert_rollup_and_response_in_one_transaction():
     conn = AtomicConnection(); store = Store("postgresql://unused")
     async def connect(): return AtomicPool(conn)
@@ -644,3 +679,118 @@ async def test_duplicate_guard_does_not_collapse_different_macros_or_meal_types(
                                   carbs=0.0, fat=17.0, fiber=0.0, **base)
 
     assert len(conn.rows) == 3
+
+
+class VoiceWriteConnection(DuplicateGuardConn):
+    """In-memory connection for the real idempotent voice meal write path."""
+
+    def __init__(self):
+        super().__init__()
+        self.operations = {}
+        self.day_rollup = None
+
+    @asynccontextmanager
+    async def transaction(self):
+        yield
+
+    async def execute(self, sql, *args):
+        if sql.startswith("UPDATE request_operations"):
+            response, user_id, key = args
+            self.operations[(user_id, key)].update(
+                status="completed", stored_response=json.loads(response)
+            )
+        elif sql.startswith("INSERT INTO days(user_id,date,calories"):
+            self.day_rollup = {
+                macro: sum(float(row[macro]) for row in self.rows)
+                for macro in ("calories", "protein", "carbs", "fat", "fiber")
+            }
+        return None
+
+    async def fetchrow(self, sql, *args):
+        if sql.startswith("INSERT INTO request_operations"):
+            identity = (args[0], args[1])
+            if identity in self.operations:
+                return None
+            self.operations[identity] = {
+                "request_hash": args[2], "status": "in_progress", "stored_response": None,
+            }
+            return {"id": "claimed"}
+        if sql.startswith("SELECT request_hash,status,stored_response"):
+            return self.operations.get((args[0], args[1]))
+        if sql.startswith("SELECT calories,protein,carbs,fat,fiber FROM days"):
+            return self.day_rollup
+        return await super().fetchrow(sql, *args)
+
+
+@pytest.mark.parametrize("component_metadata", [
+    [{"name": "Ground Beef", "calories": 255.0}],
+    {"resolver": "generic", "confidence": "exact"},
+    None,
+])
+async def test_real_store_voice_write_accepts_metadata_shapes_and_duplicate_guard(
+    monkeypatch, component_metadata
+):
+    conn = VoiceWriteConnection()
+    store = _duplicate_guard_store(monkeypatch)
+    async def connect(): return AtomicPool(conn)
+    store.connect = connect
+    values = dict(name="6 oz 93/7 Ground Beef", meal="Lunch", calories=255.0,
+                  protein=34.5, carbs=0.0, fat=17.0, fiber=0.0,
+                  day=date(2026, 9, 12), macro_source="Generic: ground beef")
+    async def response_builder(_conn, _user_id, row):
+        return {"status": "committed", "logged": {"id": row["id"]}}
+    token = bind_user(uuid4())
+    try:
+        first = await store.insert_meal_idempotent(
+            "voice-one", "hash-one", response_builder=response_builder,
+            origin="voice", component_metadata=component_metadata, **values,
+        )
+        duplicate = await store.insert_meal_idempotent(
+            "voice-two", "hash-two", response_builder=response_builder,
+            origin="voice", component_metadata=component_metadata, **values,
+        )
+        different = await store.insert_meal_idempotent(
+            "voice-three", "hash-three", response_builder=response_builder,
+            origin="voice", component_metadata=component_metadata,
+            **{**values, "name": "Sweet Potato", "carbs": 30.0},
+        )
+    finally:
+        reset_user(token)
+
+    assert first["status"] == "committed"
+    assert conn.rows[0]["component_metadata"]["origin"] == "voice"
+    if isinstance(component_metadata, list):
+        assert conn.rows[0]["component_metadata"]["components"] == component_metadata
+    elif isinstance(component_metadata, dict):
+        assert conn.rows[0]["component_metadata"]["resolver"] == "generic"
+    assert duplicate["logged"]["id"] == first["logged"]["id"]
+    assert different["logged"]["id"] != first["logged"]["id"]
+    assert len(conn.rows) == 2
+
+
+async def test_real_store_voice_write_degrades_oversized_metadata_and_keeps_origin(
+    monkeypatch
+):
+    conn = VoiceWriteConnection()
+    store = _duplicate_guard_store(monkeypatch)
+    async def connect(): return AtomicPool(conn)
+    store.connect = connect
+    token = bind_user(uuid4())
+    try:
+        result = await store.insert_meal_idempotent(
+            "voice-oversized", "hash", origin="voice",
+            component_metadata=[{"detail": "é" * MAX_COMPONENT_METADATA_BYTES}],
+            response_builder=lambda _conn, _user_id, row: asyncio.sleep(
+                0, result={"status": "committed", "id": row["id"]}
+            ),
+            name="Composite", meal="Lunch", calories=100.0, protein=10.0,
+            carbs=10.0, fat=2.0, fiber=1.0, day=date(2026, 9, 12),
+            macro_source="Composite: labels",
+        )
+    finally:
+        reset_user(token)
+
+    assert result["status"] == "committed"
+    assert conn.rows[0]["component_metadata"] == {
+        "degraded": True, "reason": "provenance_unavailable", "origin": "voice",
+    }

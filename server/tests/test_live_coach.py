@@ -2222,6 +2222,7 @@ async def test_bridge_streams_coach_activity_to_client_without_leaking_tool_argu
 
     activity_events = [event for event in socket.sent if event.get("type") == "coach.activity"]
     assert activity_events == [
+        {"type": "coach.activity", "state": "resolving", "label": "Working on it"},
         {"type": "coach.activity", "state": "logging", "label": "Logging 6 oz 93/7 ground beef"},
         {"type": "coach.activity", "state": "done", "label": "Logged: 258 kcal, 35 g protein"},
     ]
@@ -2254,6 +2255,221 @@ async def test_bridge_streams_coach_activity_to_client_without_leaking_tool_argu
     # The delegation_ms value must be a real measurement, not the "unknown"
     # placeholder — this session's response.created arrived before the call.
     assert not any("delegation_ms=n/a" in m for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_delegated_turn_without_tool_is_diagnosed_and_shows_resolving_activity(caplog):
+    provider = _LifecycleProvider()
+    socket = FakeClientWebSocket()
+    service = _lifecycle_service(LiveCoachPolicy(close_timeout=0.1))
+    task = asyncio.create_task(service._bridge(
+        socket,
+        provider,
+        frozenset({"get_today", "lookup_food", "log_meal", "undo_last_meal"}),
+        user_id=uuid4(),
+    ))
+
+    with caplog.at_level(logging.INFO, logger="live_coach"):
+        await provider.incoming.put(json.dumps({
+            "type": "session.input_transcript.delta",
+            "delta": "I ate two eggs for breakfast",
+        }))
+        await provider.incoming.put(json.dumps({
+            "type": "session.delegation.created", "delegation_id": "d-1",
+        }))
+        await provider.incoming.put(json.dumps({
+            "type": "response.event", "delegation_id": "d-1",
+            "event": {
+                "type": "response.completed",
+                "response": {"output": [{
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "What meal was that?"}],
+                }]},
+            },
+        }))
+        for _ in range(100):
+            if any(event.get("state") == "done" for event in socket.sent):
+                break
+            await asyncio.sleep(0.001)
+        await socket.incoming.put({"type": "session.close"})
+        await asyncio.wait_for(task, 0.5)
+
+    activity = [event for event in socket.sent if event.get("type") == "coach.activity"]
+    assert activity[:2] == [
+        {"type": "coach.activity", "state": "resolving", "label": "Working on it"},
+        {"type": "coach.activity", "state": "done", "label": ""},
+    ]
+    diagnostic = next(
+        record.getMessage()
+        for record in caplog.records
+        if "Voice delegation diagnostic:" in record.getMessage()
+        and "outcome=response.completed" in record.getMessage()
+    )
+    assert "transcript='I ate two eggs for breakfast'" in diagnostic
+    assert "transcript_source=observed_input_transcript_unverified" in diagnostic
+    assert "advertised_tools=['get_today', 'log_meal', 'lookup_food', 'undo_last_meal']" in diagnostic
+    assert "returned_text='What meal was that?'" in diagnostic
+    assert "returned_calls=[]" in diagnostic
+    assert "wall_ms=" in diagnostic
+    assert "\n" not in diagnostic
+
+
+@pytest.mark.asyncio
+async def test_delegation_diagnostic_bounds_and_redacts_accumulated_transcript(
+    caplog, monkeypatch
+):
+    secret = "credential-value-that-must-not-leak"
+    monkeypatch.setenv("TEST_API_TOKEN", secret)
+    provider = _LifecycleProvider()
+    socket = FakeClientWebSocket()
+    service = _lifecycle_service(LiveCoachPolicy(close_timeout=0.1))
+    task = asyncio.create_task(service._bridge(
+        socket, provider, user_id=uuid4()
+    ))
+
+    with caplog.at_level(logging.INFO, logger="live_coach"):
+        transcript = "line one\nBearer abcdefghijklmnop " + secret + " " + ("x" * 900)
+        for delta in (transcript[:25], transcript[25:54], transcript[54:]):
+            await provider.incoming.put(json.dumps({
+                "type": "session.input_transcript.delta", "delta": delta,
+            }))
+        await provider.incoming.put(json.dumps({"type": "session.delegation.created"}))
+        await provider.incoming.put(json.dumps({
+            "type": "response.event",
+            "event": {"type": "response.completed", "response": {"output": []}},
+        }))
+        for _ in range(100):
+            if any(event.get("state") == "done" for event in socket.sent):
+                break
+            await asyncio.sleep(0.001)
+        await socket.incoming.put({"type": "session.close"})
+        await asyncio.wait_for(task, 0.5)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert secret not in messages
+    assert "abcdefghijklmnop" not in messages
+    diagnostic = next(line for line in messages.splitlines() if "outcome=started" in line)
+    logged_transcript = diagnostic.split("transcript=", 1)[1].split(" transcript_source=", 1)[0]
+    assert "\\n" not in logged_transcript
+    assert len(logged_transcript.strip("'")) <= 300
+    assert "[redacted]" in logged_transcript
+
+
+@pytest.mark.asyncio
+async def test_delegation_diagnostic_joins_output_deltas_before_redaction(
+    caplog, monkeypatch
+):
+    secret = "split-secret-with-spaces"
+    monkeypatch.setenv("DELEGATION_SECRET", secret)
+    provider = _LifecycleProvider()
+    socket = FakeClientWebSocket()
+    service = _lifecycle_service(LiveCoachPolicy(close_timeout=0.1))
+    task = asyncio.create_task(service._bridge(socket, provider, user_id=uuid4()))
+
+    with caplog.at_level(logging.INFO, logger="live_coach"):
+        await provider.incoming.put(json.dumps({"type": "session.delegation.created"}))
+        for delta in ("Keep  two ", "spaces; ", "split-secret-", "with-spaces"):
+            await provider.incoming.put(json.dumps({
+                "type": "response.event",
+                "event": {"type": "response.output_text.delta", "delta": delta},
+            }))
+        await provider.incoming.put(json.dumps({
+            "type": "response.event", "event": {"type": "response.completed"},
+        }))
+        for _ in range(100):
+            if any(event.get("state") == "done" for event in socket.sent):
+                break
+            await asyncio.sleep(0.001)
+        await socket.incoming.put({"type": "session.close"})
+        await asyncio.wait_for(task, 0.5)
+
+    diagnostic = next(
+        record.getMessage() for record in caplog.records
+        if "outcome=response.completed" in record.getMessage()
+    )
+    assert secret not in diagnostic
+    assert "returned_text='Keep two spaces; [redacted]'" in diagnostic
+
+
+@pytest.mark.asyncio
+async def test_response_created_updates_diagnostic_input_and_provenance(caplog):
+    provider = _LifecycleProvider()
+    socket = FakeClientWebSocket()
+    service = _lifecycle_service(LiveCoachPolicy(close_timeout=0.1))
+    task = asyncio.create_task(service._bridge(socket, provider, user_id=uuid4()))
+
+    with caplog.at_level(logging.INFO, logger="live_coach"):
+        await provider.incoming.put(json.dumps({
+            "type": "session.input_transcript.delta", "delta": "rough transcript",
+        }))
+        await provider.incoming.put(json.dumps({"type": "session.delegation.created"}))
+        await provider.incoming.put(json.dumps({
+            "type": "response.event",
+            "event": {
+                "type": "response.created",
+                "response": {"input": [{
+                    "type": "message",
+                    "content": [{"type": "input_text", "text": "exact observed input"}],
+                }]},
+            },
+        }))
+        await provider.incoming.put(json.dumps({
+            "type": "response.event", "event": {"type": "response.completed"},
+        }))
+        for _ in range(100):
+            if any(event.get("state") == "done" for event in socket.sent):
+                break
+            await asyncio.sleep(0.001)
+        await socket.incoming.put({"type": "session.close"})
+        await asyncio.wait_for(task, 0.5)
+
+    diagnostic = next(
+        record.getMessage() for record in caplog.records
+        if "outcome=response.completed" in record.getMessage()
+    )
+    assert "transcript='exact observed input'" in diagnostic
+    assert "transcript_source=response_created_input_observed_unverified" in diagnostic
+
+
+@pytest.mark.asyncio
+async def test_teardown_distinguishes_explicit_user_end_from_transport_close(caplog):
+    service = _lifecycle_service(LiveCoachPolicy(close_timeout=0.1))
+
+    explicit_provider = _LifecycleProvider()
+    explicit_socket = FakeClientWebSocket()
+    with caplog.at_level(logging.INFO, logger="live_coach"):
+        task = asyncio.create_task(service._bridge(
+            explicit_socket, explicit_provider, user_id=uuid4()
+        ))
+        await explicit_socket.incoming.put({"type": "session.close"})
+        await asyncio.wait_for(task, 0.5)
+    explicit_log = next(
+        record.getMessage() for record in caplog.records
+        if "live bridge teardown:" in record.getMessage()
+    )
+    assert "reason=user_ended" in explicit_log
+    assert "explicit_client_close=True" in explicit_log
+    assert "client_close_code=None" in explicit_log
+    assert "client_close_reason=None" in explicit_log
+
+    class TransportClosedSocket(FakeClientWebSocket):
+        async def receive_json(self):
+            raise WebSocketDisconnect(code=1006, reason="connection_lost")
+
+    caplog.clear()
+    transport_provider = _LifecycleProvider()
+    with caplog.at_level(logging.INFO, logger="live_coach"):
+        await service._bridge(
+            TransportClosedSocket(), transport_provider, user_id=uuid4()
+        )
+    transport_log = next(
+        record.getMessage() for record in caplog.records
+        if "live bridge teardown:" in record.getMessage()
+    )
+    assert "reason=transport_closed" in transport_log
+    assert "explicit_client_close=False" in transport_log
+    assert "client_close_code=1006" in transport_log
+    assert "client_close_reason='connection_lost'" in transport_log
 
 
 @pytest.mark.asyncio

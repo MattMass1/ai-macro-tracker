@@ -10,6 +10,8 @@ from collections import defaultdict, deque
 from datetime import date
 import json
 import logging
+import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -178,6 +180,86 @@ def _number(value: Any) -> float:
 
 def _short_text(value: Any, limit: int = 80) -> str:
     return " ".join(str(value or "").split())[:limit]
+
+
+def _diagnostic_text(value: Any, limit: int = 300) -> str:
+    """Bound text-only diagnostics and redact credential-shaped/configured secrets."""
+    if not isinstance(value, str):
+        return ""
+    for key, secret in os.environ.items():
+        if len(secret) >= 8 and any(
+            part in key.upper()
+            for part in ("TOKEN", "SECRET", "PASSWORD", "API_KEY")
+        ):
+            value = value.replace(secret, "[redacted]")
+    value = re.sub(r"(?i)bearer\s+\S+|sk-[A-Za-z0-9_-]+", "[redacted]", value)
+    return " ".join(value.split())[:limit]
+
+
+def _message_text(items: Any) -> str:
+    """Read only explicit message text blocks, never audio or function payloads."""
+    parts = []
+    if isinstance(items, str):
+        return _diagnostic_text(items)
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, Mapping) or item.get("type") != "message":
+                continue
+            content = item.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, Mapping) and block.get("type") in {
+                        "input_text", "output_text", "text",
+                    }:
+                        text = block.get("text")
+                        if isinstance(text, str):
+                            parts.append(text)
+    return _diagnostic_text(" ".join(parts))
+
+
+@dataclass
+class _DelegationDiagnostic:
+    started_at: float
+    transcript: str
+    transcript_source: str
+    sequence: int
+    returned_text: str = ""
+    calls: list[dict[str, str]] = field(default_factory=list)
+    event_types: set[str] = field(default_factory=set)
+
+    def observe_input(self, items: Any, source: str) -> None:
+        """Prefer later, explicit text input while retaining its observed provenance."""
+        transcript = _message_text(items)
+        if transcript:
+            self.transcript = transcript
+            self.transcript_source = source
+
+    def observe(self, inner: Mapping[str, Any]) -> None:
+        event_type = inner.get("type")
+        if isinstance(event_type, str) and len(self.event_types) < 24:
+            self.event_types.add(_diagnostic_text(event_type, 80))
+        if event_type == "response.output_text.delta":
+            delta = inner.get("delta")
+            if isinstance(delta, str):
+                self.returned_text = (self.returned_text + delta)[:1200]
+        if event_type == "response.output_text.done" and isinstance(inner.get("text"), str):
+            self.returned_text = inner["text"][:1200]
+        items = [inner.get("item")]
+        response = inner.get("response")
+        if isinstance(response, Mapping) and isinstance(response.get("output"), list):
+            items.extend(response["output"])
+        text = _message_text(items)
+        if text:
+            self.returned_text = text
+        for item in items:
+            if not isinstance(item, Mapping) or item.get("type") != "function_call":
+                continue
+            call = {
+                key: _diagnostic_text(item.get(key), 80)
+                for key in ("name", "call_id")
+            }
+            if call not in self.calls and len(self.calls) < 16:
+                self.calls.append(call)
 
 
 def _workout_type(value: Any) -> str:
@@ -871,6 +953,52 @@ class LiveCoachService:
         # one's.
         turn_started_at: float | None = None
         turn_had_tool_call = False
+        diagnostic: _DelegationDiagnostic | None = None
+        pending_transcript = ""
+        turn_sequence = 0
+        explicit_client_close = False
+        client_close_code: str | int | None = None
+        client_close_reason: str | None = None
+
+        def log_diagnostic(outcome: str) -> None:
+            if diagnostic is None:
+                return
+            logger.info(
+                "Voice delegation diagnostic: user_id=%s turn=%d outcome=%s "
+                "transcript=%r transcript_source=%s advertised_tools=%s "
+                "returned_text=%r returned_calls=%s wall_ms=%.1f event_types=%s",
+                user_id, diagnostic.sequence, outcome, diagnostic.transcript,
+                diagnostic.transcript_source, sorted(allowed_tool_names),
+                _diagnostic_text(diagnostic.returned_text), diagnostic.calls,
+                (time.monotonic() - diagnostic.started_at) * 1000,
+                sorted(diagnostic.event_types),
+            )
+
+        async def start_turn(event: Mapping[str, Any]) -> None:
+            nonlocal diagnostic, pending_transcript, turn_sequence
+            nonlocal turn_started_at, turn_had_tool_call
+            if diagnostic is not None:
+                return
+            turn_sequence += 1
+            transcript = _message_text(event.get("input"))
+            pending = _diagnostic_text(pending_transcript)
+            diagnostic = _DelegationDiagnostic(
+                time.monotonic(), transcript or pending,
+                "delegation_input"
+                if transcript
+                else (
+                    "observed_input_transcript_unverified"
+                    if pending_transcript
+                    else "unavailable"
+                ),
+                turn_sequence,
+            )
+            pending_transcript = ""
+            turn_started_at = diagnostic.started_at
+            turn_had_tool_call = False
+            response_finished.clear()
+            await report_activity("resolving", "Working on it")
+            log_diagnostic("started")
 
         async def report_activity(state: str, label: str) -> None:
             event = sanitize_provider_event({
@@ -946,6 +1074,7 @@ class LiveCoachService:
 
         async def read_client() -> str:
             nonlocal barge_in_count, barge_in_recorded_for_response
+            nonlocal explicit_client_close, client_close_code, client_close_reason
             try:
                 while True:
                     event = await websocket.receive_json()
@@ -968,10 +1097,14 @@ class LiveCoachService:
                                 )
                         if not accepting_new_work:
                             continue
+                    if normalized["type"] == "session.close":
+                        explicit_client_close = True
                     await to_provider.put(normalized)
                     if normalized["type"] == "session.close":
                         return "close"
-            except Exception:
+            except Exception as exc:
+                client_close_code = safe_close_code(getattr(exc, "code", None))
+                client_close_reason = _diagnostic_text(getattr(exc, "reason", None), 64)
                 await put_terminal(to_provider, {"type": "session.close"})
                 return "disconnect"
 
@@ -986,6 +1119,7 @@ class LiveCoachService:
             nonlocal turn_started_at, turn_had_tool_call, tool_calls_in_flight
             nonlocal assistant_audio_in_flight, provider_close_code
             nonlocal provider_close_reason, barge_in_recorded_for_response
+            nonlocal diagnostic, pending_transcript
             try:
                 while True:
                     raw = await provider.recv()
@@ -1001,19 +1135,44 @@ class LiveCoachService:
                             barge_in_recorded_for_response = False
                         assistant_audio_in_flight = True
                         response_finished.clear()
-                    if event.get("type") == "session.delegation.created":
+                    if event_type == "session.input_transcript.delta":
+                        delta = event.get("delta")
+                        if isinstance(delta, str):
+                            pending_transcript = (pending_transcript + delta)[:1200]
+                    if event_type == "session.delegation.created":
+                        await start_turn(event)
                         logger.info("Voice delegation created: user_id=%s", user_id)
-                    if event.get("type") == "response.event":
+                    if event_type == "response.event":
                         inner = event.get("event")
                         inner_type = inner.get("type") if isinstance(inner, Mapping) else None
-                        if inner_type == "response.created" and turn_started_at is None:
-                            turn_started_at = time.monotonic()
-                            turn_had_tool_call = False
-                            response_finished.clear()
-                        elif inner_type in {"response.completed", "response.done"}:
+                        if inner_type == "response.created":
+                            await start_turn(inner)
+                            if diagnostic is not None:
+                                response = inner.get("response")
+                                response_input = (
+                                    response.get("input")
+                                    if isinstance(response, Mapping)
+                                    else None
+                                )
+                                diagnostic.observe_input(
+                                    inner.get("input") or response_input,
+                                    "response_created_input_observed_unverified",
+                                )
+                        if diagnostic is not None and isinstance(inner, Mapping):
+                            diagnostic.observe(inner)
+                        if inner_type in {
+                            "response.completed",
+                            "response.done",
+                            "response.failed",
+                            "response.incomplete",
+                        }:
                             assistant_audio_in_flight = False
                             barge_in_recorded_for_response = False
                             response_finished.set()
+                            log_diagnostic(str(inner_type))
+                            diagnostic = None
+                            turn_started_at = None
+                            await report_activity("done", "")
                             logger.info(
                                 "Voice delegated turn completed: tool_call=%s",
                                 turn_had_tool_call,
@@ -1035,7 +1194,6 @@ class LiveCoachService:
                             (received_at - turn_started_at) * 1000
                             if turn_started_at is not None else None
                         )
-                        turn_started_at = None
                         turn_had_tool_call = True
                         tool_calls_in_flight += 1
                         response_finished.clear()
@@ -1101,7 +1259,10 @@ class LiveCoachService:
                     if event is None:
                         return
                     await websocket.send_json(event)
-            except Exception:
+            except Exception as exc:
+                nonlocal client_close_code, client_close_reason
+                client_close_code = safe_close_code(getattr(exc, "code", None))
+                client_close_reason = _diagnostic_text(getattr(exc, "reason", None), 64)
                 return
 
         client_reader = asyncio.create_task(read_client())
@@ -1156,7 +1317,7 @@ class LiveCoachService:
                 })
                 await put_terminal(to_provider, {"type": "session.close"})
             elif client_reader in done:
-                teardown_reason = "client_disconnect"
+                teardown_reason = "user_ended" if explicit_client_close else "transport_closed"
                 client_can_receive = client_reader.result() != "disconnect"
             elif provider_reader in done:
                 provider_result = provider_reader.result()
@@ -1196,7 +1357,7 @@ class LiveCoachService:
                         )
                 return
             elif client_writer in done:
-                teardown_reason = "client_disconnect"
+                teardown_reason = "user_ended" if explicit_client_close else "transport_closed"
                 client_can_receive = False
                 await put_terminal(to_provider, {"type": "session.close"})
 
@@ -1221,15 +1382,18 @@ class LiveCoachService:
             return
         finally:
             now = time.monotonic()
+            log_diagnostic("interrupted")
             logger.info(
                 "live bridge teardown: user_id=%s reason=%s elapsed_seconds=%.3f "
                 "since_client_seconds=%.3f since_provider_seconds=%.3f "
                 "assistant_audio_in_flight=%s tool_calls_in_flight=%d "
-                "provider_close_code=%r provider_close_reason=%r barge_in_count=%d",
+                "provider_close_code=%r provider_close_reason=%r barge_in_count=%d "
+                "client_close_code=%r client_close_reason=%r explicit_client_close=%s",
                 user_id, teardown_reason, now - session_started_at,
                 now - last_client_activity, now - last_provider_activity,
                 assistant_audio_in_flight, tool_calls_in_flight,
                 provider_close_code, provider_close_reason, barge_in_count,
+                client_close_code, client_close_reason, explicit_client_close,
             )
             for task in tasks:
                 if not task.done():

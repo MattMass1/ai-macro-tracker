@@ -1366,6 +1366,38 @@ async def test_composite_voice_query_resolves_each_component_and_sums_once(monke
     assert macros["protein"] == pytest.approx(34.5 + 2, abs=1)
 
 
+async def test_asr_ratio_composite_resolves_and_keeps_canonical_label(monkeypatch):
+    _enable_fatsecret(monkeypatch)
+
+    async def fake_request(data):
+        if data.get("method") == "foods.search":
+            expression = str(data.get("search_expression") or "").casefold()
+            if expression == "93/7 ground beef":
+                return _fatsecret_search_hit("111", "93/7 Ground Beef")
+            if expression == "sweet potato":
+                return _fatsecret_search_hit("222", "Sweet Potato")
+            return {"foods": {}}
+        if data.get("food_id") == "111":
+            return _fatsecret_get_hit(
+                "93/7 Ground Beef", description="4 oz", grams=113.4,
+                calories=170, protein=23, carbs=0, fat=8, fiber=0,
+            )
+        return _fatsecret_get_hit(
+            "Sweet Potato", description="100 g", grams=100,
+            calories=86, protein=1.6, carbs=20.1, fat=0.1, fiber=3,
+        )
+
+    monkeypatch.setattr(food_lookup, "_fatsecret_request", fake_request)
+    result = await food_lookup.resolve_food(
+        "6 ounces of 93 7 ground beef and 50 grams of sweet potato"
+    )
+    assert result is not None
+    assert result["name"] == "6 ounces of 93/7 ground beef and 50 grams of sweet potato"
+    assert "FatSecret: 111" in result["source"]
+    assert "FatSecret: 222" in result["source"]
+    assert "UNRESOLVED" not in result["source"]
+
+
 @pytest.mark.parametrize("query", ["mac and cheese", "fish and chips"])
 async def test_named_and_foods_resolve_as_one_food(monkeypatch, query):
     calls = []
@@ -1414,6 +1446,54 @@ async def test_unresolved_split_falls_back_to_whole_food(monkeypatch):
 ])
 def test_spoken_fractional_portions_leave_clean_search_identity(query, quantity, unit, identity):
     assert food_lookup._clean_component(query) == (quantity, unit, identity)
+
+
+@pytest.mark.parametrize("query", [
+    "93/7 ground beef",
+    "93 7 ground beef",
+    "93-7 ground beef",
+    ".93 7 ground beef",
+    "93 / 7 ground beef",
+    "ninety three seven ground beef",
+    "ninety-three seven ground beef",
+])
+def test_ground_beef_ratio_normalization(query):
+    assert food_lookup._clean_component(query) == (None, None, "93/7 ground beef")
+
+
+@pytest.mark.parametrize(("query", "expected"), [
+    ("80 20 ground beef", "80/20 ground beef"),
+    ("85 15 ground beef", "85/15 ground beef"),
+    ("90 10 ground beef", "90/10 ground beef"),
+    ("96 4 ground beef", "96/4 ground beef"),
+])
+def test_common_ground_beef_ratios_normalize(query, expected):
+    assert food_lookup._clean_component(query) == (None, None, expected)
+
+
+def test_mixed_fraction_is_not_normalized_as_a_ratio():
+    assert food_lookup._clean_component("2 1/2 cups white rice") == (
+        2.5, "cups", "white rice"
+    )
+
+
+async def test_spoken_ratio_resolves_against_full_normalized_identity(monkeypatch):
+    _enable_fatsecret(monkeypatch)
+
+    async def fake_request(data):
+        if data.get("method") == "foods.search":
+            assert data["search_expression"] == "93/7 ground beef"
+            return _fatsecret_search_hit("111", "93/7 Ground Beef")
+        return _fatsecret_get_hit(
+            "93/7 Ground Beef", description="4 oz", grams=113.4,
+            calories=170, protein=23, carbs=0, fat=8, fiber=0,
+        )
+
+    monkeypatch.setattr(food_lookup, "_fatsecret_request", fake_request)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", lambda _query: asyncio.sleep(0, result=None))
+    found = await food_lookup.resolve_food("ninety three seven ground beef")
+    assert found["name"] == "93/7 Ground Beef"
+    assert found["source"] == "FatSecret: 111"
 
 
 @pytest.mark.parametrize(("query", "factor"), [

@@ -42,6 +42,35 @@ _NUMBER_WORDS = {
     "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
     "seven": 7, "eight": 8, "nine": 9, "ten": 10, "twelve": 12, "dozen": 12,
 }
+_CARDINAL_ONES = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19,
+}
+_CARDINAL_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+_NUMBER_PHRASES = {
+    **_CARDINAL_ONES,
+    **_CARDINAL_TENS,
+    **{
+        f"{tens_word} {one_word}": tens_value + one_value
+        for tens_word, tens_value in _CARDINAL_TENS.items()
+        for one_word, one_value in _CARDINAL_ONES.items()
+        if 0 < one_value < 10
+    },
+    "one hundred": 100,
+}
+_NUMBER_PHRASE_RE = re.compile(
+    r"\b(?:" + "|".join(
+        re.escape(phrase) for phrase in sorted(_NUMBER_PHRASES, key=len, reverse=True)
+    ) + r")\b",
+    re.IGNORECASE,
+)
+_LEAN_FAT_PAIRS = frozenset({(80, 20), (85, 15), (90, 10), (93, 7), (96, 4)})
 # Weight/volume units convertible to grams for deterministic portion scaling
 # (volumes approximate water density — acceptable for the common-food cases here).
 _GRAMS_PER_UNIT = {
@@ -400,10 +429,25 @@ def _extract_quantity(text: str) -> tuple[float | None, str | None, str]:
     return None, None, text
 
 
+def _normalize_query_text(text: str) -> str:
+    """Canonicalize spoken numbers and common meat lean/fat ratios."""
+    words = re.sub(r"(?<=[A-Za-z])-(?=[A-Za-z])", " ", text)
+    words = _NUMBER_PHRASE_RE.sub(
+        lambda match: str(_NUMBER_PHRASES[match.group(0).casefold()]), words
+    )
+    for lean, fat in _LEAN_FAT_PAIRS:
+        words = re.sub(
+            rf"(?<![\d/])\.?{lean}\s*(?:/|-|\s)\s*{fat}(?!\d)",
+            f"{lean}/{fat}",
+            words,
+        )
+    return " ".join(words.split())
+
+
 def _clean_component(text: str) -> tuple[float | None, str | None, str]:
     """Strip parenthetical wrapping, hedging words, and stray punctuation, then
     pull off any explicit quantity — the remainder is what gets searched."""
-    unwrapped = text.replace("(", " ").replace(")", " ")
+    unwrapped = _normalize_query_text(text).replace("(", " ").replace(")", " ")
     dehedged = _HEDGE_RE.sub(" ", unwrapped)
     depunctuated = re.sub(r"[,;]+", " ", dehedged)
     collapsed = " ".join(depunctuated.split())
@@ -560,6 +604,7 @@ async def resolve_food(
 async def _resolve_food_text(
     text: str, *, whole_item: bool, catalog_lookup
 ) -> dict[str, Any] | None:
+    text = _normalize_query_text(text)
     raw_parts = _split_components(text)
     if normalize_food_name(text) in _SINGLE_FOOD_AND_NAMES:
         raw_parts = [text]

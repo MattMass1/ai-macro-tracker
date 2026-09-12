@@ -729,10 +729,12 @@ def test_voice_tool_call_logs_never_include_transcript_or_credential_markers(cap
     asyncio.run(run())
     messages = [record.message for record in caplog.records]
     joined = " ".join(messages)
-    # arguments/result ARE logged (the brief scopes redaction to transcripts,
-    # audio, tokens, and credentials — food names and numbers are not those,
-    # and the diagnosis ladder in voice-write-path-failures.md depends on
-    # seeing them), but no bearer token, API key, or audio payload leaks in.
+    assert "log_meal" in joined
+    assert "call-1" in joined
+    assert "outcome=ok" in joined
+    assert "ground beef" not in joined.casefold()
+    assert "255" not in joined
+    assert "100" not in joined
     assert "Bearer" not in joined
     assert "sk-" not in joined
     assert "audio" not in joined.casefold()

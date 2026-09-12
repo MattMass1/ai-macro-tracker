@@ -505,11 +505,13 @@ class DuplicateGuardConn:
 
     async def fetchrow(self, _sql, *args):
         (row_id, user_id, name, meal, calories, protein, carbs, fat, fiber, day,
-         meal_id, macro_source, _item_id, _observation_id, _metadata_json) = args
+         meal_id, macro_source, _item_id, _observation_id, metadata_json) = args
         row = {"id": row_id, "user_id": user_id, "name": name, "meal": meal,
                "calories": calories, "protein": protein, "carbs": carbs,
                "fat": fat, "fiber": fiber, "day": day, "meal_id": meal_id,
-               "macro_source": macro_source, "created_at": datetime.now(timezone.utc)}
+               "macro_source": macro_source,
+               "component_metadata": json.loads(metadata_json) if metadata_json else None,
+               "created_at": datetime.now(timezone.utc)}
         self.rows.append(row)
         return row
 
@@ -524,7 +526,7 @@ def _duplicate_guard_store(monkeypatch):
     return store
 
 
-async def test_duplicate_guard_collapses_a_repeat_within_the_window(monkeypatch, caplog):
+async def test_duplicate_guard_collapses_a_voice_retry_within_the_window(monkeypatch, caplog):
     store = _duplicate_guard_store(monkeypatch)
     conn = DuplicateGuardConn()
     values = dict(user_id="user-1", name="6 oz 93/7 Ground Beef", meal="Lunch",
@@ -532,15 +534,15 @@ async def test_duplicate_guard_collapses_a_repeat_within_the_window(monkeypatch,
                   day="2026-09-12", macro_source="FatSecret: 111")
 
     with caplog.at_level(logging.INFO, logger="store"):
-        first = await store._insert_meal_conn(conn, **values)
-        second = await store._insert_meal_conn(conn, **values)
+        first = await store._insert_meal_conn(conn, origin="voice", **values)
+        second = await store._insert_meal_conn(conn, origin="voice", **values)
 
     assert len(conn.rows) == 1  # the retry never inserted a second row
     assert second["id"] == first["id"]  # the earlier confirmation, unchanged
     assert any("duplicate meal guard fired" in record.message for record in caplog.records)
 
 
-async def test_duplicate_guard_ignores_punctuation_and_case_in_the_name():
+async def test_voice_duplicate_guard_ignores_punctuation_and_case_in_the_name():
     store = Store("postgresql://unused")
     async def fake_catalog_snapshot(_conn, *, name, macros, macro_source, serving_basis=None):
         return None, None
@@ -550,8 +552,8 @@ async def test_duplicate_guard_ignores_punctuation_and_case_in_the_name():
                 carbs=0.0, fat=17.0, fiber=0.0, day="2026-09-12",
                 macro_source="FatSecret: 111")
 
-    first = await store._insert_meal_conn(conn, name="6 oz 93/7 Ground Beef", **base)
-    second = await store._insert_meal_conn(conn, name="6 OZ, 93/7 ground beef!!", **base)
+    first = await store._insert_meal_conn(conn, name="6 oz 93/7 Ground Beef", origin="voice", **base)
+    second = await store._insert_meal_conn(conn, name="6 OZ, 93/7 ground beef!!", origin="voice", **base)
 
     assert len(conn.rows) == 1
     assert second["id"] == first["id"]
@@ -564,13 +566,26 @@ async def test_two_identical_logs_five_minutes_apart_both_land(monkeypatch):
                   calories=255.0, protein=34.5, carbs=0.0, fat=17.0, fiber=0.0,
                   day="2026-09-12", macro_source="FatSecret: 111")
 
-    await store._insert_meal_conn(conn, **values)
+    await store._insert_meal_conn(conn, origin="voice", **values)
     assert len(conn.rows) == 1
     # Age the first row past the window instead of sleeping for real.
     conn.rows[0]["created_at"] -= timedelta(seconds=DUPLICATE_MEAL_WINDOW_SECONDS + 180)
 
-    await store._insert_meal_conn(conn, **values)
+    await store._insert_meal_conn(conn, origin="voice", **values)
     assert len(conn.rows) == 2  # a real second meal, five minutes later
+
+
+async def test_two_typed_identical_logs_inside_window_both_land(monkeypatch):
+    store = _duplicate_guard_store(monkeypatch)
+    conn = DuplicateGuardConn()
+    values = dict(user_id="user-1", name="Rice", meal="Lunch", calories=200.0,
+                  protein=4.0, carbs=44.0, fat=0.5, fiber=1.0,
+                  day="2026-09-12", macro_source="Catalog: rice")
+
+    await store._insert_meal_conn(conn, **values)
+    await store._insert_meal_conn(conn, **values)
+
+    assert len(conn.rows) == 2
 
 
 async def test_duplicate_guard_does_not_collapse_different_macros_or_meal_types():

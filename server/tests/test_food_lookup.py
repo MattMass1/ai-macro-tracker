@@ -1272,6 +1272,36 @@ async def test_honey_fixture_can_never_resolve_for_a_ground_beef_query(monkeypat
     assert result is None  # never silently becomes honey
 
 
+async def test_short_beef_variant_cannot_accept_bouillon(monkeypatch):
+    monkeypatch.delenv("FATSECRET_ATTRIBUTION_ENABLED", raising=False)
+
+    def handler(_request):
+        return httpx.Response(200, json={"products": [{
+            "code": "bouillon", "product_name": "Cube De Bouillon Boeuf Beef",
+            "nutriments": {"energy-kcal_100g": 210, "proteins_100g": 9,
+                           "carbohydrates_100g": 20, "fat_100g": 10, "fiber_100g": 0},
+        }]})
+
+    mock_transport(monkeypatch, handler)
+    assert await food_lookup.resolve_food("93/7 ground beef") is None
+
+    assert not food_lookup._full_query_relevant(
+        "93/7 ground beef", {"food_name": "93/7 Beef"}
+    )
+
+
+async def test_short_variant_accepts_legitimate_branded_flavor_match(monkeypatch):
+    monkeypatch.delenv("FATSECRET_ATTRIBUTION_ENABLED", raising=False)
+
+    def handler(request):
+        if request.url.params["search_terms"].casefold() == "cinnamon raisin bread":
+            return httpx.Response(200, json=LOVEN_OFF_PAYLOAD)
+        return httpx.Response(200, json={"products": []})
+
+    mock_transport(monkeypatch, handler)
+    assert await food_lookup.resolve_food(LOVEN_QUERY) is not None
+
+
 async def test_clean_ground_beef_query_is_unchanged_and_six_ounces_scales_to_anchor(monkeypatch):
     _enable_fatsecret(monkeypatch)
 
@@ -1332,6 +1362,70 @@ async def test_composite_voice_query_resolves_each_component_and_sums_once(monke
     # 6 oz ground beef (~255 cal / ~34.5 g protein) + 1 medium sweet potato (112 cal / 2 g)
     assert macros["calories"] == pytest.approx(255 + 112, abs=3)
     assert macros["protein"] == pytest.approx(34.5 + 2, abs=1)
+
+
+@pytest.mark.parametrize("query", ["mac and cheese", "fish and chips"])
+async def test_named_and_foods_resolve_as_one_food(monkeypatch, query):
+    calls = []
+
+    async def catalog(name):
+        calls.append(name)
+        return {"name": name, "macros_per_serving": {
+            "calories": 500, "protein": 20, "carbs": 50, "fat": 20, "fiber": 3,
+        }, "source": "Catalog: compound food"} if name == query else None
+
+    result = await food_lookup.resolve_food(query, catalog_lookup=catalog)
+    assert result["name"] == query
+    assert result["macros_per_serving"]["calories"] == 500
+    assert calls == [query]
+
+
+async def test_unresolved_split_falls_back_to_whole_food(monkeypatch):
+    calls = []
+
+    async def catalog(name):
+        calls.append(name)
+        if name == "peanut butter and jelly":
+            return {"name": name, "macros_per_serving": {
+                "calories": 400, "protein": 12, "carbs": 45, "fat": 20, "fiber": 4,
+            }, "source": "Catalog: sandwich"}
+        return None
+
+    result = await food_lookup.resolve_food(
+        "peanut butter and jelly", catalog_lookup=catalog
+    )
+    assert result["name"] == "peanut butter and jelly"
+    assert result["macros_per_serving"]["calories"] == 400
+    assert calls[-1] == "peanut butter and jelly"
+
+
+@pytest.mark.parametrize(("query", "quantity", "unit", "identity"), [
+    ("half a cup of rice", 0.5, "cup", "rice"),
+    ("2 1/2 cups rice", 2.5, "cups", "rice"),
+    ("1 1/2 tbsp olive oil", 1.5, "tbsp", "olive oil"),
+    ("2 and a half cups rice", 2.5, "cups", "rice"),
+    ("a quarter cup rice", 0.25, "cup", "rice"),
+])
+def test_spoken_fractional_portions_leave_clean_search_identity(query, quantity, unit, identity):
+    assert food_lookup._clean_component(query) == (quantity, unit, identity)
+
+
+@pytest.mark.parametrize(("query", "factor"), [
+    ("half a cup of rice", 0.5 * 236.588 / 100),
+    ("2 1/2 cups rice", 2.5 * 236.588 / 100),
+    ("1 1/2 tbsp olive oil", 1.5 * 14.787 / 100),
+])
+async def test_spoken_fractional_portions_scale_macros(monkeypatch, query, factor):
+    identity = "olive oil" if "oil" in query else "rice"
+
+    async def catalog(name):
+        assert name == identity
+        return {"name": identity, "macros_per_100g": {
+            "calories": 100, "protein": 10, "carbs": 10, "fat": 10, "fiber": 10,
+        }, "source": "Catalog: test"}
+
+    result = await food_lookup.resolve_food(query, catalog_lookup=catalog)
+    assert result["macros_per_serving"]["calories"] == pytest.approx(100 * factor, abs=0.01)
 
 
 async def test_composite_with_one_unresolved_component_sums_the_rest_and_flags_it(monkeypatch):

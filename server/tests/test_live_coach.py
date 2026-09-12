@@ -283,10 +283,11 @@ def test_session_start_uses_exact_gpt_live_contract_with_the_voice_write_unlock(
             "instructions": (
                 "You are Macro Coach in a live voice conversation. Be concise, "
                 "practical, and conversational. Delegate questions that need the "
-                "user's saved nutrition or workout context. Whenever the user says "
-                "they ate or drank something, or asks you to log, check, or look up "
-                "food or macros, delegate that turn to your backend and let it log it "
-                "— do not ask the user to repeat or confirm what they ate, and do not "
+                "user's saved nutrition or workout context. A statement that the user "
+                "ate or drank something, or an explicit request to log it, is a write. "
+                "A question about a food's macros is lookup-only and must not be logged. "
+                "Delegate either kind of request to your backend — do not ask the user "
+                "to repeat or confirm what they ate, and do not "
                 "claim it was logged until your backend confirms."
             ),
             "audio": {
@@ -1984,7 +1985,7 @@ async def test_bridge_streams_coach_activity_to_client_without_leaking_tool_argu
 
     messages = [record.getMessage() for record in caplog.records]
     assert any(
-        "Voice tool call succeeded" in m and "delegation_ms=" in m and "handler_ms=" in m
+        "outcome=ok" in m and "delegation_ms=" in m and "handler_ms=" in m
         for m in messages
     )
     assert any(
@@ -2337,7 +2338,7 @@ async def test_voice_log_meal_rejects_bare_placeholder_but_accepts_detailed_esti
 
 
 @pytest.mark.asyncio
-async def test_dispatch_voice_tool_call_logs_failure_with_tool_name_and_error(caplog):
+async def test_dispatch_voice_tool_call_logs_failure_without_error_message(caplog):
     async def failing(_call_id, _args):
         raise ValueError("macro_source is required")
 
@@ -2353,7 +2354,10 @@ async def test_dispatch_voice_tool_call_logs_failure_with_tool_name_and_error(ca
     assert any(
         record.levelno == logging.WARNING
         and "log_meal" in record.getMessage()
-        and "macro_source is required" in record.getMessage()
+        and "call-1" in record.getMessage()
+        and "outcome=error" in record.getMessage()
+        and "error_type=ValueError" in record.getMessage()
+        and "macro_source is required" not in record.getMessage()
         and "delegation_ms=42.0" in record.getMessage()
         and "handler_ms=" in record.getMessage()
         for record in caplog.records
@@ -2375,6 +2379,9 @@ async def test_dispatch_voice_tool_call_logs_success_with_tool_name_and_result(c
 
     assert any(
         record.levelno == logging.INFO and "log_meal" in record.getMessage()
+        and "call-1" in record.getMessage()
+        and "outcome=ok" in record.getMessage()
+        and "row-1" not in record.getMessage()
         and "delegation_ms=17.5" in record.getMessage()
         and "handler_ms=" in record.getMessage()
         for record in caplog.records
@@ -2439,3 +2446,12 @@ def test_instructions_forbid_promising_or_asking_the_user_to_repeat():
         assert "repeat or confirm" in lowered, text
     assert "before a tool result confirms the write" in _BACKEND_INSTRUCTIONS.casefold()
     assert "until your backend confirms" in _LIVE_INSTRUCTIONS.casefold()
+
+
+def test_live_instructions_distinguish_food_questions_from_writes():
+    from live_coach import _LIVE_INSTRUCTIONS
+
+    lowered = _LIVE_INSTRUCTIONS.casefold()
+    assert "explicit request to log it" in lowered
+    assert "question about a food's macros" in lowered
+    assert "lookup-only and must not be logged" in lowered

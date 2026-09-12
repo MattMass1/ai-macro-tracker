@@ -21,10 +21,8 @@ from migrations import MigrationError, migration_status
 
 logger = logging.getLogger(__name__)
 
-# The user repeating himself because he heard no confirmation must not double
-# his day: an identical meal (same user, normalized name, meal type, and
-# macros) inside this window returns the earlier row instead of inserting a
-# second one. Two identical logs further apart than this are two real meals.
+# A voice retry after a dropped confirmation must not double the user's day.
+# Typed, preset, and API entries never use this window.
 DUPLICATE_MEAL_WINDOW_SECONDS = 120
 
 
@@ -322,21 +320,21 @@ class Store:
 
     async def _insert_meal_conn(self, conn, *, user_id, name, meal, calories, protein,
                                 carbs, fat, fiber, day, macro_source,
-                                component_metadata_json=None):
+                                component_metadata_json=None, origin=None):
         """Insert one nutrition row using the caller's transaction.
 
-        Returns the earlier row unchanged, without inserting, when an
-        identical meal (same normalized name, meal type, and macros) for this
-        user was logged inside `DUPLICATE_MEAL_WINDOW_SECONDS` — the coach
-        promising a log before the write, then repeating itself when no
-        confirmation arrived, must not double the day's totals.
+        For voice-originated writes only, returns an identical recent voice
+        row unchanged. Other origins always insert a new row.
         """
         await conn.execute("INSERT INTO days(user_id,date) VALUES($1,$2) ON CONFLICT(user_id,date) DO NOTHING", user_id, day)
         await conn.fetchval("SELECT date FROM days WHERE user_id=$1 AND date=$2 FOR UPDATE", user_id, day)
-        duplicate = await self._find_recent_duplicate_meal(
-            conn, user_id=user_id, name=name, meal=meal, calories=calories,
-            protein=protein, carbs=carbs, fat=fat, fiber=fiber, day=day,
-        )
+        duplicate = None
+        if origin == "voice":
+            duplicate = await self._find_recent_duplicate_meal(
+                conn, user_id=user_id, name=name, meal=meal, calories=calories,
+                protein=protein, carbs=carbs, fat=fat, fiber=fiber, day=day,
+                origin=origin,
+            )
         if duplicate is not None:
             logger.info(
                 "duplicate meal guard fired: user_id=%s meal=%s window_s=%s",
@@ -350,16 +348,20 @@ class Store:
         item_id, observation_id = await self._catalog_snapshot(
             conn, name=name, macros={"calories": calories, "protein": protein,
             "carbs": carbs, "fat": fat, "fiber": fiber}, macro_source=macro_source)
+        metadata = json.loads(component_metadata_json) if component_metadata_json else {}
+        if origin:
+            metadata["origin"] = origin
+        stored_metadata_json = json.dumps(metadata) if metadata else None
         row = await conn.fetchrow(
             "INSERT INTO nutrition_entries(id,user_id,name,meal,calories,protein,carbs,fat,fiber,day,meal_id,macro_source,food_item_id,food_observation_id,component_metadata) "
             "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb) RETURNING *",
             str(uuid4()), user_id, name, meal, calories, protein, carbs, fat, fiber, day,
-            meal_id, macro_source, item_id, observation_id, component_metadata_json)
+            meal_id, macro_source, item_id, observation_id, stored_metadata_json)
         return row
 
     @staticmethod
     async def _find_recent_duplicate_meal(conn, *, user_id, name, meal, calories,
-                                          protein, carbs, fat, fiber, day):
+                                          protein, carbs, fat, fiber, day, origin):
         """Return the most recent matching row inside the duplicate window, or None.
 
         Candidates are narrowed in SQL by user/day/meal-type/recency only;
@@ -374,6 +376,14 @@ class Store:
         target_name = normalize_food_name(name)
         target_macros = (calories, protein, carbs, fat, fiber)
         for candidate in candidates:
+            metadata = candidate.get("component_metadata") or {}
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except (TypeError, ValueError):
+                    metadata = {}
+            if not isinstance(metadata, Mapping) or metadata.get("origin") != origin:
+                continue
             if normalize_food_name(candidate["name"]) != target_name:
                 continue
             candidate_macros = (candidate["calories"], candidate["protein"],

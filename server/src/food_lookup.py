@@ -57,6 +57,9 @@ _UNIT_TOKEN = "|".join(sorted(_UNIT_WORDS, key=len, reverse=True))
 _LEADING_QTY_RE = re.compile(rf"^\s*({_NUM_TOKEN})\s+({_UNIT_TOKEN})\b\s*", re.IGNORECASE)
 _TRAILING_QTY_RE = re.compile(rf"\s*({_NUM_TOKEN})\s+({_UNIT_TOKEN})\s*$", re.IGNORECASE)
 _COMPONENT_SPLIT_RE = re.compile(r"(\(|\)|\band\b|,|\+)", re.IGNORECASE)
+_SINGLE_FOOD_AND_NAMES = frozenset({
+    "biscuits and gravy", "fish and chips", "mac and cheese",
+})
 _OFF_NUTRIMENTS = {"energy-kcal_100g":"calories", "proteins_100g":"protein",
     "carbohydrates_100g":"carbs", "fat_100g":"fat", "fiber_100g":"fiber"}
 _OFF_SERVING = {"energy-kcal_serving":"calories", "proteins_serving":"protein",
@@ -220,6 +223,28 @@ def _relevant(query: str, food: Mapping[str, Any]) -> bool:
         or len(meaningful & comparable) / len(meaningful) >= 0.6))
 
 
+def _full_query_relevant(query: str, food: Mapping[str, Any]) -> bool:
+    """Match the full identity, allowing only a leading brand phrase to drop."""
+    query_words = normalize_food_name(query).split()
+    candidate_words = set(normalize_food_name(" ".join(
+        str(food.get(key) or "") for key in ("food_name", "brand_name", "food_description")
+    )).split())
+    comparable = candidate_words | {
+        word[:-1] for word in candidate_words if len(word) > 3 and word.endswith("s")
+    }
+    meaningful = [word for word in query_words if word not in _UNIT_WORDS and len(word) > 1]
+    if meaningful and set(meaningful) <= comparable:
+        return True
+    # Provider records commonly omit a leading brand. Preserve a sufficiently
+    # specific trailing flavor/product identity, but never drop an interior
+    # modifier such as "ground" from "93/7 ground beef".
+    for dropped_prefix in (1, 2):
+        suffix = meaningful[dropped_prefix:]
+        if len(suffix) >= 2 and len(suffix) / len(meaningful) >= 0.6 and set(suffix) <= comparable:
+            return True
+    return False
+
+
 async def search_fatsecret(query: str) -> dict[str, Any] | None:
     search = await _fatsecret_request({"method":"foods.search", "search_expression":query, "max_results":5})
     candidate = next((food for food in _unwrap_foods(search)
@@ -323,6 +348,19 @@ def _query_variants(query: str) -> list[str]:
 
 def _quantity_value(token: str) -> float:
     lowered = token.casefold()
+    mixed = re.fullmatch(r"(\d+)\s+(?:and\s+)?(\d+)/(\d+)", lowered)
+    if mixed:
+        try:
+            return float(mixed.group(1)) + float(mixed.group(2)) / float(mixed.group(3))
+        except ZeroDivisionError:
+            return 1.0
+    spoken_mixed = re.fullmatch(r"(\d+)\s+and\s+a\s+half", lowered)
+    if spoken_mixed:
+        return float(spoken_mixed.group(1)) + 0.5
+    if lowered in ("half", "a half", "half a"):
+        return 0.5
+    if lowered in ("quarter", "a quarter"):
+        return 0.25
     if lowered in _NUMBER_WORDS:
         return float(_NUMBER_WORDS[lowered])
     if "/" in token:
@@ -343,10 +381,16 @@ def _extract_quantity(text: str) -> tuple[float | None, str | None, str]:
     `93/7 ground beef` keeps its fat ratio (no unit word follows it); `6 oz
     ground beef` and `ground beef, 200 g` both give up their quantity.
     """
-    match = _LEADING_QTY_RE.match(text)
+    spoken_number = (
+        rf"(?:\d+\s+(?:and\s+)?\d+/\d+|\d+\s+and\s+a\s+half|"
+        rf"half\s+a|a\s+half|a\s+quarter|quarter|{_NUM_TOKEN})"
+    )
+    leading = re.compile(rf"^\s*({spoken_number})\s+({_UNIT_TOKEN})\b\s*(?:of\s+)?", re.IGNORECASE)
+    trailing = re.compile(rf"\s*({spoken_number})\s+({_UNIT_TOKEN})\s*$", re.IGNORECASE)
+    match = leading.match(text)
     if match:
         return _quantity_value(match.group(1)), match.group(2).casefold(), text[match.end():].strip()
-    match = _TRAILING_QTY_RE.search(text)
+    match = trailing.search(text)
     if match:
         remainder = (text[:match.start()] + text[match.end():]).strip()
         return _quantity_value(match.group(1)), match.group(2).casefold(), remainder
@@ -400,7 +444,10 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup) ->
     for variant in _query_variants(query):
         for provider in providers:
             found = await provider(variant)
-            if found and (not whole_item or _macros(found.get("macros_per_serving", {}))): return found
+            candidate = {"food_name": found.get("name", "")} if found else {}
+            if (found and _full_query_relevant(query, candidate)
+                    and (not whole_item or _macros(found.get("macros_per_serving", {})))):
+                return found
     return None
 
 
@@ -456,6 +503,8 @@ async def _resolve_food_text(
     text: str, *, whole_item: bool, catalog_lookup
 ) -> dict[str, Any] | None:
     raw_parts = _split_components(text)
+    if normalize_food_name(text) in _SINGLE_FOOD_AND_NAMES:
+        raw_parts = [text]
     if len(raw_parts) <= 1:
         quantity, unit, remainder = _clean_component(raw_parts[0] if raw_parts else text)
         found = await _resolve_component(remainder or text, whole_item=whole_item, catalog_lookup=catalog_lookup)
@@ -487,6 +536,17 @@ async def _resolve_food_text(
             totals[key] += macros.get(key, 0.0)
         resolved_labels.append(label)
         any_resolved = True
+    if unresolved:
+        quantity, unit, remainder = _clean_component(text)
+        whole = await _resolve_component(
+            remainder or text, whole_item=whole_item, catalog_lookup=catalog_lookup
+        )
+        quantified = _quantify(whole, quantity, unit) if whole and quantity is not None else None
+        if whole:
+            if quantified is None:
+                return whole
+            macros, label = quantified
+            return {**whole, "macros_per_serving": macros, "serving_size": label}
     if not any_resolved:
         return None
     source_bits = list(resolved_labels)

@@ -50,9 +50,10 @@ OPENAI_LIVE_URL = "wss://api.openai.com/v1/live/sessions"
 _LIVE_INSTRUCTIONS = (
     "You are Macro Coach in a live voice conversation. Be concise, practical, "
     "and conversational. Delegate questions that need the user's saved nutrition "
-    "or workout context. Whenever the user says they ate or drank something, or "
-    "asks you to log, check, or look up food or macros, delegate that turn to "
-    "your backend and let it log it — do not ask the user to repeat or confirm "
+    "or workout context. A statement that the user ate or drank something, or "
+    "an explicit request to log it, is a write. A question about a food's macros "
+    "is lookup-only and must not be logged. Delegate either kind of request to "
+    "your backend — do not ask the user to repeat or confirm "
     "what they ate, and do not claim it was logged until your backend confirms."
 )
 _BACKEND_INSTRUCTIONS = (
@@ -531,8 +532,8 @@ async def dispatch_voice_tool_call(
     except Exception as exc:  # Tool failures are observations, not bridge crashes.
         handler_ms = (time.monotonic() - handler_started) * 1000
         logger.warning(
-            "Voice tool call failed: name=%r arguments=%r error=%s delegation_ms=%s handler_ms=%.1f",
-            name, arguments, exc, _format_ms(delegation_ms), handler_ms,
+            "Voice tool call: name=%r call_id=%r outcome=error error_type=%s delegation_ms=%s handler_ms=%.1f",
+            name, call_id, type(exc).__name__, _format_ms(delegation_ms), handler_ms,
         )
         error_label = _ACTIVITY_ERROR_LABEL.get(name)
         if error_label is not None and report_activity is not None:
@@ -540,8 +541,8 @@ async def dispatch_voice_tool_call(
         return str(exc)
     handler_ms = (time.monotonic() - handler_started) * 1000
     logger.info(
-        "Voice tool call succeeded: name=%r arguments=%r result=%r delegation_ms=%s handler_ms=%.1f",
-        name, arguments, result, _format_ms(delegation_ms), handler_ms,
+        "Voice tool call: name=%r call_id=%r outcome=ok delegation_ms=%s handler_ms=%.1f",
+        name, call_id, _format_ms(delegation_ms), handler_ms,
     )
     if name == "log_meal" and report_activity is not None:
         await report_activity("done", _log_meal_done_label(result))

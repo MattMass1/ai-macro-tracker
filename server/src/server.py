@@ -2519,7 +2519,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             separators=(",", ":"), default=str).encode()).hexdigest()
         return await store_client().insert_meal_idempotent(
             f"voice-log-meal:{call_id}", request_hash,
-            response_builder=_voice_meal_response, **values,
+            response_builder=_voice_meal_response, origin="voice", **values,
         )
 
     async def voice_get_today_tool(_call_id: str, args: Mapping[str, Any]) -> Any:

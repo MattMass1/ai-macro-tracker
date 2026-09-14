@@ -880,8 +880,8 @@ def test_query_variants_ladder_covers_brand_flavor_and_generic():
     assert food_lookup._query_variants("   ") == []
 
 
-async def test_branded_flavor_query_resolves_via_generic_variant(monkeypatch):
-    # Full brand+flavor phrase misses OpenFoodFacts; the generic variant hits.
+async def test_branded_flavor_query_rejects_generic_variant_without_brand_evidence(monkeypatch):
+    # A generic flavor hit does not verify the originally requested brand.
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
     def handler(request):
@@ -892,9 +892,7 @@ async def test_branded_flavor_query_resolves_via_generic_variant(monkeypatch):
 
     calls = mock_transport(monkeypatch, handler)
     result = await food_lookup.resolve_food(LOVEN_QUERY)
-    assert result is not None
-    assert result["source"] == "OpenFoodFacts: 4099100179378"
-    assert result["macros_per_100g"]["calories"] == 230.0
+    assert result is None
     assert set(c.url.params["search_terms"] for c in calls) == set(
         food_lookup._query_variants(LOVEN_QUERY)
     )
@@ -1329,7 +1327,28 @@ def test_lean_fat_ratio_identity_is_exact(wanted, candidate):
     assert accepted is (wanted == candidate)
 
 
-async def test_short_variant_accepts_legitimate_branded_flavor_match(monkeypatch):
+@pytest.mark.parametrize("name", [
+    "Dave's Killer Bread 21 Whole Grains and Seeds toast",
+    "Dave’s Killer Bread 21 Whole Grains and Seeds toast",
+    "David Protein Bar Cinnamon Bun",
+    "whole grain bread",
+])
+def test_full_query_relevance_keeps_identity_bearing_whole_and_bar(name):
+    assert food_lookup._full_query_relevant(name, {"food_name": name})
+
+
+@pytest.mark.parametrize("candidate", [
+    "Wonder Bread 21 Whole Grains and Seeds toast",
+    "toast",
+])
+def test_branded_bread_identity_rejects_different_brand_or_bare_toast(candidate):
+    assert not food_lookup._full_query_relevant(
+        "Dave's Killer Bread 21 Whole Grains and Seeds toast",
+        {"food_name": candidate},
+    )
+
+
+async def test_short_variant_rejects_missing_original_brand(monkeypatch):
     monkeypatch.delenv("FATSECRET_ATTRIBUTION_ENABLED", raising=False)
 
     def handler(request):
@@ -1338,7 +1357,7 @@ async def test_short_variant_accepts_legitimate_branded_flavor_match(monkeypatch
         return httpx.Response(200, json={"products": []})
 
     mock_transport(monkeypatch, handler)
-    assert await food_lookup.resolve_food(LOVEN_QUERY) is not None
+    assert await food_lookup.resolve_food(LOVEN_QUERY) is None
 
 
 async def test_clean_ground_beef_query_is_unchanged_and_six_ounces_scales_to_anchor(monkeypatch):
@@ -1449,6 +1468,57 @@ async def test_named_and_foods_resolve_as_one_food(monkeypatch, query):
     assert result["name"] == query
     assert result["macros_per_serving"]["calories"] == 500
     assert calls == [query]
+
+
+@pytest.mark.parametrize("query", ["mac and cheese", "salt and vinegar chips"])
+async def test_explicit_atomic_food_never_splits_product_name(monkeypatch, query):
+    calls = []
+
+    async def catalog(name):
+        calls.append(name)
+        return {"name": name, "macros_per_serving": {
+            "calories": 300, "protein": 8, "carbs": 40, "fat": 12, "fiber": 2,
+        }, "source": "Catalog: atomic food"}
+
+    result = await food_lookup.resolve_food(query, atomic=True, catalog_lookup=catalog)
+    assert result is not None
+    assert calls == [query]
+
+
+async def test_atomic_branded_product_reaches_provider_as_one_identity(monkeypatch):
+    calls = []
+
+    async def provider(query):
+        calls.append(query)
+        return {"name": "Dave's Killer Bread 21 Whole Grains and Seeds toast",
+                "macros_per_serving": {
+                    "calories": 100, "protein": 5, "carbs": 20, "fat": 1, "fiber": 3,
+                }, "serving_size": "1 slice", "source": "FixtureProvider: bread",
+                "attribution": {"verification_state": "exact_identifier"}}
+
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", provider)
+    result = await food_lookup.resolve_food(
+        "1 slice Dave's Killer Bread 21 Whole Grains and Seeds toast", atomic=True
+    )
+
+    assert result is not None
+    assert calls
+    assert all("seeds toast" != call.casefold() for call in calls)
+    assert all("seeds bread" != call.casefold() for call in calls)
+
+
+async def test_free_form_eggs_and_toast_still_splits(monkeypatch):
+    calls = []
+
+    async def catalog(name):
+        calls.append(name)
+        return {"name": name, "macros_per_serving": {
+            "calories": 100, "protein": 5, "carbs": 10, "fat": 4, "fiber": 1,
+        }, "source": f"Catalog: {name}"}
+
+    result = await food_lookup.resolve_food("eggs and toast", catalog_lookup=catalog)
+    assert result is not None
+    assert calls == ["eggs", "toast"]
 
 
 async def test_unresolved_split_falls_back_to_whole_food(monkeypatch):
@@ -1785,3 +1855,102 @@ async def test_resolved_cache_is_ttl_bounded_and_tenant_keyed(monkeypatch):
     finally:
         reset_user(token)
     assert calls == 5
+
+
+async def test_resolved_cache_separates_atomic_and_compound_modes(monkeypatch):
+    calls = []
+
+    class EmptyStore:
+        async def fetch_presets(self): return []
+        async def lookup_catalog(self, _query): return None
+
+    async def provider(query, **kwargs):
+        calls.append((query, kwargs.get("atomic")))
+        return {**BANANA_HIT, "name": f"mode-{kwargs.get('atomic')}"}
+
+    monkeypatch.setattr(srv, "_client", EmptyStore())
+    monkeypatch.setattr(food_lookup, "resolve_food", provider)
+    srv._resolved_food_cache.clear()
+    token = bind_user(uuid4())
+    try:
+        compound = await srv.resolve_food("food and food")
+        atomic = await srv.resolve_food("food and food", atomic=True)
+    finally:
+        reset_user(token)
+
+    assert compound["name"] == "mode-None"
+    assert atomic["name"] == "mode-True"
+    assert calls == [("food and food", None), ("food and food", True)]
+
+
+@pytest.mark.parametrize("query", ["'chocolate coated salted almonds'", "chocolate coated salted almonds"])
+def test_blocker_identity_never_drops_food_modifiers(query):
+    assert not food_lookup._full_query_relevant(query, {"food_name": "salted almonds"})
+
+
+@pytest.mark.parametrize("brand", ["OtherBrand", "David", ""])
+async def test_blocker_separate_provider_brand_validated_against_original(monkeypatch, brand):
+    _enable_fatsecret(monkeypatch)
+    name = "Protein Bar Cinnamon Bun"
+
+    async def request(data):
+        if data["method"] == "foods.search":
+            return {"foods": {"food": {"food_id": "fixture-bar", "food_name": name,
+                                        "brand_name": brand}}}
+        body = _fatsecret_get_hit(name, description="1 bar", grams=50,
+                                 calories=180, protein=25, carbs=10, fat=5, fiber=2)
+        body["food"]["brand_name"] = brand
+        return body
+
+    async def no_off(query):
+        return None
+
+    monkeypatch.setattr(food_lookup, "_fatsecret_request", request)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", no_off)
+    provider = await food_lookup.search_fatsecret(name)
+    assert provider is not None
+    result = await food_lookup.resolve_food("David Protein Bar Cinnamon Bun", atomic=True)
+    if brand == "David":
+        assert result is not None
+        assert result["brand_name"] == "David"
+    else:
+        assert result is None
+    assert provider["brand_name"] == brand
+
+
+async def test_blocker_conflicting_brand_cannot_reach_real_voice_write(monkeypatch):
+    from test_live_coach import FakeVoiceStore
+
+    _enable_fatsecret(monkeypatch)
+    fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    srv._resolved_food_cache.clear()
+
+    async def request(data):
+        name = "Protein Bar Cinnamon Bun"
+        if data["method"] == "foods.search":
+            return {"foods": {"food": {"food_id": "fixture-bar", "food_name": name,
+                                        "brand_name": "OtherBrand"}}}
+        body = _fatsecret_get_hit(name, description="1 bar", grams=50,
+                                 calories=180, protein=25, carbs=10, fat=5, fiber=2)
+        body["food"]["brand_name"] = "OtherBrand"
+        return body
+
+    async def no_off(query):
+        return None
+
+    monkeypatch.setattr(food_lookup, "_fatsecret_request", request)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", no_off)
+    token = bind_user(uuid4())
+    try:
+        result = await srv._voice_tool_handlers()["log_meal"]("conflicting-brand", {
+            "components": [{"description": "David Protein Bar Cinnamon Bun"}],
+            "meal_type": "Breakfast",
+        })
+    finally:
+        reset_user(token)
+    assert result["status"] == "needs_clarification"
+    assert result["unresolved"] == ["David Protein Bar Cinnamon Bun"]
+    assert fake.insert_count == 0
+    assert fake.claims == {}
+    assert "ESTIMATE" not in json.dumps(result)

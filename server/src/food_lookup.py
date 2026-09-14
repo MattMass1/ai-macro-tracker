@@ -270,12 +270,13 @@ def _relevant(query: str, food: Mapping[str, Any]) -> bool:
 
 
 def _full_query_relevant(query: str, food: Mapping[str, Any]) -> bool:
-    """Match the full identity, allowing only a leading brand phrase to drop."""
-    query_words = normalize_food_name(query).split()
+    """Require the original food identity, including separate brand evidence."""
+    _quantity, _unit, query_identity = _clean_component(query)
+    query_words = normalize_food_name(query_identity or query).split()
     candidate_words = normalize_food_name(" ".join(
         str(food.get(key) or "") for key in ("food_name", "brand_name", "food_description")
     )).split()
-    meaningful = [word for word in query_words if word not in _UNIT_WORDS]
+    meaningful = query_words
 
     def identity(words: list[str]) -> set[str]:
         return {word[:-1] if len(word) > 3 and word.endswith("s") else word for word in words}
@@ -291,14 +292,6 @@ def _full_query_relevant(query: str, food: Mapping[str, Any]) -> bool:
     candidate_identity -= {"raw", "fresh"}
     if meaningful and set(identity(meaningful)) == candidate_identity:
         return True
-    # Provider records commonly omit a leading brand. Preserve a sufficiently
-    # specific trailing flavor/product identity, but never drop an interior
-    # modifier such as "ground" from "93/7 ground beef".
-    for dropped_prefix in (1, 2):
-        suffix = meaningful[dropped_prefix:]
-        if (len(suffix) >= 2 and len(suffix) / len(meaningful) >= 0.6
-                and set(identity(suffix)) == candidate_identity):
-            return True
     return False
 
 
@@ -319,6 +312,7 @@ async def search_fatsecret(query: str) -> dict[str, Any] | None:
         try: grams = float(serving.get("metric_serving_amount")) if str(serving.get("metric_serving_unit") or "").casefold() == "g" else None
         except (TypeError, ValueError): grams = None
         result = {"name":str(food.get("food_name") or candidate.get("food_name") or query),
+            "brand_name":str(food.get("brand_name") or candidate.get("brand_name") or ""),
             "macros_per_serving":macros, "serving_size":description, "source":f"FatSecret: {food_id}",
             "attribution":{"provider":"FatSecret", "external_id":food_id,
                 "source_url":str(food.get("food_url") or candidate.get("food_url") or "") or None,
@@ -579,7 +573,8 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup) ->
     async def validated(search):
         variant_index, provider_index, awaitable = search
         found = await awaitable
-        candidate = {"food_name": found.get("name", "")} if found else {}
+        candidate = {"food_name": found.get("name", ""),
+                     "brand_name": found.get("brand_name", "")} if found else {}
         if (found and _full_query_relevant(query, candidate)
                 and (not whole_item or _macros(found.get("macros_per_serving", {})))):
             return (variant_index, provider_index), found
@@ -666,7 +661,8 @@ def _quantify(
 
 
 async def resolve_food(
-    query: str, classify: bool = True, *, whole_item: bool = False, catalog_lookup=None
+    query: str, classify: bool = True, *, whole_item: bool = False,
+    atomic: bool = False, catalog_lookup=None,
 ) -> dict[str, Any] | None:
     """Resolve one query or `and`/`,`/`+`-joined composite to real macro data.
 
@@ -676,10 +672,13 @@ async def resolve_food(
     """
     started = time.monotonic()
     text = " ".join(str(query or "").split())
-    components = len(_split_components(text)) if text else 0
+    components = 1 if text and atomic else len(_split_components(text)) if text else 0
     try:
         result = await asyncio.wait_for(
-            _resolve_food_text(text, whole_item=whole_item, catalog_lookup=catalog_lookup),
+            _resolve_food_text(
+                text, whole_item=whole_item, atomic=atomic,
+                catalog_lookup=catalog_lookup,
+            ),
             timeout=RESOLUTION_DEADLINE_SECONDS,
         ) if text else None
     except TimeoutError:
@@ -694,10 +693,10 @@ async def resolve_food(
 
 
 async def _resolve_food_text(
-    text: str, *, whole_item: bool, catalog_lookup
+    text: str, *, whole_item: bool, atomic: bool, catalog_lookup
 ) -> dict[str, Any] | None:
     text = _normalize_query_text(text)
-    raw_parts = _split_components(text)
+    raw_parts = [text] if atomic else _split_components(text)
     if normalize_food_name(text) in _SINGLE_FOOD_AND_NAMES:
         raw_parts = [text]
     if len(raw_parts) <= 1:
@@ -726,6 +725,7 @@ async def _resolve_food_text(
     parts = await asyncio.gather(*(resolve_part(part) for part in raw_parts))
     totals = {key: 0.0 for key in MACRO_KEYS}
     resolved_labels: list[str] = []
+    component_attributions: list[Mapping[str, Any]] = []
     unresolved: list[str] = []
     any_resolved = False
     for part, found, quantified in parts:
@@ -736,6 +736,9 @@ async def _resolve_food_text(
         for key in MACRO_KEYS:
             totals[key] += macros.get(key, 0.0)
         resolved_labels.append(label)
+        attribution = found.get("attribution")
+        if isinstance(attribution, Mapping):
+            component_attributions.append(dict(attribution))
         any_resolved = True
     if unresolved:
         quantity, unit, remainder = _clean_component(text)
@@ -753,11 +756,14 @@ async def _resolve_food_text(
     source_bits = list(resolved_labels)
     if unresolved:
         source_bits.append("UNRESOLVED: " + "; ".join(unresolved))
-    return {
+    result = {
         "name": text,
         "macros_per_serving": {key: round(value, 2) for key, value in totals.items()},
         "source": "Composite: " + "; ".join(source_bits),
     }
+    if component_attributions:
+        result["component_attributions"] = component_attributions
+    return result
 
 
 def portion_from_grams(found: Mapping[str, Any], grams: Any):

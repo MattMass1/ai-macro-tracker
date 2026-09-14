@@ -108,7 +108,9 @@ _ZERO_MACRO_FOODS = (
 _client: Store | None = None
 _RESOLVED_CACHE_MAX = 256
 _RESOLVED_CACHE_TTL_SECONDS = 90.0
-_resolved_food_cache: OrderedDict[tuple[str, str, bool], tuple[float, dict[str, Any]]] = OrderedDict()
+_resolved_food_cache: OrderedDict[
+    tuple[str, str, bool, bool], tuple[float, dict[str, Any]]
+] = OrderedDict()
 
 
 def _is_zero_macro_food(name: str) -> bool:
@@ -136,7 +138,10 @@ async def resolve_food(query: str, **kwargs):
         # use local sources, but must never participate in the shared cache.
         tenant = ""
     normalized = food_lookup.normalize_food_name(query)
-    cache_key = (tenant, normalized, bool(kwargs.get("whole_item", False)))
+    cache_key = (
+        tenant, normalized, bool(kwargs.get("whole_item", False)),
+        bool(kwargs.get("atomic", False)),
+    )
     cached = _resolved_food_cache.get(cache_key) if tenant else None
     now = time.monotonic()
     if cached is not None:
@@ -2588,17 +2593,29 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         if not found or "UNRESOLVED:" in str(found.get("source") or ""):
             return False
         attribution = found.get("attribution")
-        return not (isinstance(attribution, Mapping)
-                    and attribution.get("verification_state") == "unknown")
+        if (isinstance(attribution, Mapping)
+                and attribution.get("verification_state") == "unknown"):
+            return False
+        component_attributions = found.get("component_attributions")
+        return not (
+            isinstance(component_attributions, list)
+            and any(
+                isinstance(item, Mapping)
+                and item.get("verification_state") == "unknown"
+                for item in component_attributions
+            )
+        )
 
-    async def known_food_with_bad_portion(query: str) -> bool:
+    async def known_food_with_bad_portion(query: str, *, atomic: bool = False) -> bool:
         quantity, unit, identity = food_lookup._clean_component(query)
         if quantity is None or not identity:
             return False
-        base = await resolve_food(identity)
+        base = await resolve_food(identity, atomic=atomic)
         return voice_verified(base)
 
-    async def resolve_component(component: Mapping[str, Any]) -> dict[str, Any] | None:
+    async def resolve_component(
+        component: Mapping[str, Any], *, atomic: bool
+    ) -> dict[str, Any] | None:
         description = domain.validate_name(str(component.get("description") or ""))
         portion = " ".join(str(component.get("portion") or "").split())
         grams = component.get("grams")
@@ -2613,9 +2630,9 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         if resolution_ref and found is None:
             return None
         if found is None:
-            found = await resolve_food(query)
+            found = await resolve_food(query, atomic=atomic)
         if not voice_verified(found):
-            if found is None and await known_food_with_bad_portion(query):
+            if found is None and await known_food_with_bad_portion(query, atomic=atomic):
                 return {"portion_error": True, "name": query}
             return None
         if grams is not None:
@@ -2637,14 +2654,19 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                 for key in domain.MACRO_KEYS
             }
             source = f"{source} x{count:g}"
-        return {"name": query, "macro_source": source, **macros}
+        result = {"name": query, "macro_source": source, **macros}
+        attribution = found.get("attribution")
+        if isinstance(attribution, Mapping):
+            result["attribution"] = dict(attribution)
+        return result
 
     async def voice_log_meal_tool(call_id: str, args: Mapping[str, Any]) -> Any:
         operation_id = "voice-" + hashlib.sha256(
             f"{current_user_id()}:{call_id}".encode()
         ).hexdigest()[:24]
         raw_components = args.get("components")
-        if isinstance(raw_components, list) and raw_components:
+        atomic = isinstance(raw_components, list) and bool(raw_components)
+        if atomic:
             components = [item for item in raw_components if isinstance(item, Mapping)]
             if len(components) != len(raw_components) or len(components) > 12:
                 return {"status": "failed", "operation_id": operation_id,
@@ -2662,7 +2684,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         async def bounded(component: Mapping[str, Any]) -> dict[str, Any] | None:
             async with semaphore:
                 try:
-                    return await resolve_component(component)
+                    return await resolve_component(component, atomic=atomic)
                 except Exception as exc:
                     logger.warning(
                         "Voice food resolution failed: operation_id=%s error_type=%s",
@@ -2679,11 +2701,13 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         if bad_portions:
             question = f"I couldn't use that portion for {bad_portions[0]}. What amount should I use?"
             return {"status": "needs_clarification", "reason": "invalid_portion",
+                    "unresolved": unresolved,
                     "operation_id": operation_id, "question": question,
                     "confirmation": question}
         if unresolved:
             question = f"I couldn't verify {unresolved[0]}. What exact food or label should I use?"
             return {"status": "needs_clarification", "operation_id": operation_id,
+                    "unresolved": unresolved,
                     "question": question, "confirmation": question}
         resolved_components = [item for item in resolved if item is not None]
         name = " + ".join(item["name"] for item in resolved_components)

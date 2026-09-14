@@ -2561,6 +2561,7 @@ class FakeVoiceStore:
         self.claims: dict[tuple, dict] = {}
         self.deleted: list[tuple] = []
         self.insert_count = 0
+        self.last_insert_values = None
 
     async def insert_meal_idempotent(self, key, request_hash, *, response_builder, **values):
         values.pop("replay_marker", None)
@@ -2574,6 +2575,7 @@ class FakeVoiceStore:
                 )
             return {**existing["response"], "_operation_replayed": True}
         self.insert_count += 1
+        self.last_insert_values = dict(values)
         day = values["day"]
         logged = {
             "id": f"row-{self.insert_count}", "name": values["name"], "meal": values["meal"],
@@ -2646,7 +2648,7 @@ async def test_voice_log_meal_persists_one_entry_and_echoes_macros(monkeypatch):
     srv = _import_server(monkeypatch)
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
-    monkeypatch.setattr(srv, "resolve_food", lambda query: asyncio.sleep(0, result=_resolved_food()))
+    monkeypatch.setattr(srv, "resolve_food", lambda query, **_kwargs: asyncio.sleep(0, result=_resolved_food()))
     handlers = srv._voice_tool_handlers()
     tenant = uuid4()
 
@@ -2708,7 +2710,7 @@ async def test_voice_log_meal_with_decimal_components_uses_real_serializer_and_c
     monkeypatch.setattr(store_module, "_component_metadata_json", serializer_spy)
     monkeypatch.setattr(
         srv, "resolve_food",
-        lambda _query: asyncio.sleep(0, result=_resolved_food()),
+        lambda _query, **_kwargs: asyncio.sleep(0, result=_resolved_food()),
     )
     monkeypatch.setattr(
         srv.food_lookup, "portion_from_serving",
@@ -2771,7 +2773,7 @@ async def test_voice_log_meal_repeat_tool_call_id_does_not_double_log(monkeypatc
     srv = _import_server(monkeypatch)
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
-    monkeypatch.setattr(srv, "resolve_food", lambda query: asyncio.sleep(0, result=_resolved_food()))
+    monkeypatch.setattr(srv, "resolve_food", lambda query, **_kwargs: asyncio.sleep(0, result=_resolved_food()))
     handlers = srv._voice_tool_handlers()
     tenant = uuid4()
 
@@ -2794,7 +2796,7 @@ async def test_voice_log_meal_resolution_failure_needs_clarification_and_writes_
     srv = _import_server(monkeypatch)
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
-    monkeypatch.setattr(srv, "resolve_food", lambda query: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(srv, "resolve_food", lambda query, **_kwargs: asyncio.sleep(0, result=None))
     handlers = srv._voice_tool_handlers()
 
     token = bind_user(uuid4())
@@ -2819,7 +2821,7 @@ async def test_voice_unseeded_whole_foods_cleanly_ask_for_clarification(monkeypa
     srv = _import_server(monkeypatch)
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
-    monkeypatch.setattr(srv, "resolve_food", lambda query: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(srv, "resolve_food", lambda query, **_kwargs: asyncio.sleep(0, result=None))
 
     token = bind_user(uuid4())
     try:
@@ -2843,7 +2845,7 @@ async def test_voice_refuses_unverified_provider_match_for_lookup_and_write(monk
         **_resolved_food(source="OpenFoodFacts: 123"),
         "attribution": {"verification_state": "unknown", "confidence": 0.65},
     }
-    monkeypatch.setattr(srv, "resolve_food", lambda query: asyncio.sleep(0, result=unverified))
+    monkeypatch.setattr(srv, "resolve_food", lambda query, **_kwargs: asyncio.sleep(0, result=unverified))
     handlers = srv._voice_tool_handlers()
 
     token = bind_user(uuid4())
@@ -2867,7 +2869,7 @@ async def test_voice_known_food_bad_portion_gets_portion_specific_clarification(
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
 
-    async def resolve(query):
+    async def resolve(query, **_kwargs):
         return None if query == description else _resolved_food(source="Generic: sweet potato")
 
     monkeypatch.setattr(srv, "resolve_food", resolve)
@@ -2891,7 +2893,7 @@ async def test_voice_log_meal_rejects_invalid_meal_slot_and_writes_nothing(monke
     srv = _import_server(monkeypatch)
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
-    monkeypatch.setattr(srv, "resolve_food", lambda query: asyncio.sleep(0, result=_resolved_food()))
+    monkeypatch.setattr(srv, "resolve_food", lambda query, **_kwargs: asyncio.sleep(0, result=_resolved_food()))
     handlers = srv._voice_tool_handlers()
 
     token = bind_user(uuid4())
@@ -2911,7 +2913,7 @@ async def test_voice_log_meal_cross_user_isolation_with_the_same_tool_call_id(mo
     srv = _import_server(monkeypatch)
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
-    monkeypatch.setattr(srv, "resolve_food", lambda query: asyncio.sleep(0, result=_resolved_food()))
+    monkeypatch.setattr(srv, "resolve_food", lambda query, **_kwargs: asyncio.sleep(0, result=_resolved_food()))
     handlers = srv._voice_tool_handlers()
     user_a, user_b = uuid4(), uuid4()
 
@@ -2936,7 +2938,7 @@ async def test_voice_log_meal_ignores_model_supplied_macro_fields(monkeypatch):
     srv = _import_server(monkeypatch)
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
-    monkeypatch.setattr(srv, "resolve_food", lambda query: asyncio.sleep(0, result=_resolved_food()))
+    monkeypatch.setattr(srv, "resolve_food", lambda query, **_kwargs: asyncio.sleep(0, result=_resolved_food()))
     handlers = srv._voice_tool_handlers()
 
     token = bind_user(uuid4())
@@ -2959,7 +2961,7 @@ async def test_voice_log_meal_rejects_partial_composite(monkeypatch):
     srv = _import_server(monkeypatch)
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
-    async def resolve(query):
+    async def resolve(query, **_kwargs):
         return None if "mystery" in query else _resolved_food()
     monkeypatch.setattr(srv, "resolve_food", resolve)
     handlers = srv._voice_tool_handlers()
@@ -2979,11 +2981,150 @@ async def test_voice_log_meal_rejects_partial_composite(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_voice_structured_branded_meal_preserves_four_atomic_components(monkeypatch):
+    srv = _import_server(monkeypatch)
+    fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    srv._resolved_food_cache.clear()
+    provider_calls = []
+
+    products = {
+        "dave's killer bread 21 whole grains and seeds toast": (
+            "Dave's Killer Bread 21 Whole Grains and Seeds toast", "FixtureProvider: bread",
+            {"calories": 100, "protein": 5, "carbs": 20, "fat": 1, "fiber": 3}
+        ),
+        "david protein bar cinnamon bun": (
+            "David Protein Bar Cinnamon Bun", "FixtureProvider: bar",
+            {"calories": 180, "protein": 25, "carbs": 10, "fat": 5, "fiber": 2}
+        ),
+    }
+
+    async def provider(query):
+        provider_calls.append(query)
+        product = products.get(query.casefold())
+        if product is None:
+            return None
+        return {"name": product[0], "macros_per_serving": product[2],
+                "serving_size": "fixture serving", "source": product[1],
+                "attribution": {"verification_state": "exact_identifier",
+                                "external_id": product[1]}}
+
+    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts", provider)
+    components = [
+        {"description": "strawberries", "grams": 130},
+        {"description": "eggs", "quantity": 3},
+        {"description": "Dave's Killer Bread 21 Whole Grains and Seeds toast",
+         "portion": "1 slice"},
+        {"description": "David Protein Bar Cinnamon Bun", "quantity": 1},
+    ]
+    token = bind_user(uuid4())
+    try:
+        result = await srv._voice_tool_handlers()["log_meal"](
+            "brand-fixture", {"meal_type": "Breakfast", "components": components}
+        )
+    finally:
+        reset_user(token)
+
+    assert result["status"] == "committed"
+    assert fake.insert_count == 1
+    metadata = fake.last_insert_values["component_metadata"]
+    assert [item["name"] for item in metadata] == [
+        "strawberries", "eggs",
+        "1 slice Dave's Killer Bread 21 Whole Grains and Seeds toast",
+        "David Protein Bar Cinnamon Bun",
+    ]
+    expected_macros = [
+        {"calories": 39, "protein": .78, "carbs": 7.93, "fat": .65, "fiber": 4.94},
+        {"calories": 207.12, "protein": 19.92, "carbs": 0, "fat": 14.22, "fiber": 0},
+        {"calories": 100, "protein": 5, "carbs": 20, "fat": 1, "fiber": 3},
+        {"calories": 180, "protein": 25, "carbs": 10, "fat": 5, "fiber": 2},
+    ]
+    for item, expected in zip(metadata, expected_macros):
+        assert {key: item[key] for key in expected} == expected
+    assert metadata[0]["macro_source"].startswith("Generic: strawberries")
+    assert metadata[0]["macro_source"].endswith("strawberries, 130 g")
+    assert metadata[1]["macro_source"].startswith("Generic: chicken egg")
+    assert metadata[1]["macro_source"].endswith(" x3")
+    assert "attribution" not in metadata[0]
+    assert "attribution" not in metadata[1]
+    for item, source in zip(metadata[2:], ["FixtureProvider: bread", "FixtureProvider: bar"]):
+        assert item["macro_source"] == source + (" x1" if source.endswith("bar") else "")
+        assert item["attribution"] == {"verification_state": "exact_identifier", "external_id": source}
+    totals = {"calories": 526.12, "protein": 50.7, "carbs": 37.93, "fat": 20.87, "fiber": 9.94}
+    assert {key: fake.last_insert_values[key] for key in totals} == totals
+    assert {key: result["logged"][key] for key in totals} == totals
+    assert result["day_total"] == totals
+    assert all(call.casefold() not in {"seeds toast", "seeds bread"} for call in provider_calls)
+
+
+@pytest.mark.asyncio
+async def test_voice_provider_failure_returns_all_branded_identities_and_writes_nothing(monkeypatch):
+    srv = _import_server(monkeypatch)
+    fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    srv._resolved_food_cache.clear()
+    calls = []
+
+    async def provider(query):
+        calls.append(query)
+        return None
+
+    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts", provider)
+    token = bind_user(uuid4())
+    try:
+        result = await srv._voice_tool_handlers()["log_meal"]("brand-failure", {
+            "meal_type": "Breakfast", "components": [
+                {"description": "strawberries", "grams": 130},
+                {"description": "eggs", "quantity": 3},
+                {"description": "Dave's Killer Bread 21 Whole Grains and Seeds toast",
+                 "portion": "1 slice"},
+                {"description": "David Protein Bar Cinnamon Bun", "quantity": 1},
+            ],
+        })
+    finally:
+        reset_user(token)
+
+    assert result["status"] == "needs_clarification"
+    assert result["unresolved"] == [
+        "Dave's Killer Bread 21 Whole Grains and Seeds toast",
+        "David Protein Bar Cinnamon Bun",
+    ]
+    assert fake.insert_count == 0
+    assert "ESTIMATE" not in json.dumps(result)
+    assert all(call.casefold() not in {"seeds toast", "seeds bread"} for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_voice_rejects_composite_with_unknown_constituent_verification(monkeypatch):
+    srv = _import_server(monkeypatch)
+    fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    aggregate = {
+        **_resolved_food(source="Composite: verified; unknown"),
+        "component_attributions": [
+            {"verification_state": "exact_identifier"},
+            {"verification_state": "unknown"},
+        ],
+    }
+    monkeypatch.setattr(srv, "resolve_food", lambda query, **kwargs: asyncio.sleep(0, result=aggregate))
+    token = bind_user(uuid4())
+    try:
+        result = await srv._voice_tool_handlers()["log_meal"](
+            "unknown-composite", {"description": "known and unknown", "meal_type": "Dinner"}
+        )
+    finally:
+        reset_user(token)
+
+    assert result["status"] == "needs_clarification"
+    assert fake.insert_count == 0
+
+
+@pytest.mark.asyncio
 async def test_voice_log_meal_missing_readback_is_unknown_not_failed(monkeypatch):
     srv = _import_server(monkeypatch)
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
-    monkeypatch.setattr(srv, "resolve_food", lambda query: asyncio.sleep(0, result=_resolved_food()))
+    monkeypatch.setattr(srv, "resolve_food", lambda query, **_kwargs: asyncio.sleep(0, result=_resolved_food()))
     async def no_rollup(start=None, end=None): return []
     fake.fetch_day_rollups = no_rollup
     handlers = srv._voice_tool_handlers()
@@ -3005,7 +3146,7 @@ async def test_voice_log_meal_components_are_resolved_concurrently(monkeypatch):
     srv = _import_server(monkeypatch)
     fake = FakeVoiceStore(); monkeypatch.setattr(srv, "_client", fake)
     active = 0; peak = 0
-    async def resolve(query):
+    async def resolve(query, **_kwargs):
         nonlocal active, peak
         active += 1; peak = max(peak, active)
         await asyncio.sleep(0)
@@ -3125,7 +3266,7 @@ async def test_voice_undo_removes_entry_and_reverts_totals(monkeypatch):
     srv = _import_server(monkeypatch)
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
-    monkeypatch.setattr(srv, "resolve_food", lambda query: asyncio.sleep(0, result=_resolved_food()))
+    monkeypatch.setattr(srv, "resolve_food", lambda query, **_kwargs: asyncio.sleep(0, result=_resolved_food()))
     handlers = srv._voice_tool_handlers()
     tenant = uuid4()
 
@@ -3178,3 +3319,85 @@ def test_voice_instructions_never_authorize_estimates():
     assert "log your best estimate" not in combined
     assert "typical values" not in combined
     assert "never supply invented macros" in combined
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["lookup_food", "log_meal"])
+@pytest.mark.parametrize("verification", ["exact_identifier", "unknown"])
+async def test_blocker_real_voice_free_form_compound(monkeypatch, tool, verification):
+    srv = _import_server(monkeypatch)
+    fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    srv._resolved_food_cache.clear()
+    calls = []
+
+    async def provider(query):
+        calls.append(query)
+        if query != "toast":
+            return None
+        return {"name": "toast", "source": "FixtureProvider: toast",
+                "macros_per_serving": {"calories": 110, "protein": 4, "carbs": 20,
+                                       "fat": 2, "fiber": 3},
+                "attribution": {"verification_state": verification}}
+
+    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts", provider)
+    token = bind_user(uuid4())
+    try:
+        result = await srv._voice_tool_handlers()[tool]("compound-fixture", {
+            "query": "eggs and toast", "description": "eggs and toast",
+            "meal_type": "Breakfast",
+        })
+    finally:
+        reset_user(token)
+    if verification == "unknown":
+        assert result["status"] == "needs_clarification"
+        assert fake.insert_count == 0
+        assert "ESTIMATE" not in json.dumps(result)
+    else:
+        egg = srv.food_lookup.resolve_generic_whole_food("eggs")["macros_per_serving"]
+        expected = {key: round(egg[key] + value, 2) for key, value in
+                    {"calories": 110, "protein": 4, "carbs": 20, "fat": 2, "fiber": 3}.items()}
+        if tool == "lookup_food":
+            assert result.get("macros_per_serving") == expected
+            assert fake.insert_count == 0
+        else:
+            assert result["status"] == "committed"
+            assert fake.insert_count == 1
+            assert {key: result["logged"][key] for key in expected} == expected
+        assert "toast" in calls
+        assert "eggs and toast" not in calls
+
+
+@pytest.mark.asyncio
+async def test_blocker_mixed_portion_and_unresolved_preserves_complete_response(monkeypatch):
+    srv = _import_server(monkeypatch)
+    fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    srv._resolved_food_cache.clear()
+
+    async def provider(query):
+        return None
+
+    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts", provider)
+    missing = ["Dave's Killer Bread 21 Whole Grains and Seeds toast",
+               "David Protein Bar Cinnamon Bun"]
+    token = bind_user(uuid4())
+    try:
+        result = await srv._voice_tool_handlers()["log_meal"]("mixed-failures", {
+            "meal_type": "Dinner", "components": [
+                {"description": missing[0]},
+                {"description": "sweet potato", "portion": "1 small"},
+                {"description": missing[1]},
+            ],
+        })
+    finally:
+        reset_user(token)
+    question = "I couldn't use that portion for sweet potato. What amount should I use?"
+    assert result["status"] == "needs_clarification"
+    assert result["reason"] == "invalid_portion"
+    assert result["question"] == result["confirmation"] == question
+    assert result["operation_id"].startswith("voice-")
+    assert fake.insert_count == 0
+    assert fake.claims == {}
+    assert "ESTIMATE" not in json.dumps(result)
+    assert result["unresolved"] == missing

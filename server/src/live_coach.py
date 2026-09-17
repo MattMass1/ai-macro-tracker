@@ -798,6 +798,8 @@ class LiveCoachService:
         policy: LiveCoachPolicy = LiveCoachPolicy(),
         gate: LiveSessionGate | None = None,
         tool_handlers: Mapping[str, VoiceToolHandler] | None = None,
+        session_start_builder: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+        tool_result_event: Callable[[str, str], dict[str, Any] | None] | None = None,
     ):
         self.store = store
         self.provider_connect = provider_connect
@@ -806,6 +808,8 @@ class LiveCoachService:
         self.policy = policy
         self.gate = gate or LiveSessionGate()
         self.tool_handlers = dict(tool_handlers or {})
+        self.session_start_builder = session_start_builder
+        self.tool_result_event = tool_result_event
 
     async def serve(self, websocket: ClientWebSocket) -> None:
         user_id = await authenticate_live_websocket(
@@ -875,7 +879,7 @@ class LiveCoachService:
             await websocket.send_json(_safe_provider_connect_error(exc))
             await websocket.close(code=1011, reason="Voice coach could not connect")
             return
-        session_start = build_session_start(context)
+        session_start = (self.session_start_builder or build_session_start)(context)
         allowed_tool_names = frozenset(
             tool["name"]
             for tool in session_start["session"]["delegation"]["responses"]["tools"]
@@ -1208,6 +1212,12 @@ class LiveCoachService:
                             )
                         finally:
                             tool_calls_in_flight -= 1
+                        if self.tool_result_event is not None:
+                            # Application-owned projection of the executed result.
+                            # Provider-originated agent.canvas events stay rejected.
+                            canvas_event = self.tool_result_event(str(call_item.get("name")), output)
+                            if canvas_event is not None:
+                                await to_client.put(canvas_event)
                         if call_item.get("name") == "log_meal":
                             try:
                                 result = json.loads(output)

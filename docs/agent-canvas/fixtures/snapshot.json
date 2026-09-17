@@ -1,0 +1,24 @@
+{
+  "protocol": "mmacros.canvas.v1",
+  "catalog": "mmacros.native.v1",
+  "instanceId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "sessionId": "00000000-0000-4000-8000-000000000001",
+  "revision": 2,
+  "serverTime": 1000,
+  "surfaces": [
+    {"surfaceId": "task", "lifecycle": "task", "components": [
+      {"id": "macros", "component": "MacroProgress"}
+    ]},
+    {"surfaceId": "approval", "lifecycle": "approval", "components": [
+      {"id": "confirm", "component": "ConfirmationCard", "reference": "00000000-0000-4000-8000-000000000002",
+       "actions": [
+         {"action": "confirm", "reference": "00000000-0000-4000-8000-000000000002"},
+         {"action": "cancel", "reference": "00000000-0000-4000-8000-000000000002"}
+       ]}
+    ]}
+  ],
+  "workout": null,
+  "receipt": null,
+  "approval": {"id": "00000000-0000-4000-8000-000000000002", "title": "Fixture approval", "detail": "Test fixture only.", "status": "pending"},
+  "reply": "Test fixture only."
+}

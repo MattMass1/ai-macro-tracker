@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 import asyncpg
 
 from auth import current_user_id
-from domain import effective_day_window, validate_macro_source
+from domain import effective_date, effective_day_window, validate_macro_source
 from food_catalog import evidence_hash, normalize_food_name, provenance_state
 from migrations import MigrationError, migration_status
 
@@ -310,6 +310,27 @@ class Store:
             "RETURNING plan",
             current_user_id(), json.dumps(plan),
         )
+        return json.loads(stored) if isinstance(stored, str) else dict(stored)
+
+    async def compare_and_swap_workout_plan(
+        self, before: Mapping[str, Any] | None, after: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Apply a confirmed minimal edit only if the tenant's plan is unchanged."""
+        pool = await self.connect()
+        if before is None:
+            stored = await pool.fetchval(
+                "INSERT INTO workout_plans(user_id,plan) VALUES($1,$2::jsonb) "
+                "ON CONFLICT(user_id) DO NOTHING RETURNING plan",
+                current_user_id(), json.dumps(after),
+            )
+            return (json.loads(stored) if isinstance(stored, str) else dict(stored)) if stored is not None else None
+        stored = await pool.fetchval(
+            "UPDATE workout_plans SET plan=$3::jsonb,updated_at=now() "
+            "WHERE user_id=$1 AND plan=$2::jsonb RETURNING plan",
+            current_user_id(), json.dumps(before), json.dumps(after),
+        )
+        if stored is None:
+            return None
         return json.loads(stored) if isinstance(stored, str) else dict(stored)
 
     async def fetch_session_day_state(self) -> dict[str, Any] | None:
@@ -901,11 +922,10 @@ class Store:
         )
 
     async def has_macro_targets(self) -> bool:
-        pool = await self.connect()
-        return bool(await pool.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM macro_targets WHERE user_id=$1)",
-            current_user_id(),
-        ))
+        # Match the day payload/root readiness, not merely existence of an old
+        # or future row. Zero targets must retain established chat onboarding.
+        targets = await self.fetch_targets(effective_date())
+        return bool(targets and targets["calories"] > 0)
 
     async def fetch_integration(self, provider: str) -> dict[str, Any] | None:
         """Return an integration internally; API routes must never expose tokens."""

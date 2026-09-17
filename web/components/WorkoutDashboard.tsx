@@ -91,9 +91,10 @@ export default function WorkoutDashboard({ revision }: { revision: number }) {
       </Card>
 
       <Card className="col-span-2 sm:col-span-1">
-        <Label>Coverage</Label>
+        <Label>{data.coverage.muscle_coverage_complete === false ? "Classified coverage" : "Coverage"}</Label>
         <div className="mt-2 space-y-1.5">{MUSCLES.map((muscle) => { const count = data.coverage.muscle_groups[muscle] ?? 0; return <div key={muscle} className="grid grid-cols-[2.8rem_1fr_1.25rem] items-center gap-1.5 text-[0.65rem]"><span>{muscle}</span><div className="h-1.5 overflow-hidden rounded-full bg-surface-2"><div className="h-full rounded-full" style={{ width: `${(count / maxCoverage) * 100}%`, backgroundColor: COLORS[muscle] }} /></div><span className="numeral rounded-full bg-surface-2 text-center">{count}</span></div>; })}</div>
-        {data.coverage.untouched.length > 0 && <p className="mt-2 truncate text-[0.65rem] text-[#fbbf24]">Not hit: {data.coverage.untouched.join(", ")}</p>}
+        {data.coverage.note && <p className="mt-2 text-[0.65rem] text-muted">{data.coverage.note}</p>}
+        {data.coverage.muscle_coverage_complete !== false && data.coverage.untouched.length > 0 && <p className="mt-2 truncate text-[0.65rem] text-[#fbbf24]">Not hit: {data.coverage.untouched.join(", ")}</p>}
       </Card>
 
       <Card>

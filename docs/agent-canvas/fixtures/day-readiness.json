@@ -1,0 +1,128 @@
+[
+  {
+    "source_targets": null,
+    "payload": {
+      "date": "2026-09-16",
+      "day_label": "Today",
+      "canvas_protocol": "mmacros.canvas.v1",
+      "has_targets": false,
+      "day_timing": {
+        "time_zone": "America/New_York",
+        "rollover_hour": 4,
+        "effective_date": "2026-09-16"
+      },
+      "totals": {
+        "calories": 0,
+        "protein": 0,
+        "carbs": 0,
+        "fat": 0,
+        "fiber": 0
+      },
+      "targets": {
+        "calories": 2400,
+        "protein": 215,
+        "carbs": 200,
+        "fat": 70,
+        "fiber": 0
+      },
+      "remaining": {
+        "calories": 2400,
+        "protein": 215,
+        "carbs": 200,
+        "fat": 70,
+        "fiber": 0
+      },
+      "meals": [],
+      "day_rollup": null,
+      "meal_rollups": []
+    }
+  },
+  {
+    "source_targets": {
+      "calories": 0,
+      "protein": 0,
+      "carbs": 0,
+      "fat": 0,
+      "fiber": 0
+    },
+    "payload": {
+      "date": "2026-09-16",
+      "day_label": "Today",
+      "canvas_protocol": "mmacros.canvas.v1",
+      "has_targets": false,
+      "day_timing": {
+        "time_zone": "America/New_York",
+        "rollover_hour": 4,
+        "effective_date": "2026-09-16"
+      },
+      "totals": {
+        "calories": 0,
+        "protein": 0,
+        "carbs": 0,
+        "fat": 0,
+        "fiber": 0
+      },
+      "targets": {
+        "calories": 0,
+        "protein": 0,
+        "carbs": 0,
+        "fat": 0,
+        "fiber": 0
+      },
+      "remaining": {
+        "calories": 0,
+        "protein": 0,
+        "carbs": 0,
+        "fat": 0,
+        "fiber": 0
+      },
+      "meals": [],
+      "day_rollup": null,
+      "meal_rollups": []
+    }
+  },
+  {
+    "source_targets": {
+      "calories": 2000,
+      "protein": 0,
+      "carbs": 0,
+      "fat": 0,
+      "fiber": 0
+    },
+    "payload": {
+      "date": "2026-09-16",
+      "day_label": "Today",
+      "canvas_protocol": "mmacros.canvas.v1",
+      "has_targets": true,
+      "day_timing": {
+        "time_zone": "America/New_York",
+        "rollover_hour": 4,
+        "effective_date": "2026-09-16"
+      },
+      "totals": {
+        "calories": 0,
+        "protein": 0,
+        "carbs": 0,
+        "fat": 0,
+        "fiber": 0
+      },
+      "targets": {
+        "calories": 2000,
+        "protein": 0,
+        "carbs": 0,
+        "fat": 0,
+        "fiber": 0
+      },
+      "remaining": {
+        "calories": 2000,
+        "protein": 0,
+        "carbs": 0,
+        "fat": 0,
+        "fiber": 0
+      },
+      "meals": [],
+      "day_rollup": null,
+      "meal_rollups": []
+    }
+  }
+]

@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from datetime import date as _date, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx  # noqa: E402
 
@@ -45,6 +45,7 @@ from store import IdempotencyConflict, Store, StoreError, meal as stored_meal  #
 from store import ChatQuotaExceeded, InviteAlreadyClaimed, InviteNotFound  # noqa: E402
 from auth import bind_user, current_user_id, reset_user  # noqa: E402
 from coach import CoachProviderError, run_agent  # noqa: E402
+from agent_canvas import PROTOCOL as CANVAS_PROTOCOL, CanvasService, canvas_live_start, canvas_tool_event  # noqa: E402
 import food_lookup  # noqa: E402
 from live_coach import (  # noqa: E402
     LiveCoachService,
@@ -297,10 +298,16 @@ async def fetch_meal_rollups(day: _date) -> list[dict[str, Any]]:
 
 async def fetch_targets(day: _date) -> dict[str, float]:
     """Targets from the latest `Effective Date` that is on or before `day`."""
+    targets, _ = await fetch_target_state(day)
+    return targets
+
+
+async def fetch_target_state(day: _date) -> tuple[dict[str, float], bool]:
+    """Keep fallback display values distinct from actual onboarding readiness."""
     row = await store_client().fetch_targets(day)
     if not row:
-        return dict(domain.DEFAULT_TARGETS)
-    return {key: row[key] for key in domain.MACRO_KEYS}
+        return dict(domain.DEFAULT_TARGETS), False
+    return {key: row[key] for key in domain.MACRO_KEYS}, bool(row["calories"] > 0)
 
 
 async def fetch_presets() -> list[dict[str, Any]]:
@@ -749,8 +756,18 @@ async def write_workout(
         muscle_group: list[str] = []
     else:
         cleaned_sets = domain.validate_sets(sets)
-        type_name = domain.normalize_workout_type(workout_type)
-        muscle_group = domain.normalize_muscle_group([type_name])
+        try:
+            type_name = domain.normalize_workout_type(workout_type)
+        except domain.MacroError:
+            # Assigned custom days are identities, not aliases for Push. Only
+            # accept a safe exact label from this tenant's current stored plan.
+            if not isinstance(workout_type, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 /&()+.'_\-]{0,79}", workout_type):
+                raise
+            assigned = await store_client().fetch_workout_plan()
+            if not assigned or workout_type not in assigned.get("rotation", []) or workout_type not in assigned.get("days", {}):
+                raise domain.MacroError("Choose a standard workout type or an assigned plan day")
+            type_name = workout_type
+        muscle_group = domain.normalize_muscle_group([type_name]) if type_name in domain.WORKOUT_TYPES else []
     day = domain.resolve_date(day_value, "date")
 
     page = await store_client().insert_workout(exercise=clean_exercise,
@@ -787,10 +804,15 @@ async def day_payload(
     ensured = ensure if isinstance(ensure, list) else ([ensure] if ensure else [])
     known_ids = {meal["id"] for meal in meals}
     meals = [dict(meal) for meal in ensured if meal["id"] not in known_ids] + meals
-    targets = await fetch_targets(day)
+    targets, has_targets = await fetch_target_state(day)
     totals = domain.sum_macros(meals)
     payload: dict[str, Any] = {
         "date": day.isoformat(),
+        "has_targets": has_targets,
+        "canvas_protocol": CANVAS_PROTOCOL,
+        "day_timing": {"time_zone": domain.LOCAL_TZ.key,
+                       "rollover_hour": domain.DAY_ROLLOVER_HOUR,
+                       "effective_date": domain.effective_date().isoformat()},
         "day_label": domain.day_label(day),
         "totals": totals,
         "targets": targets,
@@ -2345,7 +2367,7 @@ def reply_requests_metrics(reply: str) -> bool:
     ))
 
 
-def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[Any]]]:
+def _coach_tool_handlers(*, canvas=False) -> dict[str, Callable[[Mapping[str, Any]], Awaitable[Any]]]:
     """Build tenant-bound coach tools; none accepts a user identifier."""
     async def set_display_name_tool(args):
         return await store_client().put_display_name(
@@ -2417,7 +2439,7 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
         return {"today_type": today_type, "exercises": exercises, "done": True,
                 "already_done": bool(already_done),
                 "completed_on": domain.effective_date().isoformat()}
-    async def set_plan_tool(args):
+    async def set_plan_tool(args, *, preview=False):
         raw_plan = args["plan"]
         if not isinstance(raw_plan, dict):
             raise MacroError("plan must be a JSON object")
@@ -2527,7 +2549,11 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
                 else:
                     exercise["name"] = str(match["name"])
         if unknown: raise MacroError("Plan exercises must come from workout_library: " + ", ".join(unknown))
+        if preview:
+            return {"plan": plan}
         return {"plan": await store_client().put_workout_plan(plan)}
+    async def preview_plan_tool(args):
+        return await set_plan_tool(args, preview=True)
     async def library_tool(args):
         rows = await store_client().fetch_workout_library()
         return search_workout_library(rows, str(args["query"]))
@@ -2562,7 +2588,7 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
         except (httpx.HTTPError, ValueError):
             context["whoop_status"] = "temporarily_unavailable"
         return context
-    return {"set_display_name": set_display_name_tool,
+    handlers = {"set_display_name": set_display_name_tool,
             "get_display_name": get_display_name_tool, "set_metrics": set_metrics_tool,
             "get_metrics": get_metrics_tool,
             "request_metrics_form": request_metrics_form_tool,
@@ -2575,8 +2601,12 @@ def _coach_tool_handlers() -> dict[str, Callable[[Mapping[str, Any]], Awaitable[
             "get_recent_workouts": recent_workouts_tool, "get_workout_plan": get_plan_tool,
             "get_today_session": get_today_session_tool,
             "complete_today_session": complete_today_session_tool,
-            "set_workout_plan": set_plan_tool, "get_library": library_tool,
+            "set_workout_plan": set_plan_tool,
+            "get_library": library_tool,
             "get_readiness": readiness_tool}
+    if canvas:
+        handlers["preview_workout_plan"] = preview_plan_tool
+    return handlers
 
 
 def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Awaitable[Any]]]:
@@ -3498,6 +3528,48 @@ async def readiness(request: Request) -> Any:
     return payload if status == "ready" else (payload, 503)
 
 
+_canvas_service: CanvasService | None = None
+
+
+def canvas_service() -> CanvasService:
+    global _canvas_service
+    if _canvas_service is None:
+        _canvas_service = CanvasService(store_factory=store_client,
+            food_factory=_voice_tool_handlers, coach_factory=lambda: _coach_tool_handlers(canvas=True))
+    return _canvas_service
+
+
+@api_route("/api/agent-canvas/{session_id}", methods=["GET"])
+async def api_canvas_snapshot(request: Request) -> Any:
+    try:
+        return await canvas_service().snapshot(request.path_params["session_id"], create=True)
+    except ValueError as exc:
+        raise MacroError(str(exc)) from None
+
+
+@api_route("/api/agent-canvas/{session_id}/turn", methods=["POST"])
+async def api_canvas_turn(request: Request) -> Any:
+    body = await _json_body(request)
+    if set(body) != {"turn_id", "message"}:
+        raise MacroError("Only turn_id and message are accepted")
+    try:
+        return await canvas_service().turn(request.path_params["session_id"],
+                                          body["turn_id"], body["message"], adapter="text")
+    except ChatQuotaExceeded:
+        return {"error": "You've reached today's coach limit."}, 429
+    except ValueError as exc:
+        raise MacroError(str(exc)) from None
+
+
+@api_route("/api/agent-canvas/{session_id}/action", methods=["POST"])
+async def api_canvas_action(request: Request) -> Any:
+    body = await _json_body(request)
+    try:
+        return await canvas_service().action(request.path_params["session_id"], dict(body))
+    except ValueError as exc:
+        raise MacroError(str(exc)) from None
+
+
 def create_app(*, live_service: LiveCoachService | None = None) -> Any:
     """Build the production ASGI app with MCP, HTTP APIs, and native Live."""
     configure_logging()
@@ -3512,6 +3584,24 @@ def create_app(*, live_service: LiveCoachService | None = None) -> Any:
     async def live_coach_endpoint(websocket: WebSocket) -> None:
         await service.serve(websocket)
 
+    async def canvas_live_endpoint(websocket: WebSocket) -> None:
+        session_id = websocket.path_params["session_id"]
+        try:
+            if str(UUID(session_id)) != session_id:
+                raise ValueError("Invalid session")
+        except ValueError:
+            await websocket.close(code=4400, reason="Invalid session")
+            return
+        # Same admission/auth/audio bridge, but a single domain-agent adapter.
+        # The legacy live endpoint and its model/tool policy are unchanged.
+        canvas_live = LiveCoachService(
+            store=store_client(), provider_connect=connect_openai_live,
+            api_key=CONFIG.openai_api_key, gate=_live_session_gate,
+            tool_handlers={"agent_turn": canvas_service().voice_handler(session_id)},
+            session_start_builder=canvas_live_start, tool_result_event=canvas_tool_event,
+        )
+        await canvas_live.serve(websocket)
+
     from starlette.middleware import Middleware as _Middleware
 
     app = mcp.http_app(
@@ -3519,6 +3609,7 @@ def create_app(*, live_service: LiveCoachService | None = None) -> Any:
         transport="http",
     )
     app.routes.append(WebSocketRoute("/api/live-coach", live_coach_endpoint))
+    app.routes.append(WebSocketRoute("/api/agent-canvas/{session_id}/live", canvas_live_endpoint))
     return app
 
 

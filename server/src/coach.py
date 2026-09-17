@@ -136,6 +136,8 @@ async def run_agent(
     handlers: Mapping[str, ToolHandler], post: PostMessages = post_openai,
     record_usage: RecordUsage | None = None, max_rounds: int = 8,
     max_tool_calls: int = 16, display_name: str | None = None,
+    tool_catalog: list[dict[str, Any]] | None = None,
+    instruction_override: str | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run one bounded Chat Completions tool loop and return text plus tool audit."""
     token = os.environ.get("OPENAI_ACCESS_TOKEN", "").strip()
@@ -158,7 +160,7 @@ async def run_agent(
         messages[-1]["content"] = f"{messages[-1]['content']}\n\n{message}"
     else:
         messages.append({"role": "user", "content": message})
-    system = system_prompt(onboarding, display_name)
+    system = instruction_override if instruction_override is not None else system_prompt(onboarding, display_name)
     available_tools = [
         {
             "type": "function",
@@ -168,7 +170,7 @@ async def run_agent(
                 "parameters": tool["input_schema"],
             },
         }
-        for tool in TOOLS
+        for tool in (TOOLS if tool_catalog is None else tool_catalog)
         if tool["name"] in handlers
     ]
     audit: list[dict[str, Any]] = []

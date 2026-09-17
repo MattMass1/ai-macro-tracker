@@ -673,21 +673,36 @@ def workout_week_stats(
 
     muscle_days = {group: set() for group in MUSCLE_GROUPS}
     type_days = {workout_type: set() for workout_type in WORKOUT_TYPES}
+    unclassified_days: set[str] = set()
     for row_date, row in dated_rows:
         if not week_start <= row_date <= week_end:
             continue
         day = row_date.isoformat()
-        muscles = list(row.get("muscle_group") or [])
-        types = list(row.get("workout_type") or [])
+        raw_muscles = row.get("muscle_group") or []
+        raw_types = row.get("workout_type") or []
+        muscles = [raw_muscles] if isinstance(raw_muscles, str) else list(raw_muscles)
+        types = [raw_types] if isinstance(raw_types, str) else list(raw_types)
         derived_type = workout_type_from_muscle(muscles)
         if not types and derived_type:
             types = [derived_type]
+        if not muscles:
+            # Legacy rows may carry only the standard type. Apply the same
+            # mapping as the writer, never infer muscles from a custom label.
+            muscles = [muscle for kind in types
+                       for muscle in WORKOUT_TYPE_TO_MUSCLE.get(kind, [])]
         for muscle in muscles:
             if muscle in muscle_days:
                 muscle_days[muscle].add(day)
         for workout_type in types:
-            if workout_type in type_days:
-                type_days[workout_type].add(day)
+            if isinstance(workout_type, str) and workout_type:
+                # Custom labels remain exact identities, never taxonomy aliases.
+                type_days.setdefault(workout_type, set()).add(day)
+        # Cardio/Full Body are recognized workout identities, not strength
+        # muscle tags. Neither they nor legacy recognized types poison a week.
+        recognized_muscle = any(muscle in MUSCLE_TO_WORKOUT_TYPE for muscle in muscles)
+        recognized_type = any(kind in (*WORKOUT_TYPES, "Rest") for kind in types)
+        if not recognized_muscle and not recognized_type:
+            unclassified_days.add(day)
 
     muscle_counts = {key: len(value) for key, value in muscle_days.items()}
     return {
@@ -702,6 +717,12 @@ def workout_week_stats(
         "coverage": {
             "muscle_groups": muscle_counts,
             "workout_types": {key: len(value) for key, value in type_days.items()},
-            "untouched": [key for key, value in muscle_counts.items() if value == 0],
+            # Empty tags mean unknown, not evidence of no training. Keep
+            # classified counts as lower bounds but suppress negative claims.
+            "untouched": [] if unclassified_days else [key for key, value in muscle_counts.items() if value == 0],
+            "muscle_coverage_complete": not unclassified_days,
+            "unclassified_days": sorted(unclassified_days),
+            "note": ("Muscle coverage is incomplete: some logged workouts have unknown muscle groups. "
+                     "Counts show classified days only; no untouched-muscle claim is available.") if unclassified_days else None,
         },
     }

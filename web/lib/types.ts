@@ -33,7 +33,17 @@ export type Preset = {
   sort_order: number;
 };
 
+export type LoggingDayPolicy = {
+  time_zone: string;
+  rollover_hour: number;
+  effective_date: string;
+};
+
 export type DayPayload = {
+  // Additive rolling-deploy fields. Absence is unknown, not false/onboarding.
+  has_targets?: boolean;
+  day_timing?: LoggingDayPolicy;
+  canvas_protocol?: string;
   date: string;
   day_label: string;
   totals: Macros;
@@ -167,6 +177,10 @@ export type WorkoutStatsPayload = {
     muscle_groups: Record<string, number>;
     workout_types: Record<string, number>;
     untouched: string[];
+    // Counts remain classified lower bounds when completeness is false.
+    muscle_coverage_complete?: boolean;
+    unclassified_days?: string[];
+    note?: string | null;
   };
   prs: { exercise: string; max_weight: number; date: string }[];
   plan: {

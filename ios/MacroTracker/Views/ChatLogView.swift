@@ -15,8 +15,11 @@ struct ChatMessage: Identifiable {
 struct ChatLogView: View {
     let scanFoodTrigger: Int
 
-    init(scanFoodTrigger: Int = 0) {
+    private let onOnboardingComplete: (() -> Void)?
+
+    init(scanFoodTrigger: Int = 0, onOnboardingComplete: (() -> Void)? = nil) {
         self.scanFoodTrigger = scanFoodTrigger
+        self.onOnboardingComplete = onOnboardingComplete
     }
 
     @EnvironmentObject private var store: AppStore
@@ -37,6 +40,7 @@ struct ChatLogView: View {
     @State private var didSubmitOnboardingMetrics = false
     @State private var didOfferExercisePicker = false
     @State private var didCompleteExercisePicker = false
+    @State private var isFinalizingOnboardingPlan = false
     @State private var handledScanFoodTrigger = 0
     @FocusState private var inputFocused: Bool
 
@@ -100,6 +104,10 @@ struct ChatLogView: View {
                     .scrollDismissesKeyboard(.interactively)
                     .onChange(of: messages.count) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
                 }
+                if onOnboardingComplete != nil, canFinishOnboarding {
+                    Button("Continue to MMacros") { onOnboardingComplete?() }
+                        .buttonStyle(.borderedProminent).padding(12)
+                }
                 FatSecretAttribution().padding(.vertical, 6)
                 composer
             }
@@ -112,10 +120,11 @@ struct ChatLogView: View {
                     .fontWeight(.semibold)
             }
         }
-        .sheet(isPresented: $showManual) { ManualFoodView() }
+        .sheet(isPresented: $showManual) { ManualFoodView().modifier(AgentToastModifier()) }
         .sheet(isPresented: $showVoiceCoach) { LiveCoachView() }
         .sheet(item: $loggerSelection) { selection in
             WorkoutLoggerView(initialType: selection.type, initialExercise: selection.exercise)
+                .modifier(AgentToastModifier())
         }
         .sheet(isPresented: $showExerciseLibrary, onDismiss: {
             if let selection = pendingSwap, let id = swapTargetMessageId {
@@ -222,6 +231,8 @@ struct ChatLogView: View {
 
     @discardableResult
     private func sendChat(_ message: String, metrics: ChatMetrics? = nil) async -> Bool {
+        // Capture the account-level flow before a turn can finish onboarding.
+        let onboardingTurn = needsOnboarding || onOnboardingComplete != nil || didSubmitOnboardingMetrics
         messages.append(ChatMessage(role: .user, text: message))
         isSending = true
         defer { isSending = false }
@@ -238,7 +249,7 @@ struct ChatLogView: View {
                 // The coach can log food or write targets/plan on any turn.
                 await store.loadDay()
                 if response.hasPlan == true || response.hasTargets == true { await store.loadWorkoutData() }
-                maybeOfferExercisePicker(after: message, reply: response)
+                maybeOfferExercisePicker(after: message, reply: response, onboardingTurn: onboardingTurn)
                 return true
             } catch let error as APIError where error.status == 429 {
                 messages.append(ChatMessage(role: .assistant, text: "You're at today's limit, ask Matt to raise it."))
@@ -282,13 +293,11 @@ struct ChatLogView: View {
         messages[index].widget = nil
     }
 
-    private func maybeOfferExercisePicker(after userMessage: String, reply: ChatReply) {
+    private func maybeOfferExercisePicker(after userMessage: String, reply: ChatReply, onboardingTurn: Bool) {
+        guard onboardingTurn else { return }
         guard !didCompleteExercisePicker, !didOfferExercisePicker else { return }
         if userMessage.localizedCaseInsensitiveContains("these are my exercises:") { return }
         if looksLikeMetricsMessage(userMessage) { didSubmitOnboardingMetrics = true }
-        // `loadDay()` may have just written targets, which flips `needsOnboarding` off.
-        let stillOnboarding = needsOnboarding || auth.freshClaim || didSubmitOnboardingMetrics
-        guard stillOnboarding else { return }
         let basicsReady = didSubmitOnboardingMetrics || reply.hasTargets == true
         guard basicsReady else { return }
         offerExercisePicker(
@@ -323,7 +332,9 @@ struct ChatLogView: View {
     }
 
     private func confirmOnboardingExercises(_ exercises: [LibraryExercise]) async {
-        guard !exercises.isEmpty else { return }
+        guard !exercises.isEmpty, !isFinalizingOnboardingPlan else { return }
+        isFinalizingOnboardingPlan = true
+        defer { isFinalizingOnboardingPlan = false }
         didCompleteExercisePicker = true
         dismissExercisePickerCard()
         let plan = WorkoutPlanWrite.fromPickedExercises(exercises)
@@ -463,10 +474,14 @@ struct ChatLogView: View {
         }
     }
 
+    private var canFinishOnboarding: Bool {
+        !isSending && !isFinalizingOnboardingPlan && pendingOnboardingMetrics == nil && !showOnboardingPickerSheet
+            && (!didOfferExercisePicker || didCompleteExercisePicker)
+            && store.accountRoute == .canvas
+    }
+
     private var needsOnboarding: Bool {
-        if auth.freshClaim { return true }
-        if let targets = store.day?.targets { return targets.calories <= 0 }
-        return false
+        store.accountRoute == .onboarding
     }
 
     private func handleScanFoodTrigger() {

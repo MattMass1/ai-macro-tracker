@@ -477,13 +477,14 @@ private struct WorkoutDashboard: View {
                 MetricBlock(label: "THIS WEEK", value: "\(stats.week.daysLogged)", detail: "of 7 days", icon: "chart.bar.fill")
             }
             VStack(alignment: .leading, spacing: 11) {
-                HStack { SectionLabel(text: "Coverage"); Spacer(); Text("\(stats.week.totalSets) sets").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
+                HStack { SectionLabel(text: stats.coverage.muscleCoverageComplete == false ? "Classified coverage" : "Coverage"); Spacer(); Text("\(stats.week.totalSets) sets").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
                 let maxValue = max(1, muscles.map { stats.coverage.muscleGroups[$0] ?? 0 }.max() ?? 1)
                 ForEach(muscles, id: \.self) { muscle in
                     let count = stats.coverage.muscleGroups[muscle] ?? 0
                     HStack { Text(muscle).font(.caption).frame(width: 48, alignment: .leading); GeometryReader { geo in ZStack(alignment: .leading) { Capsule().fill(Color.secondary.opacity(0.1)); Capsule().fill(coverageColor(muscle)).frame(width: geo.size.width * CGFloat(count) / CGFloat(maxValue)) } }.frame(height: 7); Text("\(count)").font(.caption2.monospacedDigit()).frame(width: 20) }
                 }
-                if !stats.coverage.untouched.isEmpty { Text("Not hit: \(stats.coverage.untouched.joined(separator: ", "))").font(.caption).foregroundStyle(Theme.carbs) }
+                if let note = stats.coverage.note { Text(note).font(.caption).foregroundStyle(Theme.sectionInk) }
+                if stats.coverage.muscleCoverageComplete != false, !stats.coverage.untouched.isEmpty { Text("Not hit: \(stats.coverage.untouched.joined(separator: ", "))").font(.caption).foregroundStyle(Theme.carbs) }
             }.appCard()
             if !stats.prs.isEmpty {
                 VStack(alignment: .leading, spacing: 10) { SectionLabel(text: "Personal records"); ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(stats.prs.prefix(6)) { pr in VStack(alignment: .leading, spacing: 3) { Image(systemName: "trophy.fill").foregroundStyle(Theme.accent); Text(pr.exercise).font(.caption.weight(.semibold)).lineLimit(1); Text("\(pr.maxWeight.formatted()) lb").font(.caption2.monospacedDigit()).foregroundStyle(Theme.muted) }.frame(width: 118, alignment: .leading).padding(12).background(Theme.accentTint, in: RoundedRectangle(cornerRadius: 15)) } } } }.appCard()
@@ -592,16 +593,31 @@ private struct AggregateWorkoutHistory: View {
     }()
 }
 
+enum WorkoutLoggerType {
+    static func isValid(_ label: String) -> Bool { CanvasValidation.validWorkoutLabel(label) }
+    static func value(for label: String) -> String {
+        guard isValid(label) else { return "" }
+        return CanonicalWorkoutType.all.first { $0.caseInsensitiveCompare(label) == .orderedSame } ?? label
+    }
+    static func choices(for label: String) -> [String] {
+        let selected = value(for: label)
+        return CanonicalWorkoutType.all + (selected.isEmpty || CanonicalWorkoutType.all.contains(selected) ? [] : [selected])
+    }
+}
+
 struct WorkoutLoggerView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var exercise: String; @State private var type: String; @State private var sets = [WorkoutSet(weight: 0, reps: 0)]; @State private var last: LastWorkoutPayload?; @State private var isSaving = false
     @FocusState private var inputFocused: Bool
-    private let types = ["Push", "Pull", "Legs", "Abs", "Cardio", "Full Body", "Rest"]
+    private let types: [String]
     private var suggestions: [KnownExercise] { store.exercises.filter { $0.workoutType.contains(type) } }
-    init(initialType: String = "Push", initialExercise: String = "") {
-        _type = State(initialValue: CanonicalWorkoutType.value(for: initialType))
+    private var onLogged: ((WorkoutEntry) -> Void)?
+    init(initialType: String = "Push", initialExercise: String = "", onLogged: ((WorkoutEntry) -> Void)? = nil) {
+        _type = State(initialValue: WorkoutLoggerType.value(for: initialType))
+        types = WorkoutLoggerType.choices(for: initialType)
         _exercise = State(initialValue: initialExercise)
+        self.onLogged = onLogged
     }
     var body: some View {
         NavigationStack {
@@ -619,7 +635,7 @@ struct WorkoutLoggerView: View {
                         ForEach(sets.indices, id: \.self) { index in HStack { Text("\(index + 1)").font(.caption.monospacedDigit()).frame(width: 30); TextField("lb", value: $sets[index].weight, format: .number).keyboardType(.decimalPad).focused($inputFocused).multilineTextAlignment(.center).padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12)); TextField("reps", value: $sets[index].reps, format: .number).keyboardType(.numberPad).focused($inputFocused).multilineTextAlignment(.center).padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12)); Button(role: .destructive) { inputFocused = false; if sets.count > 1 { sets.remove(at: index) } } label: { Image(systemName: "minus.circle").frame(width: 44, height: 44) }.disabled(sets.count == 1) } }
                     }
                 }
-                Button { submit() } label: { if isSaving { ProgressView().tint(.white) } else { Text(type == "Rest" ? "Log rest day" : "Log exercise").fontWeight(.bold) } }.frame(maxWidth: .infinity).frame(height: 52).background(Theme.accent, in: RoundedRectangle(cornerRadius: 16)).foregroundStyle(.white).disabled(isSaving || (type != "Rest" && (exercise.trimmingCharacters(in: .whitespaces).isEmpty || !sets.contains { $0.weight > 0 || $0.reps > 0 }))).opacity(isSaving ? 0.6 : 1)
+                Button { submit() } label: { if isSaving { ProgressView().tint(.white) } else { Text(type == "Rest" ? "Log rest day" : "Log exercise").fontWeight(.bold) } }.frame(maxWidth: .infinity).frame(height: 52).background(Theme.accent, in: RoundedRectangle(cornerRadius: 16)).foregroundStyle(.white).disabled(isSaving || !WorkoutLoggerType.isValid(type) || (type != "Rest" && (exercise.trimmingCharacters(in: .whitespaces).isEmpty || !sets.contains { $0.weight > 0 || $0.reps > 0 }))).opacity(isSaving ? 0.6 : 1)
             }.padding(16) }
             .scrollDismissesKeyboard(.interactively)
             .background(Theme.canvas)
@@ -649,5 +665,5 @@ struct WorkoutLoggerView: View {
             last = result
         }
     }
-    private func submit() { inputFocused = false; Task { isSaving = true; let valid = type == "Rest" ? [] : sets.filter { $0.weight > 0 || $0.reps > 0 }; if await store.logWorkout(exercise: type == "Rest" ? "Rest Day" : exercise, sets: valid, type: type) { dismiss() }; isSaving = false } }
+    private func submit() { guard WorkoutLoggerType.isValid(type) else { return }; inputFocused = false; Task { isSaving = true; let valid = type == "Rest" ? [] : sets.filter { $0.weight > 0 || $0.reps > 0 }; if await store.logWorkout(exercise: type == "Rest" ? "Rest Day" : exercise, sets: valid, type: type, onLogged: onLogged) { dismiss() }; isSaving = false } }
 }

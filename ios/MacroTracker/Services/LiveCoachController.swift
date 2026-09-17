@@ -10,6 +10,7 @@ enum LiveCoachState: Equatable {
 }
 
 enum LiveCoachServerEvent: Equatable {
+    case canvas(AgentCanvasEnvelope)
     case started
     case inputTranscript(String)
     case outputTranscript(String)
@@ -92,6 +93,7 @@ final class LiveCoachController: ObservableObject {
     @Published private(set) var activityLabel = ""
     @Published private(set) var committedMealOperationID: String?
     @Published private(set) var committedMealLabel = ""
+    var onCanvas: ((AgentCanvasEnvelope) -> Void)?
 
     private let permission: LiveCoachPermissionChecking
     private let transport: LiveCoachTransporting
@@ -343,6 +345,8 @@ final class LiveCoachController: ObservableObject {
     private func handle(_ event: LiveCoachServerEvent, generation: UUID) {
         guard generation == sessionGeneration else { return }
         switch event {
+        case .canvas(let envelope):
+            onCanvas?(envelope)
         case .started:
             break
         case .inputTranscript(let delta):

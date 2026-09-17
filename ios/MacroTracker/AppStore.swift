@@ -2,8 +2,21 @@ import Foundation
 
 @MainActor
 final class AppStore: ObservableObject {
-    @Published var selectedDate = Date()
+    lazy var canvas = AgentSurfaceStore(api: api)
+    @Published var selectedDate = AppStore.effectiveCurrentDay()
+    @Published private(set) var dayPolicy = LoggingDayPolicy.bootstrap
     @Published var day: DayPayload?
+    @Published private(set) var accountHasTargets: Bool?
+    private var accountTargetCalories: Double?
+    private var hasAccountResponse = false
+    private var accountCanvasProtocol: String?
+    private var hasAdoptedDayPolicy = false
+    var accountRoute: AgentRootRoute {
+        guard hasAccountResponse else { return .loading }
+        guard accountCanvasProtocol == "mmacros.canvas.v1" else { return .compatibility }
+        return AgentRootRoute.initial(hasTargets: accountHasTargets,
+            calories: accountTargetCalories, hasPlan: plan?.hasPlan)
+    }
     @Published var presets: [Preset] = []
     @Published var workouts: [WorkoutEntry] = []
     @Published var workoutHistoryEntries: [WorkoutHistoryEntry] = []
@@ -22,49 +35,105 @@ final class AppStore: ObservableObject {
     /// The same-day guards alone don't cover this: reset() lands on the same
     /// calendar day, so only the generation check distinguishes sessions.
     private var sessionGeneration = 0
+    private enum ErrorSource { case action, day, workouts, presets, brief }
+    private var errorSource = ErrorSource.action
 
     init(api: APIClient = .shared) { self.api = api }
 
-    var dateString: String { Self.dateFormatter.string(from: selectedDate) }
-    var isToday: Bool { Calendar.current.isDateInToday(selectedDate) }
+    var dateString: String { dateFormatter.string(from: selectedDate) }
+    var isToday: Bool { dayCalendar.isDate(selectedDate, inSameDayAs: dayPolicy.currentDay()) }
 
-    func loadAll() async {
-        async let dayTask: Void = loadDay()
-        async let workoutTask: Void = loadWorkoutData()
-        _ = await (dayTask, workoutTask)
+    static func effectiveCurrentDay(now: Date = Date()) -> Date {
+        LoggingDayPolicy.bootstrap.currentDay(now: now)
     }
 
-    func loadDay() async {
+    func selectCurrentDay(now: Date = Date()) {
+        selectedDate = dayPolicy.currentDay(now: now)
+    }
+
+    func loadAll(reportErrors: Bool = true) async {
+        let session = sessionGeneration
+        let requestedPolicy = dayPolicy
+        let requestedKey = dateString
+        if hasAdoptedDayPolicy {
+            // Warm reads overlap. If authoritative policy changes during this
+            // batch, reconcile date-keyed workouts once, without replaying writes.
+            async let dayLoad: Void = loadDay(reportErrors: reportErrors)
+            async let workoutLoad: Void = loadWorkoutData(reportErrors: reportErrors)
+            _ = await (dayLoad, workoutLoad)
+            guard !Task.isCancelled, session == sessionGeneration else { return }
+            if dateString != requestedKey || dayPolicy.timeZone != requestedPolicy.timeZone
+                || dayPolicy.rolloverHour != requestedPolicy.rolloverHour {
+                await loadWorkoutData(reportErrors: reportErrors)
+            }
+        } else {
+            // Only the initial policy adoption is serialized, not optional data.
+            async let presetLoad: Void = loadPresets(embedded: nil, reportErrors: reportErrors)
+            await loadDay(reportErrors: reportErrors, includeExtras: false)
+            guard !Task.isCancelled, session == sessionGeneration else { return }
+            async let briefLoad: Void = loadBrief(date: dateString, reportErrors: reportErrors)
+            async let workoutLoad: Void = loadWorkoutData(reportErrors: reportErrors)
+            _ = await (presetLoad, briefLoad, workoutLoad)
+        }
+    }
+
+    func loadDay(reportErrors: Bool = true, includeExtras: Bool = true) async {
         let session = sessionGeneration
         let requestedDate = selectedDate
-        let requestedDateString = Self.dateFormatter.string(from: requestedDate)
-        let requestedIsToday = Calendar.current.isDateInToday(requestedDate)
+        var completionDate = requestedDate
+        let requestedDateString = dateFormatter.string(from: requestedDate)
+        let requestedIsToday = dayCalendar.isDate(requestedDate, inSameDayAs: dayPolicy.currentDay())
         isLoadingDay = true
         defer {
-            if session == sessionGeneration, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) {
+            if session == sessionGeneration, selectedDate == completionDate {
                 isLoadingDay = false
             }
         }
         do {
-            async let dayResult = requestedIsToday ? api.today() : api.day(requestedDateString)
-            async let presetResult = api.presets()
-            async let briefResult = api.brief(requestedDateString)
-            let (loadedDay, loadedPresets, loadedBrief) = try await (dayResult, presetResult, briefResult)
-            guard !Task.isCancelled, session == sessionGeneration, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
-            day = loadedDay; presets = loadedDay.presets ?? loadedPresets.presets; brief = loadedBrief
+            let loadedDay = try await (requestedIsToday ? api.today() : api.day(requestedDateString))
+            guard !Task.isCancelled, session == sessionGeneration, selectedDate == requestedDate else { return }
+            if let policy = loadedDay.dayTiming {
+                guard policy.isValid else { throw AgentCanvasError.invalidPayload }
+                // Keep the requested calendar DATE for history, not its old
+                // timezone's absolute midnight. Current reads use server date.
+                let date = requestedIsToday ? policy.date(from: policy.effectiveDate) : policy.date(from: requestedDateString)
+                guard let date else { throw AgentCanvasError.invalidPayload }
+                dayPolicy = policy
+                hasAdoptedDayPolicy = true
+                selectedDate = date
+                completionDate = date
+            }
+            // Readiness belongs to the day response, not the optional brief.
+            day = loadedDay
+            if requestedIsToday {
+                hasAccountResponse = true
+                accountCanvasProtocol = loadedDay.canvasProtocol
+                accountHasTargets = loadedDay.hasTargets
+                accountTargetCalories = loadedDay.targets.calories
+            }
+            clearLoadError(source: .day)
+            let briefDateString = dateString
+            if brief?.date != briefDateString { brief = nil }
+            // Optional loads fail independently: a brief outage must not discard
+            // presets or raise an alert over root retry/onboarding recovery.
+            if includeExtras {
+                async let presetLoad: Void = loadPresets(embedded: loadedDay.presets, reportErrors: reportErrors)
+                async let briefLoad: Void = loadBrief(date: briefDateString, reportErrors: reportErrors)
+                _ = await (presetLoad, briefLoad)
+            }
         } catch {
-            guard !Task.isCancelled, session == sessionGeneration, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
-            present(error, session: session)
+            guard !Task.isCancelled, session == sessionGeneration, selectedDate == completionDate else { return }
+            if reportErrors { present(error, session: session, source: .day) }
         }
     }
 
-    func loadWorkoutData() async {
+    func loadWorkoutData(reportErrors: Bool = true) async {
         let session = sessionGeneration
         let requestedDate = selectedDate
-        let requestedDateString = Self.dateFormatter.string(from: requestedDate)
+        let requestedDateString = dateFormatter.string(from: requestedDate)
         isLoadingWorkouts = true
         defer {
-            if session == sessionGeneration, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) {
+            if session == sessionGeneration, dayCalendar.isDate(selectedDate, inSameDayAs: requestedDate) {
                 isLoadingWorkouts = false
             }
         }
@@ -74,11 +143,38 @@ final class AppStore: ObservableObject {
             async let planResult = api.plan()
             async let statsResult = api.workoutStats()
             let results = try await (workoutResult, exerciseResult, planResult, statsResult)
-            guard !Task.isCancelled, session == sessionGeneration, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
+            guard !Task.isCancelled, session == sessionGeneration, dayCalendar.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
             workouts = results.0.workouts; exercises = results.1.exercises; plan = results.2; stats = results.3
+            clearLoadError(source: .workouts)
         } catch {
-            guard !Task.isCancelled, session == sessionGeneration, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
-            present(error, session: session)
+            guard !Task.isCancelled, session == sessionGeneration, dayCalendar.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
+            if reportErrors { present(error, session: session, source: .workouts) }
+        }
+    }
+
+    private func loadPresets(embedded: [Preset]?, reportErrors: Bool) async {
+        let session = sessionGeneration
+        do {
+            let loaded: [Preset]
+            if let embedded { loaded = embedded } else { loaded = try await api.presets().presets }
+            guard !Task.isCancelled, session == sessionGeneration else { return }
+            presets = loaded
+            clearLoadError(source: .presets)
+        } catch {
+            if reportErrors { present(error, session: session, source: .presets) }
+        }
+    }
+
+    private func loadBrief(date: String, reportErrors: Bool) async {
+        let session = sessionGeneration
+        do {
+            let loaded = try await api.brief(date)
+            guard !Task.isCancelled, session == sessionGeneration, dateString == date else { return }
+            brief = loaded
+            clearLoadError(source: .brief)
+        } catch {
+            guard !Task.isCancelled, session == sessionGeneration, dateString == date else { return }
+            if reportErrors { present(error, session: session, source: .brief) }
         }
     }
 
@@ -101,7 +197,8 @@ final class AppStore: ObservableObject {
     }
 
     func moveDay(by value: Int) async {
-        guard let newDate = Calendar.current.date(byAdding: .day, value: value, to: selectedDate), newDate <= Date() else { return }
+        guard let newDate = dayCalendar.date(byAdding: .day, value: value, to: selectedDate),
+              dayCalendar.startOfDay(for: newDate) <= dayPolicy.currentDay() else { return }
         selectedDate = newDate
         await loadAll()
     }
@@ -138,23 +235,24 @@ final class AppStore: ObservableObject {
     func saveBrief(_ text: String) async {
         let session = sessionGeneration
         let requestedDate = selectedDate
-        let requestedDateString = Self.dateFormatter.string(from: requestedDate)
+        let requestedDateString = dateFormatter.string(from: requestedDate)
         do {
             let saved = try await api.saveBrief(text, date: requestedDateString)
-            guard session == sessionGeneration, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
+            guard session == sessionGeneration, dayCalendar.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
             brief = saved; showToast("Note saved")
         } catch {
-            guard session == sessionGeneration, Calendar.current.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
+            guard session == sessionGeneration, dayCalendar.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
             present(error, session: session)
         }
     }
 
-    func logWorkout(exercise: String, sets: [WorkoutSet], type: String) async -> Bool {
+    func logWorkout(exercise: String, sets: [WorkoutSet], type: String, onLogged: ((WorkoutEntry) -> Void)? = nil) async -> Bool {
         let session = sessionGeneration
         do {
             let logged = try await api.logWorkout(LogWorkoutBody(exercise: exercise, sets: sets, workoutType: type, date: isToday ? nil : dateString))
             guard session == sessionGeneration else { return true }
             workouts.insert(logged, at: 0)
+            onLogged?(logged)
             showToast("Workout logged")
             if let updatedStats = try? await api.workoutStats(), session == sessionGeneration { stats = updatedStats }
             await workoutHistory()
@@ -198,16 +296,26 @@ final class AppStore: ObservableObject {
 
     /// Called on sign-out so the next user never sees the previous user's data.
     func reset() {
+        canvas.reset()
         sessionGeneration += 1
-        selectedDate = Date()
+        dayPolicy = .bootstrap
+        accountHasTargets = nil; accountTargetCalories = nil
+        hasAccountResponse = false; accountCanvasProtocol = nil; hasAdoptedDayPolicy = false
+        selectCurrentDay()
         day = nil; presets = []; workouts = []; workoutHistoryEntries = []; trendsPayload = nil; exercises = []; plan = nil; stats = nil; brief = nil
         isLoadingDay = true; isLoadingWorkouts = false
         errorMessage = nil; toast = nil
         WorkoutSessionCompletions.removeAll()
     }
 
-    private func present(_ error: Error, session: Int) {
+    private func clearLoadError(source: ErrorSource) {
+        // GET recovery must never dismiss a failed write/action.
+        if errorSource == source { errorMessage = nil }
+    }
+    private func present(_ error: Error, session: Int, source: ErrorSource = .action) {
         guard session == sessionGeneration else { return }
+        if source != .action, errorMessage != nil, errorSource == .action { return }
+        errorSource = source
         errorMessage = error.localizedDescription
     }
     private func showToast(_ value: String) {
@@ -219,5 +327,6 @@ final class AppStore: ObservableObject {
             toast = nil
         }
     }
-    private static let dateFormatter: DateFormatter = { let f = DateFormatter(); f.calendar = Calendar(identifier: .gregorian); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"; return f }()
+    private var dayCalendar: Calendar { dayPolicy.calendar }
+    private var dateFormatter: DateFormatter { dayPolicy.formatter }
 }

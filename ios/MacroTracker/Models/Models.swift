@@ -61,7 +61,61 @@ struct DayRollup: Codable, Equatable {
     var fiber: Double
 }
 
+/// Authoritative server logging-day policy. Bootstrap matches the legacy
+/// deployment only until the first day response; it is not a configuration API.
+struct LoggingDayPolicy: Codable, Equatable {
+    var timeZone: String
+    var rolloverHour: Int
+    var effectiveDate: String
+    static let bootstrap = LoggingDayPolicy(timeZone: "America/New_York", rolloverHour: 4, effectiveDate: "1970-01-01")
+    @MainActor var isValid: Bool { TimeZone(identifier: timeZone) != nil && (0...23).contains(rolloverHour) && date(from: effectiveDate) != nil }
+    // One bounded policy-key cache. MainActor confines the mutable formatter
+    // and makes a runtime timezone/rollover replacement atomic with all UI reads.
+    // effectiveDate is a daily fact, not part of the resource configuration.
+    private struct Resources {
+        let timeZone: String
+        let rolloverHour: Int
+        let calendar: Calendar
+        let formatter: DateFormatter
+    }
+    @MainActor private static var cachedResources: Resources?
+    @MainActor private var resources: Resources {
+        if let cached = Self.cachedResources,
+           cached.timeZone == timeZone && cached.rolloverHour == rolloverHour { return cached }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: timeZone) ?? .gmt
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.isLenient = false
+        let value = Resources(timeZone: timeZone, rolloverHour: rolloverHour,
+                              calendar: calendar, formatter: formatter)
+        Self.cachedResources = value
+        return value
+    }
+    @MainActor var calendar: Calendar { resources.calendar }
+    @MainActor var formatter: DateFormatter { resources.formatter }
+    @MainActor func date(from key: String) -> Date? {
+        guard let date = formatter.date(from: key), formatter.string(from: date) == key else { return nil }
+        return date
+    }
+    @MainActor func currentDay(now: Date = Date()) -> Date {
+        let midnight = calendar.startOfDay(for: now)
+        if calendar.component(.hour, from: now) < rolloverHour {
+            return calendar.date(byAdding: .day, value: -1, to: midnight) ?? midnight
+        }
+        return midnight
+    }
+}
+
 struct DayPayload: Codable, Equatable {
+    // Missing/unsupported capability deliberately uses standard screens.
+    var canvasProtocol: String? = nil
+    var dayTiming: LoggingDayPolicy? = nil
+    // Absent/false cannot be inferred from the server's fallback display macros.
+    var hasTargets: Bool? = nil
     var date: String
     var dayLabel: String
     var totals: MacroTotals
@@ -208,7 +262,12 @@ struct WorkoutStatsPayload: Codable {
     struct Today: Codable { var date: String; var entries: Int; var exercises: [ExerciseSummary] }
     struct ExerciseSummary: Codable, Identifiable { var id: String { name }; var name: String; var sets: Int; var weight: String; var reps: String }
     struct Week: Codable { var weekStart: String; var weekLabel: String; var daysLogged: Int; var totalSets: Int; var totalVolume: Double; var streakWeeks: Int }
-    struct Coverage: Codable { var muscleGroups: [String: Int]; var workoutTypes: [String: Int]; var untouched: [String] }
+    struct Coverage: Codable {
+        var muscleGroups: [String: Int]; var workoutTypes: [String: Int]; var untouched: [String]
+        var muscleCoverageComplete: Bool? = nil
+        var unclassifiedDays: [String]? = nil
+        var note: String? = nil
+    }
     struct PR: Codable, Identifiable { var id: String { exercise }; var exercise: String; var maxWeight: Double; var date: String }
     struct Plan: Codable { var today: PlanDay; var next: [PlanDay] }
     struct PlanDay: Codable, Identifiable { var id: String { type }; var type: String; var exercises: [String] }

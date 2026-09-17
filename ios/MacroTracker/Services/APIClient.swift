@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 extension Notification.Name {
     /// Posted when the server rejects the device token (401). AuthService
@@ -78,11 +79,31 @@ final class APIClient {
     func saveBrief(_ text: String, date: String? = nil) async throws -> BriefPayload { try await send("api/brief", body: BriefRequest(text: text, date: date)) }
     func trends(days: Int) async throws -> TrendsPayload { try await get("api/trends?days=\(days)") }
 
+    /// Opaque high-entropy credential fingerprint, never the token itself.
+    /// Include the API origin/path so test and production cannot share UI state.
+    var canvasIdentityScope: String? {
+        guard let baseURL, let token = tokenProvider(), !token.isEmpty else { return nil }
+        return SHA256.hash(data: Data((baseURL.absoluteString + "\n" + token).utf8))
+            .map { String(format: "%02x", $0) }.joined()
+    }
+
+    func canvasSnapshot(sessionId: String) async throws -> AgentCanvasEnvelope {
+        try await request("api/agent-canvas/\(encoded(sessionId))", method: "GET", body: nil, canvas: true)
+    }
+    func canvasTurn(sessionId: String, turnId: String, message: String) async throws -> AgentCanvasEnvelope {
+        let body = try JSONEncoder().encode(["turn_id": turnId, "message": message])
+        return try await request("api/agent-canvas/\(encoded(sessionId))/turn", method: "POST", body: body, canvas: true)
+    }
+    func canvasAction(sessionId: String, intent: AgentIntent) async throws -> AgentCanvasEnvelope {
+        try await request("api/agent-canvas/\(encoded(sessionId))/action", method: "POST",
+                          body: JSONEncoder().encode(intent), canvas: true)
+    }
+
     private func get<T: Decodable>(_ path: String) async throws -> T { try await request(path, method: "GET", body: Optional<Data>.none) }
     private func delete<T: Decodable>(_ path: String) async throws -> T { try await request(path, method: "DELETE", body: Optional<Data>.none) }
     private func send<T: Decodable, Body: Encodable>(_ path: String, body: Body) async throws -> T { try await request(path, method: "POST", body: encoder.encode(body)) }
 
-    private func request<T: Decodable>(_ path: String, method: String, body: Data?, authenticated: Bool = true) async throws -> T {
+    private func request<T: Decodable>(_ path: String, method: String, body: Data?, authenticated: Bool = true, canvas: Bool = false) async throws -> T {
         func debugPreview(_ data: Data, limit: Int = 400) -> String {
             let text = String(data: data, encoding: .utf8) ?? "<non-utf8 data, \(data.count) bytes>"
             if text.count > limit {
@@ -97,7 +118,7 @@ final class APIClient {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body
-        request.timeoutInterval = 45
+        request.timeoutInterval = canvas ? 120 : 45
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if authenticated {
             guard let token = tokenProvider(), !token.isEmpty else {
@@ -122,18 +143,19 @@ final class APIClient {
             if authenticated, http.statusCode == 401 {
                 NotificationCenter.default.post(name: .deviceTokenRejected, object: nil)
             }
-            let preview = debugPreview(data)
+            let preview = canvas ? "<canvas body withheld>" : debugPreview(data)
             print("[API] ← \(http.statusCode) for \(method) \(url.absoluteString)\n[API] Body: \n\(preview)")
             let serverMessage = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
             throw APIError(status: http.statusCode, message: serverMessage ?? (String(data: data, encoding: .utf8) ?? "Request failed."))
         }
         do {
-            let decoded = try decoder.decode(T.self, from: data)
+            if canvas, data.count > 48_000 { throw AgentCanvasError.invalidPayload }
+            let decoded = try (canvas ? JSONDecoder() : decoder).decode(T.self, from: data)
             print("[API] ← \(statusCode) OK for \(method) \(url.absoluteString)")
             return decoded
         } catch {
-            let preview = debugPreview(data)
-            print("[API] ✳︎ Decode failed for \(method) \(url.absoluteString): \n\(preview)\nError: \(error)")
+            let preview = canvas ? "<canvas body withheld>" : debugPreview(data)
+            if !canvas { print("[API] Decode failed: \(preview)\nError: \(error)") }
             throw APIError(status: 500, message: "The server response could not be read: \(error.localizedDescription)")
         }
     }

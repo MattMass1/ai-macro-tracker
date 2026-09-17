@@ -49,6 +49,9 @@ final class AuthService: ObservableObject {
         }
     }
 
+    /// Only the established onboarding completion action consumes this flag.
+    func completeOnboarding() { freshClaim = false }
+
     func signOut() {
         KeychainStore.deleteDeviceToken()
         displayName = nil

@@ -15,6 +15,9 @@ enum LiveCoachWireCodec {
             throw LiveCoachWireError.invalidEvent
         }
         switch type {
+        case "agent.canvas":
+            guard let value = object["canvas"] else { throw LiveCoachWireError.invalidEvent }
+            return .canvas(try AgentCanvasEnvelope.decode(JSONSerialization.data(withJSONObject: value)))
         case "session.started":
             return .started
         case "session.input_transcript.delta", "session.output_transcript.delta":
@@ -138,6 +141,7 @@ enum LiveCoachCloseDeadline {
 final class LiveCoachWebSocketTransport: NSObject, LiveCoachTransporting {
     private let baseURL: URL?
     private let tokenProvider: () -> String?
+    private let canvasSessionId: String?
     private var redirectDelegate: LiveCoachNoRedirectDelegate?
     private var session: URLSession?
     private var socket: URLSessionWebSocketTask?
@@ -145,12 +149,13 @@ final class LiveCoachWebSocketTransport: NSObject, LiveCoachTransporting {
     private var eventContinuation: AsyncThrowingStream<LiveCoachServerEvent, Error>.Continuation?
     private var receivedClosed = false
 
-    init(baseURL: URL? = Config.apiURL, tokenProvider: @escaping () -> String? = { KeychainStore.deviceToken }) {
+    init(baseURL: URL? = Config.apiURL, tokenProvider: @escaping () -> String? = { KeychainStore.deviceToken }, canvasSessionId: String? = nil) {
         self.baseURL = baseURL
         self.tokenProvider = tokenProvider
+        self.canvasSessionId = canvasSessionId
     }
 
-    static func makeRequest(baseURL: URL?, token: String?) throws -> URLRequest {
+    static func makeRequest(baseURL: URL?, token: String?, canvasSessionId: String? = nil) throws -> URLRequest {
         guard let baseURL,
               var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false),
               let scheme = components.scheme?.lowercased(),
@@ -172,9 +177,16 @@ final class LiveCoachWebSocketTransport: NSObject, LiveCoachTransporting {
                 retryable: false
             )
         }
-        let endpoint = baseURL
+        var endpoint = baseURL
             .appendingPathComponent("api", isDirectory: true)
             .appendingPathComponent("live-coach", isDirectory: false)
+        if let canvasSessionId {
+            guard UUID(uuidString: canvasSessionId)?.uuidString.lowercased() == canvasSessionId else {
+                throw LiveCoachWireError.invalidEvent
+            }
+            endpoint = baseURL.appendingPathComponent("api/agent-canvas")
+                .appendingPathComponent(canvasSessionId).appendingPathComponent("live")
+        }
         components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) ?? components
         components.scheme = scheme == "https" ? "wss" : "ws"
         components.query = nil
@@ -193,7 +205,7 @@ final class LiveCoachWebSocketTransport: NSObject, LiveCoachTransporting {
     }
 
     func connect() async throws -> AsyncThrowingStream<LiveCoachServerEvent, Error> {
-        let request = try Self.makeRequest(baseURL: baseURL, token: tokenProvider())
+        let request = try Self.makeRequest(baseURL: baseURL, token: tokenProvider(), canvasSessionId: canvasSessionId)
         receivedClosed = false
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil

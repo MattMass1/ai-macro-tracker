@@ -221,7 +221,7 @@ async def test_today_proposal_unknown_exercise_asks_and_stages_nothing():
         assert "Invented Row Machine 3000" in result["question"]
         assert session.approval is None and store.day_plan_writes == []
         with pytest.raises(ValueError):
-            await service._propose_today_workout(session, {"workout_type": "Pull", "exercises": []})
+            await service._propose_today_workout(session, {"workout_type": "Pull", "exercises": None})
         with pytest.raises(ValueError):
             await service._propose_today_workout(session, {"workout_type": "Pull", "exercises": [
                 {"name": "Face Pull", "sets": 99, "reps": "10"}]})

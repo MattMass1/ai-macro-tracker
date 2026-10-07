@@ -614,11 +614,12 @@ class CanvasService:
                 "proposed list for today using exact library names and a standard workout type (Push, Pull, Legs, "
                 "Abs, Cardio, Full Body) or a saved routine day. Nothing is saved until the user taps native "
                 "Confirm; the saved routine and other days are unchanged; nothing is logged as completed. "
+                "An empty exercises list creates an empty today plan; already logged exercises are kept. "
                 'Example: {"workout_type":"Pull","exercises":[{"name":"Lat Pulldown","sets":3,"reps":"10-12"},'
                 '{"name":"Barbell Row","sets":3,"reps":"8"}]}',
                 "input_schema": {"type": "object", "properties": {
                     "workout_type": {"type": "string", "minLength": 1, "maxLength": 80},
-                    "exercises": {"type": "array", "minItems": 1, "maxItems": 12, "items": {
+                    "exercises": {"type": "array", "minItems": 0, "maxItems": 12, "items": {
                         "type": "object", "properties": {
                             "name": {"type": "string", "minLength": 1, "maxLength": 160},
                             "sets": {"type": "integer", "minimum": 1, "maximum": 10},
@@ -979,18 +980,24 @@ class CanvasService:
         today = effective_date()
         context = await store.fetch_workout_plan_context(today)
         routine = await store.fetch_workout_plan()
+        # Match server._routine_days/_routine_rotation, including legacy list
+        # days and the stored-day fallback when no explicit rotation is present.
+        raw_days = (routine or {}).get("days")
+        days = ({key: value for key, value in raw_days.items() if isinstance(value, dict)}
+                if isinstance(raw_days, dict) else
+                {str(item["type"]): item for item in raw_days or []
+                 if isinstance(item, dict) and item.get("type")})
         loggable = list(WORKOUT_TYPES) + [
-            str(day) for day in ((routine or {}).get("rotation") or [])
-            if isinstance(day, str) and isinstance((routine or {}).get("days"), Mapping)
-            and day in routine["days"]]
+            day for day in ((routine or {}).get("rotation") or list(days))
+            if isinstance(day, str) and day in days]
         label = next((name for name in loggable if name.casefold() == workout_type.casefold()), None)
         if label is None:
             return {"status": "needs_clarification",
                     "question": "Which workout type is this: " + ", ".join(dict.fromkeys(loggable)) + "?"}
         workout_type = label
         raw = args.get("exercises")
-        if not isinstance(raw, list) or not 1 <= len(raw) <= 12:
-            raise ValueError("Provide between 1 and 12 exercises")
+        if not isinstance(raw, list) or not 0 <= len(raw) <= 12:
+            raise ValueError("Provide between 0 and 12 exercises")
         proposed = []
         for item in raw:
             if not isinstance(item, Mapping) or set(item) - {"name", "sets", "reps"}:

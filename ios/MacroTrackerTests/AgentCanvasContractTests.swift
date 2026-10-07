@@ -74,6 +74,16 @@ final class AgentCanvasContractTests: XCTestCase {
         XCTAssertEqual(snapshot.surfaces.count, 2)
     }
 
+    func testPythonSerializedPlanEditPreviewDecodesWithoutDirectCommitAction() throws {
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "plan-edit", withExtension: "json"))
+        let snapshot = try AgentCanvasEnvelope.decode(Data(contentsOf: url))
+        XCTAssertEqual(snapshot.approval?.title, "Edit plan exercise?")
+        XCTAssertEqual(snapshot.approval?.status, .pending)
+        let actions = try XCTUnwrap(snapshot.surfaces.first?.components.first?.actions)
+        XCTAssertEqual(actions.map(\.action), [.confirm, .cancel])
+        XCTAssertFalse(String(decoding: try Data(contentsOf: url), as: UTF8.self).contains("commit_plan"))
+    }
+
     func testUnknownComponentsActionsAndExtraExecutablePropertiesAreRejected() throws {
         let text = String(decoding: try fixture(), as: UTF8.self)
         for (old, new) in [("MacroProgress", "WebView"), ("\"confirm\", \"reference\"", "\"raw_post\", \"reference\""),

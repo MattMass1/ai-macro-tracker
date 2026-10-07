@@ -115,6 +115,9 @@ struct LiveCoachView: View {
         .onChange(of: controller.committedMealOperationID) { _, operationID in
             if operationID != nil { Task { await store.loadDay() } }
         }
+        .onChange(of: controller.mealReconciliationOperationID) { _, operationID in
+            if operationID != nil { Task { await store.loadDay() } }
+        }
     }
 
     private func statusCard(_ presentation: LiveCoachPresentation) -> some View {

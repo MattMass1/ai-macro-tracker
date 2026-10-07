@@ -56,6 +56,8 @@ from live_coach import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 _logging_configured = False
+_VOICE_UNCERTAIN_TTL_SECONDS = 10 * 60
+_voice_uncertain_meals: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
 
 
 def configure_logging() -> None:
@@ -129,9 +131,6 @@ def store_client() -> Store:
 
 async def resolve_food(query: str, **kwargs):
     """Use tenant-local trusted food data before any external provider."""
-    generic = food_lookup.resolve_generic_whole_food(query)
-    if generic is not None:
-        return generic
     try:
         tenant = str(current_user_id())
     except RuntimeError:
@@ -141,7 +140,7 @@ async def resolve_food(query: str, **kwargs):
     normalized = food_lookup.normalize_food_name(query)
     cache_key = (
         tenant, normalized, bool(kwargs.get("whole_item", False)),
-        bool(kwargs.get("atomic", False)),
+        bool(kwargs.get("atomic", False)), bool(kwargs.get("allow_web", True)),
     )
     cached = _resolved_food_cache.get(cache_key) if tenant else None
     now = time.monotonic()
@@ -159,9 +158,6 @@ async def resolve_food(query: str, **kwargs):
         presets = []
     catalog_lookup = getattr(client, "lookup_catalog", None)
     async def local_lookup(local_query: str) -> dict[str, Any] | None:
-        generic_local = food_lookup.resolve_generic_whole_food(local_query)
-        if generic_local is not None:
-            return generic_local
         local_normalized = food_lookup.normalize_food_name(local_query)
         query_tokens = set(local_normalized.split())
         preset = next(
@@ -170,14 +166,36 @@ async def resolve_food(query: str, **kwargs):
         )
         if preset is not None:
             return _preset_food(preset)
+        # An authenticated tenant's exact catalog is their highest-priority
+        # reusable nutrition identity after an explicit preset.
+        if catalog_lookup is not None:
+            try:
+                catalog = await catalog_lookup(local_query)
+                if catalog is not None:
+                    return catalog
+            except Exception:
+                logger.exception("Catalog lookup failed; isolating provider")
+        # The adapter rejects everything except its tiny exact identity map
+        # before touching the network. Prefer those official rows over local
+        # bounded estimates, while leaving portion-specific local assumptions
+        # (for example, a 158 g cup of rice) available.
+        official_quantity, official_unit, official_identity = food_lookup._clean_component(local_query)
+        official = await food_lookup.cofid_lookup.lookup(official_identity or local_query)
+        if official is not None:
+            if official_quantity is None:
+                return official
+            official_portion = food_lookup._quantify(
+                official, official_quantity, official_unit
+            )
+            if official_portion is not None:
+                macros, label = official_portion
+                return {**official, "macros_per_serving": macros, "serving_size": label}
+        generic_local = food_lookup.resolve_generic_whole_food(local_query)
+        if generic_local is not None:
+            return generic_local
         known = _short_circuit_known_food(local_query)
         if known is not None:
             return _known_food_result(known)
-        if catalog_lookup is not None:
-            try:
-                return await catalog_lookup(local_query)
-            except Exception:
-                logger.exception("Catalog lookup failed; isolating provider")
         return None
 
     found = await local_lookup(query)
@@ -897,7 +915,7 @@ async def write_meal(
 
 
 def _validated_meal_values(name, calories, protein, carbs, fat, fiber,
-                           macro_source, meal, day_value):
+                           macro_source, meal, day_value, *, allow_estimate=False):
     """Return the canonical values shared by ordinary and idempotent logging."""
     clean_name = domain.validate_name(name)
     macros = domain.validate_macros(calories, protein, carbs, fat, fiber)
@@ -905,9 +923,22 @@ def _validated_meal_values(name, calories, protein, carbs, fat, fiber,
             and sum(macros[key] for key in ("protein", "carbs", "fat", "fiber")) == 0
             and not _is_zero_macro_food(clean_name)):
         raise MacroError("food entry has calories but no macros")
+    source = str(macro_source or "").strip()
+    if "bounded estimate" in source.casefold() and not allow_estimate:
+        raise MacroError("bounded estimates require local curated provenance")
+    if not allow_estimate:
+        source = domain.validate_macro_source(source)
+    else:
+        if (not source or len(source) > 1000
+                or any(ord(char) < 32 for char in source)
+                or not source.casefold().startswith((
+                    "bounded estimate,", "generic:", "web estimate (unverified):",
+                    "composite: ",
+                ))):
+            raise MacroError("estimate source was not server validated")
     return {"name": clean_name, "meal": domain.normalize_meal(meal),
             "day": domain.resolve_date(day_value),
-            "macro_source": domain.validate_macro_source(macro_source), **macros}
+            "macro_source": source, **macros}
 
 
 async def _idempotent_meal_response(conn, user_id, row) -> dict[str, Any]:
@@ -937,7 +968,9 @@ def _voice_confirmation_sentence(logged: Mapping[str, Any], day_total: Mapping[s
               f"{logged['carbs']:.0f}g carbs, {logged['fat']:.0f}g fat")
     totals = (f"{day_total['calories']:.0f} kcal, {day_total['protein']:.0f}g protein, "
               f"{day_total['carbs']:.0f}g carbs, {day_total['fat']:.0f}g fat")
-    return (f"Logged {logged['name']}: {macros} (source: {logged['macro_source']}). "
+    estimated = "estimate" in str(logged.get("macro_source") or "").casefold()
+    action = "Estimated and logged" if estimated else "Logged"
+    return (f"{action} {logged['name']}: {macros} (source: {logged['macro_source']}). "
             f"Today's total: {totals}.")
 
 
@@ -2623,15 +2656,21 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         if not found or "UNRESOLVED:" in str(found.get("source") or ""):
             return False
         attribution = found.get("attribution")
-        if (isinstance(attribution, Mapping)
-                and attribution.get("verification_state") == "unknown"):
-            return False
+        allowed_states = {"exact_identifier", "official_curated", "internal_curated",
+                          "official_source_exact_row"}
+        if isinstance(attribution, Mapping):
+            state = attribution.get("verification_state")
+            if state == "unverified_web_estimate":
+                if found.get("estimate_provenance") != "server_web_estimate":
+                    return False
+            elif state not in allowed_states:
+                return False
         component_attributions = found.get("component_attributions")
         return not (
             isinstance(component_attributions, list)
             and any(
                 isinstance(item, Mapping)
-                and item.get("verification_state") == "unknown"
+                and item.get("verification_state") not in allowed_states | {"unverified_web_estimate"}
                 for item in component_attributions
             )
         )
@@ -2644,7 +2683,8 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         return voice_verified(base)
 
     async def resolve_component(
-        component: Mapping[str, Any], *, atomic: bool
+        component: Mapping[str, Any], *, atomic: bool,
+        pre_resolved: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         description = domain.validate_name(str(component.get("description") or ""))
         portion = " ".join(str(component.get("portion") or "").split())
@@ -2653,7 +2693,8 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         query = f"{portion} {description}".strip() if portion else description
         resolution_ref = str(component.get("resolution_ref") or "")
         cached = resolution_cache.get(resolution_ref) if resolution_ref else None
-        found = (cached[2] if cached is not None
+        found = (dict(pre_resolved) if pre_resolved is not None else
+                 cached[2] if cached is not None
                  and cached[0] == current_user_id()
                  and food_lookup.normalize_food_name(cached[1]) == food_lookup.normalize_food_name(query)
                  else None)
@@ -2679,15 +2720,61 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                 return {"portion_error": True, "name": query}
             if not 0 < count <= 100:
                 return {"portion_error": True, "name": query}
-            macros = {
-                key: round(float(macros.get(key, 0)) * count, 2)
-                for key in domain.MACRO_KEYS
-            }
-            source = f"{source} x{count:g}"
+            applied_count = found.get("applied_quantity")
+            if applied_count is not None and float(applied_count) != count:
+                return {"portion_error": True, "name": query}
+            if applied_count is None:
+                macros = {
+                    key: round(float(macros.get(key, 0)) * count, 2)
+                    for key in domain.MACRO_KEYS
+                }
+                source = f"{source} x{count:g}"
         result = {"name": query, "macro_source": source, **macros}
+        for field in ("basis", "assumption", "estimate_provenance",
+                      "carbohydrate_definition"):
+            if found.get(field):
+                result[field] = found[field]
         attribution = found.get("attribution")
         if isinstance(attribution, Mapping):
-            result["attribution"] = dict(attribution)
+            allowed_attribution = {
+                "provider", "source_type", "candidate_url", "source_host",
+                "retrieved_at", "serving_basis", "items_per_serving_assumption",
+                "carbohydrate_definition", "verification_state", "source_limitations",
+                "cache_allowed", "evidence_hash", "external_id", "fiber_method",
+            }
+            result["attribution"] = {
+                key: value for key, value in attribution.items()
+                if key in allowed_attribution
+            }
+            if found.get("estimate_provenance") == "server_web_estimate":
+                result["attribution"].pop("candidate_url", None)
+        component_metadata = found.get("component_metadata")
+        if isinstance(component_metadata, list) and component_metadata:
+            validated_metadata = []
+            for item in component_metadata:
+                if not isinstance(item, Mapping):
+                    return None
+                item_description = item.get("description")
+                item_source = item.get("source")
+                item_attribution = item.get("attribution")
+                if (not isinstance(item_description, str) or not item_description.strip()
+                        or not isinstance(item_source, str) or not item_source.strip()
+                        or (item_attribution is not None
+                            and not isinstance(item_attribution, Mapping))):
+                    return None
+                safe_item_attribution = (dict(item_attribution)
+                    if isinstance(item_attribution, Mapping) else None)
+                if (item.get("estimate_provenance") == "server_web_estimate"
+                        and safe_item_attribution is not None):
+                    safe_item_attribution.pop("candidate_url", None)
+                validated_metadata.append({
+                    "description": item_description,
+                    "source": item_source,
+                    "attribution": safe_item_attribution,
+                    "estimate_provenance": item.get("estimate_provenance"),
+                    "carbohydrate_definition": item.get("carbohydrate_definition"),
+                })
+            result["component_metadata"] = validated_metadata
         return result
 
     async def voice_log_meal_tool(call_id: str, args: Mapping[str, Any]) -> Any:
@@ -2696,6 +2783,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         ).hexdigest()[:24]
         raw_components = args.get("components")
         atomic = isinstance(raw_components, list) and bool(raw_components)
+        whole_found = None
         if atomic:
             components = [item for item in raw_components if isinstance(item, Mapping)]
             if len(components) != len(raw_components) or len(components) > 12:
@@ -2707,14 +2795,45 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                 return {"status": "needs_clarification", "operation_id": operation_id,
                         "question": "What food and portion should I log?",
                         "confirmation": "What food and portion should I log?"}
-            components = [{"description": description}]
+            normalized_description = re.sub(
+                r"^(?:please\s+)?log\s+", "", description,
+                count=1, flags=re.IGNORECASE,
+            ).strip()
+            resolution_ref = str(args.get("resolution_ref") or "")
+            if resolution_ref:
+                components = [{"description": normalized_description,
+                               "resolution_ref": resolution_ref}]
+            else:
+                # The atomic probe may use local/catalog/provider identities,
+                # but never spends a hosted-web call before a compound split.
+                whole_found = await resolve_food(
+                    normalized_description, atomic=True, allow_web=False
+                )
+                split = ([normalized_description]
+                         if voice_verified(whole_found)
+                         or food_lookup.normalize_food_name(normalized_description)
+                         in food_lookup._SINGLE_FOOD_AND_NAMES
+                         else food_lookup._split_components(normalized_description))
+                components = ([{"description": item} for item in split]
+                              if (len(split) > 1
+                                  and re.search(r"\band\b|\+", normalized_description,
+                                                re.IGNORECASE))
+                              else [{"description": normalized_description}])
+                if len(components) == 1:
+                    for key in ("grams", "portion", "quantity"):
+                        if args.get(key) is not None:
+                            components[0][key] = args[key]
+            atomic = len(components) > 1
 
         semaphore = asyncio.Semaphore(4)
 
         async def bounded(component: Mapping[str, Any]) -> dict[str, Any] | None:
             async with semaphore:
                 try:
-                    return await resolve_component(component, atomic=atomic)
+                    return await resolve_component(
+                        component, atomic=atomic,
+                        pre_resolved=(whole_found if len(components) == 1 else None),
+                    )
                 except Exception as exc:
                     logger.warning(
                         "Voice food resolution failed: operation_id=%s error_type=%s",
@@ -2749,6 +2868,16 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             values = _validated_meal_values(
                 name, *(totals[key] for key in domain.MACRO_KEYS), source,
                 args.get("meal_type"), None,
+                allow_estimate=(bool(resolved_components)
+                                and any("estimate" in item["macro_source"].casefold()
+                                        for item in resolved_components)
+                                and all(
+                                    item.get("estimate_provenance") in {
+                                        "curated_generic_assumption", "server_web_estimate"
+                                    }
+                                    for item in resolved_components
+                                    if "estimate" in item["macro_source"].casefold()
+                                )),
             )
         except (MacroError, TypeError, ValueError) as exc:
             return {"status": "failed", "operation_id": operation_id,
@@ -2756,6 +2885,44 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         request_hash = hashlib.sha256(json.dumps(
             {**values, "day": values["day"].isoformat()}, sort_keys=True,
             separators=(",", ":"), default=str).encode()).hexdigest()
+        uncertainty_key = (str(current_user_id()), request_hash)
+        now = time.monotonic()
+        for key, fence in list(_voice_uncertain_meals.items()):
+            if fence["expires"] <= now:
+                _voice_uncertain_meals.pop(key, None)
+        prior_uncertainty = _voice_uncertain_meals.get(uncertainty_key)
+        if prior_uncertainty is not None and prior_uncertainty.get("call_id") != call_id:
+            record_id = prior_uncertainty.get("record_id")
+            if record_id:
+                try:
+                    meals = await store_client().fetch_meals(values["day"])
+                    row = next((item for item in meals
+                                if str(item.get("id")) == str(record_id)), None)
+                    expected = prior_uncertainty["values"]
+                    matches = row is not None and all(
+                        (str(row.get(key)) == str(expected[key]) if key in {"name", "meal"}
+                         else abs(float(row.get(key)) - float(expected[key])) < 0.001)
+                        for key in ("name", "meal", *domain.MACRO_KEYS)
+                    )
+                    if matches:
+                        rollups = await store_client().fetch_day_rollups(values["day"], values["day"])
+                        day_row = next((item for item in rollups
+                                        if str(item.get("date")) == values["day"].isoformat()), None)
+                        if day_row is not None:
+                            _voice_uncertain_meals.pop(uncertainty_key, None)
+                            logged = {**row, "macro_source": expected["macro_source"]}
+                            day_total = {key: float(day_row.get(key) or 0) for key in domain.MACRO_KEYS}
+                            return {"status": "replayed", "operation_id": operation_id,
+                                    "logged": logged,
+                                    "components": prior_uncertainty.get("components", []),
+                                    "day_total": day_total,
+                                    "confirmation": _voice_confirmation_sentence(logged, day_total)}
+                except Exception:
+                    pass
+            return {
+                "status": "status_check_needed", "operation_id": operation_id,
+                "confirmation": "A prior save has an unknown outcome. Refresh Today to check it before logging this again.",
+            }
         try:
             stored = await store_client().insert_meal_idempotent(
                 f"voice-log-meal:{call_id}", request_hash,
@@ -2764,6 +2931,13 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                 component_metadata=resolved_components, **values,
             )
         except Exception as exc:
+            _voice_uncertain_meals[uncertainty_key] = {
+                "expires": time.monotonic() + _VOICE_UNCERTAIN_TTL_SECONDS,
+                "record_id": None, "call_id": call_id, "values": dict(values),
+                "components": resolved_components,
+            }
+            while len(_voice_uncertain_meals) > 256:
+                _voice_uncertain_meals.popitem(last=False)
             logger.warning(
                 "Voice meal write outcome uncertain: operation_id=%s error_type=%s",
                 operation_id, type(exc).__name__,
@@ -2786,6 +2960,14 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             logged_with_source = {**stored["logged"], "macro_source": source}
             day_total = {key: float(day_row.get(key) or 0) for key in domain.MACRO_KEYS}
         except Exception as exc:
+            _voice_uncertain_meals[uncertainty_key] = {
+                "expires": time.monotonic() + _VOICE_UNCERTAIN_TTL_SECONDS,
+                "record_id": str((stored.get("logged") or {}).get("id") or "") or None,
+                "call_id": call_id, "values": dict(values),
+                "components": resolved_components,
+            }
+            while len(_voice_uncertain_meals) > 256:
+                _voice_uncertain_meals.popitem(last=False)
             logger.warning(
                 "Voice meal outcome unverified: operation_id=%s error_type=%s",
                 operation_id, type(exc).__name__,
@@ -2794,10 +2976,12 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                 "status": "unknown", "operation_id": operation_id,
                 "confirmation": "The save outcome is not verified yet. Check Today before trying again.",
             }
+        _voice_uncertain_meals.pop(uncertainty_key, None)
         return {
             "status": "replayed" if replayed else "committed",
             "operation_id": operation_id,
             "logged": logged_with_source,
+            "components": resolved_components,
             "day_total": day_total,
             "confirmation": _voice_confirmation_sentence(logged_with_source, day_total),
         }
@@ -2827,7 +3011,15 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         resolution_cache[resolution_ref] = (
             current_user_id(), query, dict(found)
         )
-        return {**found, "resolution_ref": resolution_ref}
+        projected = dict(found)
+        attribution = projected.get("attribution")
+        if (projected.get("estimate_provenance") == "server_web_estimate"
+                and isinstance(attribution, Mapping)):
+            projected["attribution"] = {
+                key: value for key, value in attribution.items()
+                if key != "candidate_url"
+            }
+        return {**projected, "resolution_ref": resolution_ref}
 
     async def voice_undo_tool(_call_id: str, args: Mapping[str, Any]) -> Any:
         return await base["undo_last_meal"](args)

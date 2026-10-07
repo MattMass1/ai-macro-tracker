@@ -22,6 +22,123 @@ from auth import bind_user, reset_user  # noqa: E402
 from test_coach import FakeStore, chat_request  # noqa: E402
 
 
+@pytest.mark.asyncio
+async def test_shared_resolver_uses_web_fallback_only_after_known_sources_miss(monkeypatch):
+    calls = []
+    synthetic = {"name": "cooked red quinoa", "macros_per_100g": {
+        "calories": 120.0, "protein": 4.4, "carbs": 21.3, "fat": 1.9, "fiber": 2.8},
+        "source": "Web search: Synthetic nutrition table",
+        "attribution": {"provider": "OpenAI web_search", "source_url": "https://example.test/quinoa",
+                        "verification_state": "web_evidence"}}
+    async def web_lookup(query):
+        calls.append(query)
+        return synthetic
+    async def miss(_query): return None
+    monkeypatch.setattr(food_lookup.web_nutrition_lookup, "lookup", web_lookup)
+    monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", miss)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", miss)
+    found = await food_lookup.resolve_food("200 g cooked red quinoa")
+    assert calls == ["cooked red quinoa"]
+    assert found["applied_quantity"] == 200 and found["applied_unit"] == "g"
+    assert found["macros_per_serving"]["calories"] == 240
+
+
+@pytest.mark.asyncio
+async def test_shared_resolver_exact_known_match_skips_web_fallback(monkeypatch):
+    calls = []
+    async def web_lookup(query):
+        calls.append(query)
+        raise AssertionError("known matches must not spend a web request")
+    monkeypatch.setattr(food_lookup.web_nutrition_lookup, "lookup", web_lookup)
+    async def local(query): return food_lookup.resolve_generic_whole_food(query)
+    found = await food_lookup.resolve_food("banana", catalog_lookup=local)
+    assert found is not None and calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("catalog", [True, False])
+async def test_allow_web_false_keeps_provider_chain_and_blocks_web(monkeypatch, catalog):
+    calls = []
+    async def miss(_query): return None
+    async def provider(query):
+        calls.append(("provider", query))
+        return {"name": query, "source": "OpenFoodFacts: fixture",
+                "macros_per_serving": {"calories": 10, "protein": 1,
+                                       "carbs": 1, "fat": 0, "fiber": 0}}
+    async def forbidden(_query):
+        raise AssertionError("allow_web=False must block hosted web")
+    async def catalog_miss(_query): return None
+    monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", miss)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", provider)
+    monkeypatch.setattr(food_lookup.web_nutrition_lookup, "lookup", forbidden)
+    found = await food_lookup.resolve_food(
+        "fixture provider food", atomic=True, allow_web=False,
+        catalog_lookup=catalog_miss if catalog else None,
+    )
+    assert found["source"] == "OpenFoodFacts: fixture"
+    assert calls[0] == ("provider", "fixture provider food")
+    assert len(calls) <= 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("catalog", [True, False])
+async def test_allow_web_false_keeps_curated_whole_restaurant_order(monkeypatch, catalog):
+    async def forbidden(_query):
+        raise AssertionError("curated whole order must not reach providers or web")
+    monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", forbidden)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", forbidden)
+    monkeypatch.setattr(food_lookup.web_nutrition_lookup, "lookup", forbidden)
+    found = await food_lookup.resolve_food(
+        "chick fil a grilled club and 8ct grilled nuggets",
+        atomic=True, allow_web=False,
+        catalog_lookup=(lambda _q: asyncio.sleep(0)) if catalog else None,
+    )
+    assert found is not None
+    assert found["source"].startswith("Restaurant menu:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", [
+    "2 slices of fixture bread", "2 pieces of fixture bread",
+    "2 servings of fixture bread", "fixture bread, fixture spread",
+])
+async def test_web_100g_basis_never_invents_unit_or_composite_grams(monkeypatch, query):
+    from test_live_coach import _web_estimate
+    async def miss(_query): return None
+    async def web_lookup(identity): return _web_estimate(query=identity, food_name=f"IGNORE {identity}")
+    monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", miss)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", miss)
+    monkeypatch.setattr(food_lookup.web_nutrition_lookup, "lookup", web_lookup)
+    assert await food_lookup.resolve_food(query) is None
+
+
+@pytest.mark.asyncio
+async def test_web_100g_basis_explicit_grams_scale_exactly_once(monkeypatch):
+    from test_live_coach import _web_estimate
+    async def miss(_query): return None
+    monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", miss)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", miss)
+    monkeypatch.setattr(food_lookup.web_nutrition_lookup, "lookup",
+                        lambda identity: asyncio.sleep(0, result=_web_estimate(query=identity)))
+    found = await food_lookup.resolve_food("200 g cooked red quinoa")
+    assert found["macros_per_serving"]["calories"] == 240
+    assert found["applied_quantity"] == 200
+
+
+@pytest.mark.asyncio
+async def test_web_serving_basis_scales_real_serving_count(monkeypatch):
+    from test_live_coach import _web_estimate
+    async def miss(_query): return None
+    monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", miss)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", miss)
+    monkeypatch.setattr(food_lookup.web_nutrition_lookup, "lookup",
+                        lambda identity: asyncio.sleep(0, result=_web_estimate(
+                            query=identity, basis_unit="serving")))
+    found = await food_lookup.resolve_food("2 servings of cooked red quinoa")
+    assert found["macros_per_serving"]["calories"] == 240
+    assert found["applied_quantity"] == 2
+
+
 def test_provider_defaults_and_global_off_license_metadata(monkeypatch):
     monkeypatch.delenv("FATSECRET_ATTRIBUTION_ENABLED", raising=False)
     assert os.environ.get("FATSECRET_ATTRIBUTION_ENABLED", "false") == "false"
@@ -1603,22 +1720,31 @@ async def test_spoken_ratio_resolves_against_full_normalized_identity(monkeypatc
     assert found["source"] == "FatSecret: 111"
 
 
-@pytest.mark.parametrize(("query", "factor"), [
-    ("half a cup of rice", 0.5 * 236.588 / 100),
-    ("2 1/2 cups rice", 2.5 * 236.588 / 100),
-    ("1 1/2 tbsp olive oil", 1.5 * 14.787 / 100),
+@pytest.mark.parametrize(("query", "factor", "unit_grams"), [
+    ("half a cup of rice", 0.5 * 158 / 100, {"cup": 158}),
+    ("2 1/2 cups rice", 2.5 * 158 / 100, {"cups": 158}),
+    ("1 1/2 tbsp olive oil", 1.5 * 13.5 / 100, {"tbsp": 13.5}),
 ])
-async def test_spoken_fractional_portions_scale_macros(monkeypatch, query, factor):
+async def test_spoken_fractional_portions_scale_macros(monkeypatch, query, factor, unit_grams):
     identity = "olive oil" if "oil" in query else "rice"
 
     async def catalog(name):
         assert name == identity
         return {"name": identity, "macros_per_100g": {
             "calories": 100, "protein": 10, "carbs": 10, "fat": 10, "fiber": 10,
-        }, "source": "Catalog: test"}
+        }, "source": "Catalog: test", "unit_grams": unit_grams}
 
     result = await food_lookup.resolve_food(query, catalog_lookup=catalog)
     assert result["macros_per_serving"]["calories"] == pytest.approx(100 * factor, abs=0.01)
+
+
+@pytest.mark.parametrize("query", ["1 cup chicken", "2 tbsp olive oil", "250 ml soup"])
+async def test_unknown_food_volume_never_uses_water_density(monkeypatch, query):
+    async def catalog(name):
+        return {"name": name, "macros_per_100g": {
+            "calories": 100, "protein": 1, "carbs": 1, "fat": 1, "fiber": 1,
+        }, "source": "Catalog: no volume weight"}
+    assert await food_lookup.resolve_food(query, catalog_lookup=catalog) is None
 
 
 async def test_composite_with_unhonored_explicit_portion_fails_instead_of_defaulting(monkeypatch):
@@ -1675,6 +1801,108 @@ async def test_saved_preset_resolves_before_providers(monkeypatch):
         reset_user(token)
     assert result["name"] == "Fairlife 30g Shake"
     assert result["macros_per_serving"]["protein"] == 30
+
+
+async def test_exact_saved_preset_resolves_before_generic(monkeypatch):
+    class PresetStore:
+        async def fetch_presets(self):
+            return [{"name": "banana", "calories": 225, "protein": 12,
+                     "carbs": 20, "fat": 9, "fiber": 4}]
+
+        async def lookup_catalog(self, _query):
+            return None
+
+    monkeypatch.setattr(srv, "_client", PresetStore())
+    srv._resolved_food_cache.clear()
+    token = bind_user(uuid4())
+    try:
+        result = await srv.resolve_food("banana")
+    finally:
+        reset_user(token)
+    assert result["source"] == "Meal Preset: banana"
+    assert result["macros_per_serving"]["calories"] == 225
+
+
+async def test_shared_resolver_uses_live_cofid_for_uncovered_cooked_identity(monkeypatch):
+    class EmptyStore:
+        async def fetch_presets(self): return []
+        async def lookup_catalog(self, _query): return None
+
+    expected = {
+        "name": "Chicken, breast, grilled without skin, meat only",
+        "macros_per_100g": {"calories": 148.0, "protein": 32.0, "carbs": 0.0,
+                             "fat": 2.2, "fiber": 0.0},
+        "source": "CoFID 2021: food 18-323, per 100 g",
+        "attribution": {"provider": "UK CoFID", "verification_state": "official_source_exact_row"},
+    }
+    calls = []
+
+    async def live_lookup(query):
+        calls.append(query)
+        return expected
+
+    async def forbidden(_query):
+        raise AssertionError("OFF must not supersede an exact official whole-food row")
+
+    monkeypatch.setattr(srv, "_client", EmptyStore())
+    monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", live_lookup)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", forbidden)
+    srv._resolved_food_cache.clear()
+    token = bind_user(uuid4())
+    try:
+        result = await srv.resolve_food("grilled chicken breast")
+    finally:
+        reset_user(token)
+    assert calls == ["grilled chicken breast"]
+    assert result["source"] == expected["source"]
+    assert result["attribution"]["provider"] == "UK CoFID"
+
+
+async def test_shared_resolver_prefers_exact_cofid_cooked_rice_over_local_estimate(monkeypatch):
+    from test_cofid_lookup import CHICKEN, RICE, cofid_xlsx_fixture
+
+    class EmptyStore:
+        async def fetch_presets(self): return []
+        async def lookup_catalog(self, _query): return None
+
+    monkeypatch.setattr(srv, "_client", EmptyStore())
+    food_lookup.cofid_lookup.clear_cache()
+    monkeypatch.setattr(
+        food_lookup.cofid_lookup, "fetch_workbook",
+        lambda: asyncio.sleep(0, result=cofid_xlsx_fixture(CHICKEN, RICE)),
+    )
+    srv._resolved_food_cache.clear()
+    token = bind_user(uuid4())
+    try:
+        result = await srv.resolve_food("cooked rice")
+    finally:
+        reset_user(token)
+
+    assert result["name"] == RICE[1]
+    assert result["source"].startswith("CoFID 2021:")
+    assert "BOUNDED ESTIMATE" not in result["source"]
+
+
+def test_fluid_ounces_are_not_parsed_as_mass_ounces():
+    assert food_lookup._clean_component("six fluid ounces of soup") == (
+        None, None, "6 fluid ounces of soup"
+    )
+
+
+async def test_cofid_failure_falls_back_transparently_without_fake_verified_url(monkeypatch):
+    async def no_cofid(_query): return None
+    async def no_provider(_query): return None
+
+    monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", no_cofid)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", no_provider)
+    result = await food_lookup.resolve_food("grilled chicken breast")
+    assert result["estimate_provenance"] == "curated_generic_assumption"
+    assert "BOUNDED ESTIMATE" in result["source"]
+    assert "source_url" not in result
+    assert "attribution" not in result
+    assert result["macros_per_100g"] == {
+        "calories": 148, "protein": 32, "carbs": 0, "fat": 2.2, "fiber": 0,
+    }
 
 
 @pytest.mark.parametrize("source", ["known", "catalog"])
@@ -1786,7 +2014,7 @@ def test_generic_whole_food_does_not_capture_brands_composites_or_mixed_fraction
     for query in ("Big Mac", "Chick-Fil-A sandwich", "Quaker oats"):
         assert food_lookup.resolve_generic_whole_food(query) is None
     rice = food_lookup.resolve_generic_whole_food("2 1/2 cups white rice")
-    assert rice is not None
+    assert rice is None
     assert food_lookup._clean_component("2 1/2 cups white rice")[:2] == (2.5, "cups")
 
 
@@ -1799,6 +2027,27 @@ def test_sourced_generic_count_weights_are_applied(query, grams):
     found = food_lookup.resolve_generic_whole_food(query)
     assert found is not None
     assert found["serving_size"].endswith(f", {round(grams)} g")
+
+
+@pytest.mark.asyncio
+async def test_server_direct_generic_resolution_reports_applied_quantity(monkeypatch):
+    class EmptyStore:
+        async def fetch_presets(self): return []
+        async def lookup_catalog(self, _query): return None
+
+    monkeypatch.setattr(srv, "_client", EmptyStore())
+    srv._resolved_food_cache.clear()
+    token = bind_user(uuid4())
+    try:
+        found = await srv.resolve_food("three eggs")
+    finally:
+        reset_user(token)
+
+    assert found["applied_quantity"] == 3
+    assert found["applied_unit"] is None
+    assert found["macros_per_serving"] == food_lookup.resolve_generic_whole_food(
+        "three eggs"
+    )["macros_per_serving"]
 
 
 @pytest.mark.parametrize("query", [

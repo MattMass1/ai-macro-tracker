@@ -548,6 +548,27 @@ final class LiveCoachControllerTests: XCTestCase {
         }
     }
 
+    func testWireCodecDecodesMealReconciliationNeeded() throws {
+        let event = try XCTUnwrap(LiveCoachWireCodec.decode(Data(#"{"type":"coach.meal_reconciliation_needed","operation_id":"meal-op-uncertain"}"#.utf8)))
+        XCTAssertEqual(event, .mealReconciliationNeeded(operationID: "meal-op-uncertain"))
+    }
+
+    func testMealReconciliationNeededIsSurfacedForReadOnlyRefresh() async {
+        let calls = CallRecorder()
+        let transport = TransportStub(calls: calls)
+        let subject = LiveCoachController(
+            permission: PermissionStub(granted: true, calls: calls),
+            transport: transport,
+            audio: AudioStub(calls: calls)
+        )
+        await subject.start()
+        transport.emit(.mealReconciliationNeeded(operationID: "meal-op-uncertain"))
+        await drainTasks()
+        XCTAssertEqual(subject.mealReconciliationOperationID, "meal-op-uncertain")
+        await subject.end()
+        XCTAssertNil(subject.mealReconciliationOperationID)
+    }
+
     func testMealCommittedIsSurfacedThenClearedAfterThreeSeconds() async {
         let calls = CallRecorder()
         let transport = TransportStub(calls: calls)

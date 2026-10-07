@@ -6,14 +6,16 @@ from typing import Any, Callable, Mapping
 from urllib.parse import quote
 import httpx
 from food_catalog import normalize_food_name
-from generic_foods import FOODS as GENERIC_WHOLE_FOODS
+import cofid_lookup
+import web_nutrition_lookup
+from generic_foods import COFID, FOODS as GENERIC_WHOLE_FOODS
 from restaurant_menu import restaurant_lookup
 
 logger = logging.getLogger(__name__)
 
 TIMEOUT = 5.0
 PROVIDER_DEADLINE_SECONDS = 2.5
-RESOLUTION_DEADLINE_SECONDS = 2.75
+RESOLUTION_DEADLINE_SECONDS = 6.0
 PROVIDER_PREFERENCE_GRACE_SECONDS = 0.15
 USER_AGENT = "MacroCoach/1.0 (ai-macro-tracker; contact@biz21.com)"
 OFF_SEARCH_URL = "https://world.openfoodfacts.org/cgi/search.pl"
@@ -85,19 +87,19 @@ _NUMBER_PHRASE_RE = re.compile(
     re.IGNORECASE,
 )
 _LEAN_FAT_PAIRS = frozenset({(80, 20), (85, 15), (90, 10), (93, 7), (96, 4)})
-# Weight/volume units convertible to grams for deterministic portion scaling
-# (volumes approximate water density — acceptable for the common-food cases here).
+# Only mass units have food-independent gram conversions. Volume units require
+# a source-specific weight for the resolved food.
 _GRAMS_PER_UNIT = {
     "oz": 28.3495, "ounce": 28.3495, "ounces": 28.3495,
     "g": 1.0, "gram": 1.0, "grams": 1.0,
     "lb": 453.592, "lbs": 453.592, "pound": 453.592, "pounds": 453.592,
     "kg": 1000.0, "kilogram": 1000.0, "kilograms": 1000.0,
-    "ml": 1.0, "milliliter": 1.0, "milliliters": 1.0,
-    "l": 1000.0, "liter": 1000.0, "liters": 1000.0,
-    "cup": 236.588, "cups": 236.588,
-    "tbsp": 14.787, "tablespoon": 14.787, "tablespoons": 14.787,
-    "tsp": 4.929, "teaspoon": 4.929, "teaspoons": 4.929,
 }
+_VOLUME_UNITS = frozenset({
+    "ml", "milliliter", "milliliters", "l", "liter", "liters",
+    "cup", "cups", "tbsp", "tablespoon", "tablespoons",
+    "tsp", "teaspoon", "teaspoons",
+})
 _NUM_TOKEN = r"(?:\d+(?:\.\d+)?(?:/\d+)?|" + "|".join(_NUMBER_WORDS) + r")"
 _UNIT_TOKEN = "|".join(sorted(_UNIT_WORDS, key=len, reverse=True))
 _LEADING_QTY_RE = re.compile(rf"^\s*({_NUM_TOKEN})\s+({_UNIT_TOKEN})\b\s*", re.IGNORECASE)
@@ -485,13 +487,15 @@ def _clean_component(text: str) -> tuple[float | None, str | None, str]:
 def _generic_whole_food(query: str) -> dict[str, Any] | None:
     """Resolve an exact generic whole-food identity without network access."""
     normalized = normalize_food_name(query)
-    explicit_basis = None
-    for marker in ("raw", "cooked"):
-        if re.search(rf"\b{marker}\b", normalized):
-            explicit_basis = marker
-            normalized = " ".join(re.sub(rf"\b{marker}\b", " ", normalized).split())
-            break
     entry = GENERIC_WHOLE_FOODS.get(normalized)
+    explicit_basis = None
+    if entry is None:
+        for marker in ("raw", "cooked"):
+            if re.search(rf"\b{marker}\b", normalized):
+                explicit_basis = marker
+                normalized = " ".join(re.sub(rf"\b{marker}\b", " ", normalized).split())
+                break
+        entry = GENERIC_WHOLE_FOODS.get(normalized)
     count = 1.0
     counted = re.fullmatch(r"(\d+(?:\.\d+)?|a|an)\s+(.+)", normalized)
     if entry is None and counted:
@@ -509,10 +513,23 @@ def _generic_whole_food(query: str) -> dict[str, Any] | None:
     grams = float(entry["grams"]) * count
     source = (f"Generic: {entry['name']}, per 100 g, {entry['basis']}; "
               f"source: {entry['source']}")
-    return {"name":entry["name"], "macros_per_100g":macros,
+    result = {"name":entry["name"], "macros_per_100g":macros,
             "macros_per_serving":_scale_macros(macros, grams / 100),
             "serving_size":f"{source} — {grams:g} g", "source":source,
-            "basis":entry["basis"], "count_grams":entry.get("count_grams")}
+            "basis":entry["basis"], "count_grams":entry.get("count_grams"),
+            "unit_grams":entry.get("unit_grams"),
+            "assumption":entry.get("assumption", f"standard {grams:g} g serving"),
+            "carbohydrate_definition": (
+                "available_carbohydrate_monosaccharide_equivalents"
+                if str(entry.get("source") or "").startswith(COFID)
+                else "unknown"
+            )}
+    if counted is not None:
+        result["applied_quantity"] = count
+        result["applied_unit"] = None
+    if entry.get("assumption") and "BOUNDED ESTIMATE" in str(entry.get("source")):
+        result["estimate_provenance"] = "curated_generic_assumption"
+    return result
 
 
 def resolve_generic_whole_food(query: str) -> dict[str, Any] | None:
@@ -528,7 +545,19 @@ def resolve_generic_whole_food(query: str) -> dict[str, Any] | None:
     if quantified is None:
         return None
     macros, label = quantified
-    return {**found, "macros_per_serving":macros, "serving_size":label}
+    return {**found, "macros_per_serving": macros, "serving_size": label,
+            "applied_quantity": quantity, "applied_unit": unit}
+
+
+def _bounded_generic_fallback(query: str) -> dict[str, Any] | None:
+    """Return an explicit local estimate only for a reviewed live-source identity."""
+    identity = normalize_food_name(query)
+    if identity in {
+        "grilled chicken breast", "chicken breast grilled",
+        "grilled chicken breast without skin",
+    }:
+        return _generic_whole_food("grilled chicken")
+    return None
 
 
 def _split_components(query: str) -> list[str]:
@@ -552,7 +581,8 @@ def _split_components(query: str) -> list[str]:
     return [part.strip() for part in parts if part.strip()]
 
 
-async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup) -> dict[str, Any] | None:
+async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,
+                             allow_web: bool = True) -> dict[str, Any] | None:
     """The single-food cascade: catalog, curated menu, then provider search
     over normalized-query variants. Shared by the simple and composite paths."""
     if catalog_lookup:
@@ -562,6 +592,8 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup) ->
         except Exception: pass
     curated = restaurant_lookup(query)
     if curated: return curated
+    cofid = await cofid_lookup.lookup(query)
+    if cofid: return cofid
     fatsecret_enabled = _fatsecret_provider_mode() is not None
     providers = [search_fatsecret, search_openfoodfacts] if fatsecret_enabled else [search_openfoodfacts]
     searches = [
@@ -618,7 +650,17 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup) ->
                         if found is not None:
                             valid.append((rank, found))
                 return min(valid, key=lambda item: item[0])[1]
-        return min(valid, key=lambda item: item[0])[1] if valid else None
+        provider_result = (min(valid, key=lambda item: item[0])[1] if valid
+                else _bounded_generic_fallback(query))
+        if provider_result is not None:
+            return provider_result
+        if not allow_web:
+            return None
+        try:
+            return await web_nutrition_lookup.lookup(query)
+        except web_nutrition_lookup.NutritionLookupError as exc:
+            logger.info("web nutrition lookup unavailable: reason=%s", exc.reason)
+            return None
     finally:
         for task in tasks:
             if not task.done():
@@ -626,17 +668,27 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup) ->
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def _scale_macros(macros: Mapping[str, Any], factor: float) -> dict[str, float]:
-    return {key: round(float(macros.get(key, 0) or 0) * factor, 2) for key in MACRO_KEYS}
+def _scale_macros(macros: Mapping[str, Any], factor: float) -> dict[str, float | None]:
+    return {key: (None if macros.get(key) is None
+                  else round(float(macros.get(key, 0)) * factor, 2))
+            for key in MACRO_KEYS}
 
 
 def _quantify(
     found: Mapping[str, Any], quantity: float | None, unit: str | None
-) -> tuple[dict[str, float], str] | None:
+) -> tuple[dict[str, float | None], str] | None:
     """Apply a parsed quantity to a resolved food AFTER resolution — the only
     place portion arithmetic happens, so voice, chat, and presets agree."""
     if quantity is not None and unit in _GRAMS_PER_UNIT:
-        return portion_from_grams(found, quantity * _GRAMS_PER_UNIT[unit])
+        unit_grams = found.get("unit_grams")
+        grams = (float(unit_grams[unit]) if isinstance(unit_grams, Mapping)
+                 and unit in unit_grams else _GRAMS_PER_UNIT[unit])
+        return portion_from_grams(found, quantity * grams)
+    if quantity is not None and unit in _VOLUME_UNITS:
+        unit_grams = found.get("unit_grams")
+        if not isinstance(unit_grams, Mapping) or unit not in unit_grams:
+            return None
+        return portion_from_grams(found, quantity * float(unit_grams[unit]))
     if quantity is not None and unit in {"small", "medium", "large"}:
         weights = found.get("count_grams")
         if isinstance(weights, Mapping) and unit in weights:
@@ -650,6 +702,9 @@ def _quantify(
                         source if quantity == 1 else f"{source} x{quantity:g}")
         return None
     base = portion_from_serving(found)
+    if (base is None and found.get("estimate_provenance") == "server_web_estimate"
+            and found.get("macros_per_100g")):
+        return None
     if base is None and found.get("macros_per_100g"):
         base = portion_from_grams(found, 100)
     if base is None:
@@ -662,7 +717,7 @@ def _quantify(
 
 async def resolve_food(
     query: str, classify: bool = True, *, whole_item: bool = False,
-    atomic: bool = False, catalog_lookup=None,
+    atomic: bool = False, catalog_lookup=None, allow_web: bool = True,
 ) -> dict[str, Any] | None:
     """Resolve one query or `and`/`,`/`+`-joined composite to real macro data.
 
@@ -677,7 +732,7 @@ async def resolve_food(
         result = await asyncio.wait_for(
             _resolve_food_text(
                 text, whole_item=whole_item, atomic=atomic,
-                catalog_lookup=catalog_lookup,
+                catalog_lookup=catalog_lookup, allow_web=allow_web,
             ),
             timeout=RESOLUTION_DEADLINE_SECONDS,
         ) if text else None
@@ -693,7 +748,8 @@ async def resolve_food(
 
 
 async def _resolve_food_text(
-    text: str, *, whole_item: bool, atomic: bool, catalog_lookup
+    text: str, *, whole_item: bool, atomic: bool, catalog_lookup,
+    allow_web: bool = True,
 ) -> dict[str, Any] | None:
     text = _normalize_query_text(text)
     raw_parts = [text] if atomic else _split_components(text)
@@ -701,14 +757,16 @@ async def _resolve_food_text(
         raw_parts = [text]
     if len(raw_parts) <= 1:
         quantity, unit, remainder = _clean_component(raw_parts[0] if raw_parts else text)
-        found = await _resolve_component(remainder or text, whole_item=whole_item, catalog_lookup=catalog_lookup)
+        found = await _resolve_component(remainder or text, whole_item=whole_item,
+                                         catalog_lookup=catalog_lookup, allow_web=allow_web)
         if not found or quantity is None:
             return found
         quantified = _quantify(found, quantity, unit)
         if quantified is None:
             return None
         macros, label = quantified
-        return {**found, "macros_per_serving": macros, "serving_size": label}
+        return {**found, "macros_per_serving": macros, "serving_size": label,
+                "applied_quantity": quantity, "applied_unit": unit}
 
     # Composite utterance: resolve, quantify, and sum each component once in
     # server arithmetic. An unresolved component is flagged, never dropped.
@@ -716,7 +774,8 @@ async def _resolve_food_text(
         quantity, unit, remainder = _clean_component(part)
         if not remainder:
             return part, None, None
-        found = await _resolve_component(remainder, whole_item=False, catalog_lookup=catalog_lookup)
+        found = await _resolve_component(remainder, whole_item=False,
+                                         catalog_lookup=catalog_lookup, allow_web=allow_web)
         quantified = _quantify(found, quantity, unit) if found else None
         return part, found, quantified
 
@@ -726,6 +785,7 @@ async def _resolve_food_text(
     totals = {key: 0.0 for key in MACRO_KEYS}
     resolved_labels: list[str] = []
     component_attributions: list[Mapping[str, Any]] = []
+    component_metadata: list[dict[str, Any]] = []
     unresolved: list[str] = []
     any_resolved = False
     for part, found, quantified in parts:
@@ -733,24 +793,41 @@ async def _resolve_food_text(
             unresolved.append(part)
             continue
         macros, label = quantified
+        if any(macros.get(key) is None for key in MACRO_KEYS):
+            unresolved.append(part)
+            continue
         for key in MACRO_KEYS:
-            totals[key] += macros.get(key, 0.0)
+            totals[key] += float(macros[key])
         resolved_labels.append(label)
         attribution = found.get("attribution")
         if isinstance(attribution, Mapping):
             component_attributions.append(dict(attribution))
+        component_metadata.append({
+            "description": part,
+            "source": str(found.get("source") or label),
+            "attribution": dict(attribution) if isinstance(attribution, Mapping) else None,
+            "estimate_provenance": found.get("estimate_provenance"),
+            "carbohydrate_definition": found.get("carbohydrate_definition")
+                or (attribution.get("carbohydrate_definition")
+                    if isinstance(attribution, Mapping) else None),
+        })
         any_resolved = True
     if unresolved:
         quantity, unit, remainder = _clean_component(text)
         whole = await _resolve_component(
-            remainder or text, whole_item=whole_item, catalog_lookup=catalog_lookup
+            remainder or text, whole_item=whole_item, catalog_lookup=catalog_lookup,
+            allow_web=allow_web,
         )
         quantified = _quantify(whole, quantity, unit) if whole and quantity is not None else None
         if whole:
             if quantified is None:
+                if (whole.get("estimate_provenance") == "server_web_estimate"
+                        and whole.get("macros_per_100g")):
+                    return None
                 return whole
             macros, label = quantified
-            return {**whole, "macros_per_serving": macros, "serving_size": label}
+            return {**whole, "macros_per_serving": macros, "serving_size": label,
+                    "applied_quantity": quantity, "applied_unit": unit}
     if not any_resolved:
         return None
     source_bits = list(resolved_labels)
@@ -763,6 +840,19 @@ async def _resolve_food_text(
     }
     if component_attributions:
         result["component_attributions"] = component_attributions
+    result["component_metadata"] = component_metadata
+    definitions = {item.get("carbohydrate_definition") or "unknown"
+                   for item in component_metadata}
+    result["carbohydrate_definition"] = (definitions.pop()
+        if len(definitions) == 1 else "mixed")
+    if any(item.get("estimate_provenance") == "server_web_estimate"
+           for item in component_metadata):
+        result["estimate_provenance"] = "server_web_estimate"
+    elif (any(item.get("estimate_provenance") for item in component_metadata)
+            and all(item.get("estimate_provenance") in
+                    {None, "curated_generic_assumption"}
+                    for item in component_metadata)):
+        result["estimate_provenance"] = "curated_generic_assumption"
     return result
 
 
@@ -771,7 +861,12 @@ def portion_from_grams(found: Mapping[str, Any], grams: Any):
     try: weight = float(grams)
     except (TypeError, ValueError): return None
     if not isinstance(values, Mapping) or not math.isfinite(weight) or not 0 < weight <= 5000: return None
-    macros = {key:round(float(values.get(key,0))*weight/100,2) for key in MACRO_KEYS}
+    if any(values.get(key) is None for key in MACRO_KEYS):
+        return None
+    try:
+        macros = {key:round(float(values[key])*weight/100,2) for key in MACRO_KEYS}
+    except (TypeError, ValueError, KeyError):
+        return None
     return (macros, f"{found['source']} — {found['name']}, {round(weight)} g") if macros["calories"] > 0 else None
 
 
@@ -782,7 +877,10 @@ def portion_from_serving(found: Mapping[str, Any]):
         parsed: dict[str, float] = {}
         try:
             for key in MACRO_KEYS:
-                value = float(values.get(key, 0 if key != "calories" else None))
+                raw = values.get(key, 0 if key != "calories" else None)
+                if raw is None:
+                    raise ValueError
+                value = float(raw)
                 if not math.isfinite(value) or value < 0 or value > 50000:
                     raise ValueError
                 parsed[key] = round(value, 2)

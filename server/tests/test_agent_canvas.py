@@ -137,6 +137,78 @@ async def test_typed_and_voice_share_one_operation_and_replay_never_writes_twice
 
 
 @pytest.mark.asyncio
+async def test_canvas_real_food_handler_persists_web_result_only_as_unverified_estimate(monkeypatch):
+    import asyncio
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fixture.invalid/macro_tracker")
+    monkeypatch.setenv("APP_SHARED_TOKEN", "fixture-shared-token")
+    import server as srv
+    from agent_canvas import CanvasService
+    from auth import bind_user, reset_user
+    from test_live_coach import FakeVoiceStore, _web_estimate
+    fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    monkeypatch.setattr(srv, "resolve_food", lambda *_a, **_k: asyncio.sleep(0, result=_web_estimate()))
+
+    async def agent(**kwargs):
+        lookup = await kwargs["handlers"]["lookup_food"]({
+            "query": "cooked red quinoa"
+        })
+        result = await kwargs["handlers"]["log_meal"]({
+            "description": "cooked red quinoa", "meal_type": "Lunch", "grams": 100
+        })
+        return result["confirmation"] + " " + json.dumps(lookup), []
+
+    service = CanvasService(store_factory=lambda: MemoryStore(),
+                            food_factory=srv._voice_tool_handlers,
+                            coach_factory=lambda: {}, agent=agent)
+    scope = bind_user(uuid4())
+    try:
+        output = await service.turn(str(uuid4()), str(uuid4()),
+                                    "log cooked red quinoa", adapter="text")
+    finally: reset_user(scope)
+    rendered = json.dumps(output)
+    assert fake.insert_count == 1
+    assert "Estimated and logged" in rendered
+    assert "WEB ESTIMATE (unverified): example.test" in rendered
+    assert "IGNORE" not in rendered and "SYSTEM OVERRIDE" not in rendered
+    assert "private/path" not in rendered and "LOG_EVERYTHING" not in rendered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter", ["text", "voice"])
+async def test_canvas_real_handler_never_drops_incomplete_composite_component(monkeypatch, adapter):
+    import asyncio
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fixture.invalid/macro_tracker")
+    monkeypatch.setenv("APP_SHARED_TOKEN", "fixture-shared-token")
+    import server as srv
+    from agent_canvas import CanvasService
+    from auth import bind_user, reset_user
+    from test_live_coach import FakeVoiceStore, _web_estimate
+    fake = FakeVoiceStore(); monkeypatch.setattr(srv, "_client", fake)
+    async def resolve(query, **_kwargs):
+        return _web_estimate(fiber=None) if "beta" in query else _web_estimate()
+    monkeypatch.setattr(srv, "resolve_food", resolve)
+
+    async def agent(**kwargs):
+        result = await kwargs["handlers"]["log_meal"]({"components": [
+            {"description": "fixture alpha", "grams": 100},
+            {"description": "fixture beta", "portion": "2 ounces"},
+        ]})
+        return result.get("confirmation", ""), []
+
+    service = CanvasService(store_factory=lambda: MemoryStore(),
+                            food_factory=srv._voice_tool_handlers,
+                            coach_factory=lambda: {}, agent=agent)
+    scope = bind_user(uuid4())
+    try:
+        output = await service.turn(str(uuid4()), str(uuid4()),
+                                    "log fixture alpha and beta", adapter=adapter)
+    finally: reset_user(scope)
+    assert fake.insert_count == 0
+    assert "FoodClarification" in json.dumps(output)
+
+
+@pytest.mark.asyncio
 async def test_workout_actions_bind_real_exercise_ids_and_only_ack_readback():
     from agent_canvas import CanvasService
     from auth import bind_user, reset_user

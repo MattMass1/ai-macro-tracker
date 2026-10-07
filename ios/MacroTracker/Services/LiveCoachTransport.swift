@@ -56,6 +56,10 @@ enum LiveCoachWireCodec {
                 label: String(label.prefix(120)),
                 dayTotal: dayTotal
             )
+        case "coach.meal_reconciliation_needed":
+            guard let operationID = object["operation_id"] as? String,
+                  !operationID.isEmpty else { return nil }
+            return .mealReconciliationNeeded(operationID: String(operationID.prefix(160)))
         case "session.closed":
             let allowed = ["close_requested", "expired", "content", "remote_hangup", "connection_lost", "ended"]
             let reason = object["reason"] as? String

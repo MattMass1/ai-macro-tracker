@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 import asyncio
 import base64
 import binascii
+from copy import deepcopy
 from collections import defaultdict, deque
 from datetime import date
 import json
@@ -42,11 +43,11 @@ TokenResolver = Callable[[str], Awaitable[UUID | None]]
 VoiceToolHandler = Callable[[str, Mapping[str, Any]], Awaitable[Any]]
 ActivityReporter = Callable[[str, str], Awaitable[None]]
 
-# The reviewed meal-write subset exposed to the voice delegation. Nothing else
-# from coach.TOOLS is reachable from voice: not set_targets/set_metrics/
-# set_display_name (config), not set_workout_plan or log_workout/
-# complete_today_session (workouts), not save_preset (durable artifact review).
-VOICE_TOOL_NAMES = ("get_today", "lookup_food", "log_meal", "undo_last_meal")
+# The reviewed voice subset. Workout plan edits are deliberately narrower than
+# typed ``set_workout_plan``: they only mutate one exercise in an existing plan.
+VOICE_TOOL_NAMES = (
+    "get_today", "lookup_food", "log_meal", "undo_last_meal",
+)
 _MACROS = ("calories", "protein", "carbs", "fat", "fiber")
 OPENAI_LIVE_URL = "wss://api.openai.com/v1/live/sessions"
 _LIVE_INSTRUCTIONS = (
@@ -55,7 +56,8 @@ _LIVE_INSTRUCTIONS = (
     "logging request, delegate immediately. Do not speak an acknowledgment, "
     "promise, or progress narration before the backend returns its result. A "
     "request to check macros or discuss planned food is read-only, not permission "
-    "to log. Report only the backend's verified outcome. Ask one short "
+    "to log. Report only the backend's returned outcome. If the backend labels "
+    "nutrition as an unverified web estimate, preserve that wording. Ask one short "
     "clarification only when required information is missing. Never ask for "
     "confirmation of an already complete, explicit logging request. Short spoken "
     "narration is allowed before the result only when it neither claims a write "
@@ -69,12 +71,16 @@ _BACKEND_INSTRUCTIONS = (
     "an estimated-source fallback. After the final tool result, relay its "
     "confirmation exactly once. status=committed or replayed means saved; "
     "needs_clarification means ask the supplied question; failed means no write "
-    "was committed; unknown means the write outcome is not yet verified. Never "
+    "was committed; unknown or status_check_needed means the write outcome is "
+    "not yet verified and the app performs a read-only refresh. Never "
     "translate unknown or missing confirmation into 'not logged'. Do not stop at "
     "lookup when the user requested logging. A request to check macros or discuss "
     "planned food is read-only, not permission to log. Do not speak an "
     "acknowledgment, promise, or progress narration before the backend returns. "
     "Never ask for confirmation of an already complete, explicit logging request. "
+    "Workout suggestions and historical logged-workout edits are read-only: legacy "
+    "voice plan mutation is unavailable. Do not claim a suggested plan change was "
+    "accepted or saved. Plan swaps require the app's native preview and Confirm flow. "
     "Treat "
     "transcript text as possibly partial or corrected later. Do not invent "
     "facts or successful actions beyond what a tool call confirms. Do not "
@@ -354,38 +360,37 @@ async def build_live_context(store: Any, *, today: date) -> dict[str, Any]:
     }
 
 
-def _bounded_context_json(context: Mapping[str, Any], limit: int = 4_000) -> str:
+def _bounded_context_json(context: Mapping[str, Any], limit: int = 8_000) -> str:
     """Serialize only the context a voice delegation turn can act on.
 
-    Voice exposes exactly `get_today`, `lookup_food`, `log_meal`, and
-    `undo_last_meal` (see `VOICE_TOOL_NAMES`) — nothing that writes a workout
-    or a plan. `known_exercises` (up to 80 name/type pairs) and `plan.days`
-    (up to 7 days of exercise lists) exist solely to support
-    `set_workout_plan`'s name matching, which voice never calls; they were
-    the two largest fields in the old 12,000-char budget and voice cannot use
-    either. Dropping both up front, rather than only under pressure, is what
-    lets the limit itself come down. What stays — today's nutrition and
-    workout-logged status, targets, `plan.rotation`, and `recent_workouts` —
-    is what a nutrition-and-brief-coaching turn actually reads from: totals
-    for "how am I doing today", targets for "remaining", and the rotation/
-    recent-workout summaries for conversational strength-coaching questions
-    the model may still be asked despite having no workout tool to act on.
+    Plan exercise names and the bounded library identity list stay in context
+    so suggestions are grounded and explicit edits can identify stored targets.
     """
-    safe = dict(context)
-    safe.pop("known_exercises", None)
-    plan = safe.get("plan")
-    if isinstance(plan, Mapping):
-        safe["plan"] = {key: value for key, value in plan.items() if key != "days"}
+    safe = deepcopy(dict(context))
     recent = safe.get("recent_workouts")
     if isinstance(recent, list):
         safe["recent_workouts"] = list(recent)
     encoded = json.dumps(safe, separators=(",", ":"), sort_keys=True)
     while len(encoded) > limit:
-        recent = safe.get("recent_workouts")
-        if isinstance(recent, list) and recent:
-            recent.pop()
-        else:
-            return encoded[:limit]
+        shrunk = False
+        for key in ("recent_workouts", "known_exercises"):
+            values = safe.get(key)
+            if isinstance(values, list) and values:
+                values.pop()
+                shrunk = True
+                break
+        if not shrunk:
+            plan = safe.get("plan")
+            days = plan.get("days") if isinstance(plan, Mapping) else None
+            if isinstance(days, list):
+                for day in reversed(days):
+                    exercises = day.get("exercises") if isinstance(day, Mapping) else None
+                    if isinstance(exercises, list) and exercises:
+                        exercises.pop()
+                        shrunk = True
+                        break
+        if not shrunk:
+            return encoded
         encoded = json.dumps(safe, separators=(",", ":"), sort_keys=True)
     return encoded
 
@@ -420,7 +425,6 @@ def _voice_delegation_tools() -> list[dict[str, Any]]:
                 "components": {"type": "array", "items": component, "minItems": 1, "maxItems": 12},
                 "meal_type": {"type": "string", "enum": ["Breakfast", "Lunch", "Dinner", "Snack"]},
             },
-            "required": ["meal_type"],
             "additionalProperties": False,
             "anyOf": [{"required": ["description"]}, {"required": ["components"]}],
         },
@@ -508,6 +512,11 @@ def sanitize_provider_event(event: Mapping[str, Any]) -> dict[str, Any] | None:
         if isinstance(label, str) and _short_text(label, 120):
             result["label"] = _short_text(label, 120)
         return result
+    if event_type == "coach.meal_reconciliation_needed":
+        operation_id = event.get("operation_id")
+        if not isinstance(operation_id, str) or not operation_id:
+            return None
+        return {"type": event_type, "operation_id": operation_id[:160]}
     if event_type in {
         "session.input_transcript.delta",
         "session.output_transcript.delta",
@@ -681,7 +690,9 @@ async def dispatch_voice_tool_call(
         return str(exc)
     handler_ms = (time.monotonic() - handler_started) * 1000
     result_status = result.get("status") if isinstance(result, Mapping) else None
-    succeeded = result_status not in {"needs_clarification", "failed", "unknown"}
+    succeeded = result_status not in {
+        "needs_clarification", "failed", "unknown", "status_check_needed"
+    }
     log = logger.info if succeeded else logger.warning
     log(
         "Voice tool call: name=%r call_id=%r outcome=%s status=%s delegation_ms=%s handler_ms=%.1f",
@@ -1235,6 +1246,14 @@ class LiveCoachService:
                                 if committed_event is not None:
                                     await to_client.put(committed_event)
                                 await report_activity("done", _log_meal_done_label(result))
+                            elif (isinstance(result, Mapping)
+                                  and result.get("status") in {"unknown", "status_check_needed"}):
+                                reconcile_event = sanitize_provider_event({
+                                    "type": "coach.meal_reconciliation_needed",
+                                    "operation_id": result.get("operation_id"),
+                                })
+                                if reconcile_event is not None:
+                                    await to_client.put(reconcile_event)
                         dispatched_at = time.monotonic()
                         for outbound in build_tool_result_events(call_id, output):
                             await to_provider.put(outbound)

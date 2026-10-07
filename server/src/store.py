@@ -292,9 +292,12 @@ class Store:
         pool=await self.connect(); return [_dict(r) for r in await pool.fetch(
             "SELECT * FROM exercise_max_reps WHERE user_id=$1 ORDER BY date_achieved DESC NULLS LAST", current_user_id())]
 
-    async def fetch_workout_plan(self) -> dict[str, Any] | None:
-        pool = await self.connect()
-        plan = await pool.fetchval(
+    async def fetch_workout_plan(
+        self, *, connection: asyncpg.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        """Fetch the authenticated user's plan, optionally in a caller's transaction."""
+        conn = connection or await self.connect()
+        plan = await conn.fetchval(
             "SELECT plan FROM workout_plans WHERE user_id=$1", current_user_id()
         )
         if plan is None:
@@ -313,18 +316,19 @@ class Store:
         return json.loads(stored) if isinstance(stored, str) else dict(stored)
 
     async def compare_and_swap_workout_plan(
-        self, before: Mapping[str, Any] | None, after: Mapping[str, Any],
+        self, before: Mapping[str, Any] | None, after: Mapping[str, Any], *,
+        connection: asyncpg.Connection | None = None,
     ) -> dict[str, Any] | None:
         """Apply a confirmed minimal edit only if the tenant's plan is unchanged."""
-        pool = await self.connect()
+        conn = connection or await self.connect()
         if before is None:
-            stored = await pool.fetchval(
+            stored = await conn.fetchval(
                 "INSERT INTO workout_plans(user_id,plan) VALUES($1,$2::jsonb) "
                 "ON CONFLICT(user_id) DO NOTHING RETURNING plan",
                 current_user_id(), json.dumps(after),
             )
             return (json.loads(stored) if isinstance(stored, str) else dict(stored)) if stored is not None else None
-        stored = await pool.fetchval(
+        stored = await conn.fetchval(
             "UPDATE workout_plans SET plan=$3::jsonb,updated_at=now() "
             "WHERE user_id=$1 AND plan=$2::jsonb RETURNING plan",
             current_user_id(), json.dumps(before), json.dumps(after),

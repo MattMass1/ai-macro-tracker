@@ -18,6 +18,7 @@ enum LiveCoachServerEvent: Equatable {
     case inputMuted(Bool)
     case activity(state: LiveCoachActivityState, label: String)
     case mealCommitted(operationID: String, label: String, dayTotal: MacroTotals)
+    case mealReconciliationNeeded(operationID: String)
     case closed(reason: String)
     case failure(code: String, message: String)
 }
@@ -93,6 +94,7 @@ final class LiveCoachController: ObservableObject {
     @Published private(set) var activityLabel = ""
     @Published private(set) var committedMealOperationID: String?
     @Published private(set) var committedMealLabel = ""
+    @Published private(set) var mealReconciliationOperationID: String?
     var onCanvas: ((AgentCanvasEnvelope) -> Void)?
 
     private let permission: LiveCoachPermissionChecking
@@ -369,6 +371,8 @@ final class LiveCoachController: ObservableObject {
             updateActivity(activityState, label: label, generation: generation)
         case .mealCommitted(let operationID, let label, _):
             updateCommittedMeal(operationID: operationID, label: label, generation: generation)
+        case .mealReconciliationNeeded(let operationID):
+            mealReconciliationOperationID = operationID
         case .closed:
             finishRemoteSession(generation: generation)
         case .failure(let code, let message):
@@ -423,6 +427,7 @@ final class LiveCoachController: ObservableObject {
         committedMealClearTask = nil
         committedMealOperationID = nil
         committedMealLabel = ""
+        mealReconciliationOperationID = nil
     }
 
     private func handlePlayback(active: Bool, generation: UUID) {

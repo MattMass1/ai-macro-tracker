@@ -1,0 +1,29 @@
+{
+  "protocol": "mmacros.canvas.v1",
+  "catalog": "mmacros.native.v1",
+  "instanceId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "sessionId": "00000000-0000-4000-8000-000000000001",
+  "revision": 1,
+  "serverTime": 1000,
+  "surfaces": [{
+    "surfaceId": "approval",
+    "lifecycle": "approval",
+    "components": [{
+      "id": "confirm",
+      "component": "ConfirmationCard",
+      "reference": "00000000-0000-4000-8000-000000000002",
+      "actions": [
+        {"action": "confirm", "reference": "00000000-0000-4000-8000-000000000002"},
+        {"action": "cancel", "reference": "00000000-0000-4000-8000-000000000002"}
+      ]
+    }]
+  }],
+  "workout": null,
+  "receipt": null,
+  "approval": {
+    "id": "00000000-0000-4000-8000-000000000002",
+    "title": "Edit plan exercise?",
+    "detail": "Push, Fixture press: sets: 3 to 4; reps: 8-10 to 6-8.",
+    "status": "pending"
+  }
+}

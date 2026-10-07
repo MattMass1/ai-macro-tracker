@@ -234,7 +234,9 @@ async def test_workout_scalar_or_legacy_type_only_counts_exact_membership(plan_t
 
 
 @pytest.mark.asyncio
-async def test_assigned_custom_label_survives_real_workout_writer_and_receives_credit(monkeypatch):
+@pytest.mark.parametrize("list_days", [False, True])
+@pytest.mark.parametrize("explicit_rotation", [False, True])
+async def test_assigned_custom_label_survives_real_workout_writer_and_receives_credit(monkeypatch, list_days, explicit_rotation):
     import server as srv
     import domain
     from store import Store as RealStore
@@ -261,7 +263,11 @@ async def test_assigned_custom_label_survives_real_workout_writer_and_receives_c
             return [row for row in saved if row['user_id'] == user_id]
     class Store(MemoryStore):
         async def fetch_workout_plan(self):
-            return {"rotation": ["Upper"], "days": {"Upper": {"exercises": []}}}
+            plan: dict = {"days": ([{"type": "Upper", "exercises": []}] if list_days
+                                   else {"Upper": {"exercises": []}})}
+            if explicit_rotation:
+                plan["rotation"] = ["Upper"]
+            return plan
         async def connect(self): return Pool()
         insert_workout = RealStore.insert_workout
         fetch_workouts = RealStore.fetch_workouts

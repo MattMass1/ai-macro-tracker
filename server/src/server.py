@@ -746,7 +746,8 @@ async def write_workout(
             if not isinstance(workout_type, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 /&()+.'_\-]{0,79}", workout_type):
                 raise
             assigned = await store_client().fetch_workout_plan()
-            if not assigned or workout_type not in assigned.get("rotation", []) or workout_type not in assigned.get("days", {}):
+            days = _routine_days(assigned)
+            if workout_type not in _routine_rotation(assigned, days):
                 raise domain.MacroError("Choose a standard workout type or an assigned plan day")
             type_name = workout_type
         muscle_group = domain.normalize_muscle_group([type_name]) if type_name in domain.WORKOUT_TYPES else []

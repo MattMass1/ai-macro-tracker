@@ -532,12 +532,20 @@ class CanvasService:
                 presented = result.get("status") == "awaiting_confirmation"
                 return result
 
+            async def propose_today_workout(args):
+                nonlocal presented
+                result = await self._propose_today_workout(session, args)
+                presented = result.get("status") == "awaiting_confirmation"
+                return result
+
             handlers = {"log_meal": log_meal, "lookup_food": lookup_food,
                         "present_surface": present_surface, "request_exercise_swap": request_swap,
-                        "request_plan_edit": request_plan_edit}
+                        "request_plan_edit": request_plan_edit,
+                        "propose_today_workout": propose_today_workout}
             base = self.coach_factory()
             for name in ("get_today", "get_today_session", "get_library", "get_range_summary",
-                         "get_display_name", "get_metrics", "get_targets", "get_workout_plan"):
+                         "get_display_name", "get_metrics", "get_targets", "get_workout_plan",
+                         "get_workout_outlook"):
                 if name in base:
                     handlers[name] = base[name]
             for name in ("set_display_name", "set_metrics", "set_workout_plan"):
@@ -593,6 +601,27 @@ class CanvasService:
                     "replacement": {"type": "string", "minLength": 1, "maxLength": 160}},
                     "required": ["exercise"], "additionalProperties": False,
                     "anyOf": [{"required": ["sets"]}, {"required": ["reps"]}, {"required": ["replacement"]}]}})
+            if "get_workout_outlook" in handlers:
+                catalog.append({"name": "get_workout_outlook", "description":
+                    "Read-only. Today's planned workout vs sets actually logged today, and the next "
+                    "scheduled days. Use for: what's my workout today, what's left, what's next. "
+                    "Planned exercises are not completed training. Example: {}",
+                    "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}})
+            catalog.append({"name": "propose_today_workout", "description":
+                "Preview TODAY's workout only (create, swap, shorten or remove exercises). Send the complete "
+                "proposed list for today using exact library names. Nothing is saved until the user taps native "
+                "Confirm; the saved routine and other days are unchanged; nothing is logged as completed. "
+                'Example: {"workout_type":"Pull","exercises":[{"name":"Lat Pulldown","sets":3,"reps":"10-12"},'
+                '{"name":"Barbell Row","sets":3,"reps":"8"}]}',
+                "input_schema": {"type": "object", "properties": {
+                    "workout_type": {"type": "string", "minLength": 1, "maxLength": 80},
+                    "exercises": {"type": "array", "minItems": 1, "maxItems": 12, "items": {
+                        "type": "object", "properties": {
+                            "name": {"type": "string", "minLength": 1, "maxLength": 160},
+                            "sets": {"type": "integer", "minimum": 1, "maximum": 10},
+                            "reps": {"type": "string", "minLength": 1, "maxLength": 40}},
+                        "required": ["name", "sets", "reps"], "additionalProperties": False}}},
+                    "required": ["workout_type", "exercises"], "additionalProperties": False}})
             reply = "The request could not finish. Check your data before retrying a write."
             async def record_usage(usage: Mapping[str, Any]) -> None:
                 await store.insert_coach_usage(
@@ -661,6 +690,9 @@ class CanvasService:
                 raise ValueError("This approval is from an earlier day. Cancel and request a new preview.")
             if draft.get("kind") == "setup":
                 await self._confirm_setup(session, draft)
+                return
+            if draft.get("kind") == "day_plan":
+                await self._confirm_day_plan(session, draft)
                 return
             store = self.store_factory()
             current = await store.fetch_workout_plan()
@@ -891,6 +923,118 @@ class CanvasService:
                                                    {"action": "cancel", "reference": draft_id}]}])
         return {"status": "awaiting_confirmation", "detail": session.approval["detail"]}
 
+    async def _propose_today_workout(self, session, args):
+        """Stage a today-only workout plan. Nothing is written until native Confirm.
+
+        The model supplies the complete proposed list for TODAY (create, swap,
+        shorten or remove). The recurring routine and other days never change.
+        Exercises already trained today are kept so completed work is preserved.
+        """
+        if not isinstance(args, Mapping) or set(args) - {"workout_type", "exercises"}:
+            raise ValueError("Provide workout_type and exercises only")
+        if session.approval:
+            raise ValueError("Confirm or cancel the current preview first")
+        workout_type = args.get("workout_type")
+        if not isinstance(workout_type, str) or not _WORKOUT_LABEL.fullmatch(workout_type.strip()):
+            raise ValueError("Invalid workout label: use 1-80 safe display characters")
+        workout_type = workout_type.strip()
+        raw = args.get("exercises")
+        if not isinstance(raw, list) or not 1 <= len(raw) <= 12:
+            raise ValueError("Provide between 1 and 12 exercises")
+        proposed = []
+        for item in raw:
+            if not isinstance(item, Mapping) or set(item) - {"name", "sets", "reps"}:
+                raise ValueError("Each exercise takes name, sets and reps only")
+            name, sets, reps = item.get("name"), item.get("sets"), item.get("reps")
+            if not isinstance(name, str) or not 1 <= len(name.strip()) <= 160:
+                raise ValueError("Exercise name must be 1-160 characters")
+            if isinstance(sets, bool) or not isinstance(sets, int) or not 1 <= sets <= 10:
+                raise ValueError("Sets must be an integer between 1 and 10")
+            if not isinstance(reps, str) or not 1 <= len(reps.strip()) <= 40:
+                raise ValueError("Reps must be a short non-empty value")
+            proposed.append({"name": name.strip(), "sets": sets, "reps": reps.strip()})
+        store = self.store_factory()
+        library = {}
+        for row in await store.fetch_workout_library():
+            if isinstance(row, Mapping) and isinstance(row.get("name"), str):
+                library.setdefault(row["name"].casefold(), []).append(row["name"])
+        for exercise in proposed:
+            matches = library.get(exercise["name"].casefold(), [])
+            if len(matches) != 1:
+                return {"status": "needs_clarification",
+                        "question": f"I couldn't match {exercise['name']} to one exact exercise in your library. Which exercise do you mean?"}
+            exercise["name"] = matches[0]
+        names = [exercise["name"].casefold() for exercise in proposed]
+        if len(set(names)) != len(names):
+            raise ValueError("Each exercise may appear once in today's plan")
+        today = effective_date()
+        current = await self.coach_factory()["get_today_session"]({})
+        current_exercises = [ex for ex in current.get("exercises") or [] if isinstance(ex, Mapping)]
+        # Preserve completed work: an exercise with logged sets today stays in the plan.
+        logged = {str(row.get("exercise", "")).casefold() for row in await store.fetch_workouts(today)
+                  if isinstance(row, Mapping) and row.get("sets")
+                  and str(row.get("date") or today.isoformat()) == today.isoformat()}
+        kept = []
+        for exercise in current_exercises:
+            name = str(exercise.get("name", ""))
+            if name.casefold() in logged and name.casefold() not in names:
+                kept.append({key: exercise[key] for key in ("name", "sets", "reps", "rest_sec") if key in exercise})
+        rest = {str(ex.get("name", "")).casefold(): ex.get("rest_sec") for ex in current_exercises}
+        for exercise in proposed:
+            if isinstance(rest.get(exercise["name"].casefold()), int):
+                exercise["rest_sec"] = rest[exercise["name"].casefold()]
+        after = kept + proposed
+        if len(after) > 12:
+            raise ValueError("Today's plan is limited to 12 exercises")
+        existing = await store.fetch_day_workout_plan(today)
+        previous = (f"Replaces today's {current.get('today_type')} plan"
+                    if current.get("has_plan") and current.get("today_type") else "Creates today's plan")
+        detail = (f"Today only ({today.isoformat()}): {workout_type}, {len(after)} exercises. {previous}. "
+                  + "".join(f"Kept {ex['name']} (already logged today). " for ex in kept)
+                  + "Your saved routine is unchanged. Planned sets are not logged until you log them.")
+        draft_id = str(uuid4())
+        session.approval = {"id": draft_id, "kind": "day_plan", "title": "Save today's workout?",
+                            "detail": detail[:1000], "status": "pending", "date": today.isoformat(),
+                            "expected_revision": existing["revision"] if existing else None,
+                            "operation_id": f"dayplan:{draft_id}",
+                            "after": {"type": workout_type, "exercises": after}}
+        rows = [{"label": f"{workout_type}: {ex['name']}", "detail": f"{ex['sets']} sets × {ex['reps']}"}
+                for ex in after]
+        session.canvas.present("approval", "approval", [
+            {"id": "day-plan-preview", "component": "WorkoutPlanPreview", "title": "Unsaved preview", "rows": rows},
+            {"id": "confirm", "component": "ConfirmationCard", "reference": draft_id,
+             "actions": [{"action": "confirm", "reference": draft_id}, {"action": "cancel", "reference": draft_id}]},
+        ])
+        return {"status": "awaiting_confirmation", "detail": session.approval["detail"]}
+
+    async def _confirm_day_plan(self, session, draft):
+        store = self.store_factory()
+        day = effective_date()
+        after = draft["after"]
+        current = await store.fetch_day_workout_plan(day)
+        replayed = bool(current) and current.get("operation_id") == draft["operation_id"]
+        if not replayed and (current["revision"] if current else None) != draft["expected_revision"]:
+            raise ValueError("Today's plan changed. Cancel and request a fresh preview.")
+        if not replayed:
+            # Uncertain BEFORE awaiting the write: a lost response can never be re-confirmed.
+            draft["status"] = "uncertain"
+            session.canvas.revision += 1
+            stored = await store.compare_and_swap_day_workout_plan(
+                day, draft["expected_revision"], after["type"], after["exercises"], draft["operation_id"])
+            if stored is None:
+                current = await store.fetch_day_workout_plan(day)
+                if not current or current.get("operation_id") != draft["operation_id"]:
+                    draft["status"] = "pending"
+                    raise ValueError("Today's plan changed. Cancel and request a fresh preview.")
+        verified = await store.fetch_day_workout_plan(day)
+        if (not verified or verified.get("operation_id") != draft["operation_id"]
+                or verified.get("type") != after["type"] or verified.get("exercises") != after["exercises"]):
+            raise ValueError("Today's plan readback was not verified. Check your workout plan.")
+        session.approval = None
+        session.canvas.dismiss("approval", cancel_approval=True)
+        await self._load_workout(session)
+        self._show_workout(session)
+
     async def _load_workout(self, session):
         data = await self.coach_factory()["get_today_session"]({})
         if not data.get("has_plan"):
@@ -946,7 +1090,11 @@ Compose native cards for meaningful requests, not a text-only questionnaire.
 Use present_surface for remaining macros, starting a workout, next exercise, weekly progress,
 or dismissing/quiet view. Native components show authoritative live data, not your invented values.
 Read via supplied tools when answering numbers. Do not imply opening a logger saved any sets.
-An explicit edit to one assigned-plan exercise uses request_plan_edit. A contextual active/last
+For today's workout, what is left, or what is next, call get_workout_outlook; say planned vs logged.
+To create, swap, shorten or remove exercises for today use propose_today_workout (today only by
+default; the saved routine is unchanged; native Confirm required; build from the library and history).
+An explicit request to change the SAVED ROUTINE itself (every future Push day, the template) uses
+request_plan_edit for one exercise. A contextual active/last
 swap may use request_exercise_swap. Never perform a whole-plan rewrite for either operation.
 Workout suggestions are read-only: ground them in get_workout_plan and get_library, and clearly
 label them as suggestions. A spoken yes never confirms a pending native approval.

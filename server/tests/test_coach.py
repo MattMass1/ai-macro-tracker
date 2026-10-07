@@ -1570,6 +1570,7 @@ async def test_get_today_session_returns_rotation_day_and_done_state(monkeypatch
         "done": False,
         "has_plan": True,
         "session_size": None,
+        "today_source": "routine",
     }
 
     # A completion recorded today pins today's type and flips done.

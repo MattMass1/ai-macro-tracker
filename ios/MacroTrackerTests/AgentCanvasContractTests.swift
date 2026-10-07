@@ -84,6 +84,21 @@ final class AgentCanvasContractTests: XCTestCase {
         XCTAssertFalse(String(decoding: try Data(contentsOf: url), as: UTF8.self).contains("commit_plan"))
     }
 
+    func testPythonSerializedTodayOnlyPlanPreviewDecodesWithNativeConfirmCancelOnly() throws {
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "day-plan", withExtension: "json"))
+        let snapshot = try AgentCanvasEnvelope.decode(Data(contentsOf: url))
+        XCTAssertEqual(snapshot.approval?.title, "Save today's workout?")
+        XCTAssertEqual(snapshot.approval?.status, .pending)
+        XCTAssertTrue(snapshot.approval?.detail.contains("Today only (2026-10-07)") == true)
+        XCTAssertTrue(snapshot.approval?.detail.contains("saved routine is unchanged") == true)
+        let components = try XCTUnwrap(snapshot.surfaces.first?.components)
+        XCTAssertEqual(components.map(\.component), [.workoutPlanPreview, .confirmationCard])
+        XCTAssertEqual(components.first?.rows.first?.label, "Pull: Lat Pulldown")
+        XCTAssertEqual(components.first?.rows.first?.detail, "3 sets × 10-12")
+        XCTAssertEqual(components.last?.actions.map(\.action), [.confirm, .cancel])
+        XCTAssertNil(snapshot.workout)
+    }
+
     func testUnknownComponentsActionsAndExtraExecutablePropertiesAreRejected() throws {
         let text = String(decoding: try fixture(), as: UTF8.self)
         for (old, new) in [("MacroProgress", "WebView"), ("\"confirm\", \"reference\"", "\"raw_post\", \"reference\""),

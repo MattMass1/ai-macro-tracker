@@ -17,6 +17,7 @@
 		B0020000000000000000000B /* workout-labels.json in Resources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000008 /* workout-labels.json */; };
 		B0020000000000000000000C /* day-readiness.json in Resources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000009 /* day-readiness.json */; };
 		B0020000000000000000000D /* plan-edit.json in Resources */ = {isa = PBXBuildFile; fileRef = F0020000000000000000000A /* plan-edit.json */; };
+		B0020000000000000000000E /* day-plan.json in Resources */ = {isa = PBXBuildFile; fileRef = F0020000000000000000000B /* day-plan.json */; };
 		B00200000000000000000008 /* A2UISwiftCore in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000001 /* A2UISwiftCore */; };
 		B00200000000000000000009 /* A2UISwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000002 /* A2UISwiftUI */; };
 		B0020000000000000000000A /* A2UISwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000003 /* A2UISwiftUI */; };
@@ -71,6 +72,7 @@
 		F00200000000000000000008 /* workout-labels.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "workout-labels.json"; path = "../docs/agent-canvas/fixtures/workout-labels.json"; sourceTree = SOURCE_ROOT; };
 		F00200000000000000000009 /* day-readiness.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "day-readiness.json"; path = "../docs/agent-canvas/fixtures/day-readiness.json"; sourceTree = SOURCE_ROOT; };
 		F0020000000000000000000A /* plan-edit.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "plan-edit.json"; path = "../docs/agent-canvas/fixtures/plan-edit.json"; sourceTree = SOURCE_ROOT; };
+		F0020000000000000000000B /* day-plan.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "day-plan.json"; path = "../docs/agent-canvas/fixtures/day-plan.json"; sourceTree = SOURCE_ROOT; };
 		F00000000000000000000001 /* MacroTracker.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MacroTracker.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F00000000000000000000002 /* MacroTrackerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MacroTrackerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F00100000000000000000001 /* MacroTrackerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacroTrackerApp.swift; sourceTree = "<group>"; };
@@ -225,6 +227,7 @@
 				F00200000000000000000008 /* workout-labels.json */,
 				F00200000000000000000009 /* day-readiness.json */,
 				F0020000000000000000000A /* plan-edit.json */,
+				F0020000000000000000000B /* day-plan.json */,
 			);
 			path = MacroTrackerTests;
 			sourceTree = "<group>";
@@ -341,6 +344,7 @@
 				B0020000000000000000000B /* workout-labels.json in Resources */,
 				B0020000000000000000000C /* day-readiness.json in Resources */,
 				B0020000000000000000000D /* plan-edit.json in Resources */,
+				B0020000000000000000000E /* day-plan.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

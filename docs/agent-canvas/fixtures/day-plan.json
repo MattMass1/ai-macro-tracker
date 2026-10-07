@@ -1,0 +1,58 @@
+{
+  "protocol": "mmacros.canvas.v1",
+  "catalog": "mmacros.native.v1",
+  "sessionId": "00000000-0000-4000-8000-000000000001",
+  "instanceId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "revision": 1,
+  "serverTime": 1000,
+  "surfaces": [
+    {
+      "surfaceId": "approval",
+      "lifecycle": "approval",
+      "components": [
+        {
+          "id": "day-plan-preview",
+          "component": "WorkoutPlanPreview",
+          "title": "Unsaved preview",
+          "rows": [
+            {
+              "label": "Pull: Lat Pulldown",
+              "detail": "3 sets × 10-12"
+            },
+            {
+              "label": "Pull: Barbell Row",
+              "detail": "3 sets × 8"
+            },
+            {
+              "label": "Pull: Face Pull",
+              "detail": "2 sets × 15"
+            }
+          ]
+        },
+        {
+          "id": "confirm",
+          "component": "ConfirmationCard",
+          "reference": "00000000-0000-4000-8000-000000000003",
+          "actions": [
+            {
+              "action": "confirm",
+              "reference": "00000000-0000-4000-8000-000000000003"
+            },
+            {
+              "action": "cancel",
+              "reference": "00000000-0000-4000-8000-000000000003"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "receipt": null,
+  "workout": null,
+  "approval": {
+    "id": "00000000-0000-4000-8000-000000000003",
+    "title": "Save today's workout?",
+    "detail": "Today only (2026-10-07): Pull, 3 exercises. Replaces today's Push plan. Your saved routine is unchanged. Planned sets are not logged until you log them.",
+    "status": "pending"
+  }
+}

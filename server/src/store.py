@@ -337,6 +337,52 @@ class Store:
             return None
         return json.loads(stored) if isinstance(stored, str) else dict(stored)
 
+    @staticmethod
+    def _day_plan(row: Any) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        exercises = row["exercises"]
+        return {
+            "day": row["day"].isoformat() if hasattr(row["day"], "isoformat") else str(row["day"]),
+            "type": row["workout_type"],
+            "exercises": json.loads(exercises) if isinstance(exercises, str) else list(exercises),
+            "revision": int(row["revision"]),
+            "operation_id": row["operation_id"],
+        }
+
+    async def fetch_day_workout_plan(self, day: date) -> dict[str, Any] | None:
+        """The authenticated user's date-scoped plan for one logging day."""
+        pool = await self.connect()
+        return self._day_plan(await pool.fetchrow(
+            "SELECT day,workout_type,exercises,revision,operation_id "
+            "FROM daily_workout_plans WHERE user_id=$1 AND day=$2",
+            current_user_id(), day,
+        ))
+
+    async def compare_and_swap_day_workout_plan(
+        self, day: date, expected_revision: int | None, workout_type: str,
+        exercises: list[dict[str, Any]], operation_id: str,
+    ) -> dict[str, Any] | None:
+        """Save one day's plan only if its revision is unchanged (None: absent)."""
+        pool = await self.connect()
+        if expected_revision is None:
+            row = await pool.fetchrow(
+                "INSERT INTO daily_workout_plans(user_id,day,workout_type,exercises,operation_id) "
+                "VALUES($1,$2,$3,$4::jsonb,$5) ON CONFLICT (user_id, day) DO NOTHING "
+                "RETURNING day,workout_type,exercises,revision,operation_id",
+                current_user_id(), day, workout_type, json.dumps(exercises), operation_id,
+            )
+        else:
+            row = await pool.fetchrow(
+                "UPDATE daily_workout_plans SET workout_type=$4,exercises=$5::jsonb,"
+                "operation_id=$6,revision=revision+1,updated_at=now() "
+                "WHERE user_id=$1 AND day=$2 AND revision=$3 "
+                "RETURNING day,workout_type,exercises,revision,operation_id",
+                current_user_id(), day, expected_revision, workout_type,
+                json.dumps(exercises), operation_id,
+            )
+        return self._day_plan(row)
+
     async def fetch_session_day_state(self) -> dict[str, Any] | None:
         """The authenticated user's rotation day-state (which rotation day is
         current and the date it was marked done), or None when never set."""

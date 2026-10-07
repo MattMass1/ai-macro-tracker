@@ -26,6 +26,7 @@ from typing import Any, Awaitable, Callable, Mapping
 from uuid import UUID, uuid4
 
 import httpx  # noqa: E402
+import asyncpg  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -109,6 +110,14 @@ _ZERO_MACRO_FOODS = (
 )
 
 _client: Store | None = None
+# "200-calorie snack", "300 kcal", "150 cals of candy": an energy amount with
+# no identifiable food. Such text must never be resolved or logged as a food.
+_CALORIES_ONLY = re.compile(
+    r"(?:(?:please\s+)?(?:log|add)\s+)?(?:an?\s+)?\d+(?:\.\d+)?\s*-?\s*"
+    r"(?:k?cals?|calories?|kcals?|calorie)"
+    r"(?:\s+(?:of\s+)?(?:a\s+)?(?:snack|food|meal|something|candy|treat|stuff|junk))?",
+    re.IGNORECASE,
+)
 _RESOLVED_CACHE_MAX = 256
 _RESOLVED_CACHE_TTL_SECONDS = 90.0
 _resolved_food_cache: OrderedDict[
@@ -534,9 +543,15 @@ async def _resolve_today_session() -> tuple[int, str, list[dict[str, Any]], bool
     MacroError when no plan exists yet (the coach should onboard first).
     """
     today = domain.effective_date()
+    day_plan = await fetch_day_plan(today)
     plan = await store_client().fetch_workout_plan()
     if not plan:
-        raise MacroError("No workout plan yet — build one first.")
+        if day_plan is None:
+            raise MacroError("No workout plan yet — build one first.")
+        # A confirmed today-only plan is loggable without a recurring routine.
+        state = await store_client().fetch_session_day_state() or {}
+        done = _as_day(state.get("done_date")) == today
+        return 0, day_plan["type"], list(day_plan["exercises"]), done
     rotation = [str(t) for t in (plan.get("rotation") or []) if str(t).strip()]
     if not rotation:
         rotation = list(domain.WORKOUT_ROTATION)
@@ -574,7 +589,34 @@ async def _resolve_today_session() -> tuple[int, str, list[dict[str, Any]], bool
     today_type = rotation[index]
     day = days.get(today_type) if isinstance(days.get(today_type), dict) else {}
     exercises = [ex for ex in day.get("exercises", []) if isinstance(ex, dict)]
+    if day_plan is not None:
+        # Today's confirmed date-scoped plan overrides only today's session.
+        # The rotation index and recurring routine are untouched.
+        today_type, exercises = day_plan["type"], list(day_plan["exercises"])
     return index, today_type, exercises, done
+
+
+async def fetch_day_plan(day: _date) -> dict[str, Any] | None:
+    """The tenant's confirmed plan for one logging day, or None.
+
+    Only a well-formed row is used. A database that has not applied the
+    additive day-plan migration (e.g. during a reviewed rollback) degrades to
+    the recurring routine instead of breaking today's workout.
+    """
+    fetch = getattr(store_client(), "fetch_day_workout_plan", None)
+    if fetch is None:
+        return None
+    try:
+        row = await fetch(day)
+    except asyncpg.exceptions.UndefinedTableError:
+        logger.warning("daily_workout_plans table is unavailable; using routine only")
+        return None
+    if (not isinstance(row, Mapping) or not isinstance(row.get("type"), str)
+            or not row["type"].strip() or not isinstance(row.get("exercises"), list)):
+        return None
+    exercises = [dict(item) for item in row["exercises"]
+                 if isinstance(item, Mapping) and isinstance(item.get("name"), str)]
+    return {**row, "exercises": exercises}
 
 
 async def workout_plan_payload() -> dict[str, Any]:
@@ -594,12 +636,13 @@ async def workout_plan_payload() -> dict[str, Any]:
     """
     today_date = domain.effective_date()
     today = today_date.isoformat()
-    todays_workouts, rotation_anchor, known, stored_plan, day_state = await asyncio.gather(
+    todays_workouts, rotation_anchor, known, stored_plan, day_state, day_plan = await asyncio.gather(
         fetch_workouts(today_date),
         last_workout_type(before=today),
         fetch_known_exercises(),
         store_client().fetch_workout_plan(),
         store_client().fetch_session_day_state(),
+        fetch_day_plan(today_date),
     )
 
     planned_exercises = {
@@ -701,13 +744,20 @@ async def workout_plan_payload() -> dict[str, Any]:
     # completion flag so a session the coach marked done shows as done here.
     if upcoming:
         upcoming[0]["done"] = _as_day((day_state or {}).get("done_date")) == today_date
+        if day_plan is not None:
+            # Today's confirmed date-scoped plan replaces only today's card.
+            upcoming[0].update({
+                "type": day_plan["type"],
+                "exercises": [{"name": str(item["name"])} for item in day_plan["exercises"][:12]],
+                "today_plan": True,
+            })
 
     return {
         "rotation": list(domain.WORKOUT_ROTATION),
         "last_workout": todays_last,
         "upcoming": upcoming,
         "core": exercises_for("Abs"),
-        "has_plan": bool(stored_plan),
+        "has_plan": bool(stored_plan) or day_plan is not None,
     }
 
 
@@ -2464,8 +2514,39 @@ def _coach_tool_handlers(*, canvas=False) -> dict[str, Callable[[Mapping[str, An
             session_size = str(plan.get("session_size") or "") if isinstance(plan, dict) else ""
         except MacroError:
             return {"today_type": None, "exercises": [], "done": False, "has_plan": False}
+        source = "today_plan" if await fetch_day_plan(domain.effective_date()) else "routine"
         return {"today_type": today_type, "exercises": exercises, "done": done,
-                "has_plan": True, "session_size": session_size or None}
+                "has_plan": True, "session_size": session_size or None,
+                "today_source": source}
+    async def get_workout_outlook_tool(_args):
+        """Read-only: today's PLAN vs logged sets, plus the next scheduled days."""
+        today = domain.effective_date()
+        session, payload, rows = await asyncio.gather(
+            get_today_session_tool({}), workout_plan_payload(), fetch_workouts(today))
+        completed: dict[str, int] = {}
+        for row in rows:
+            name = str(row.get("exercise") or "").strip()
+            if name and str(row.get("date") or today.isoformat()) == today.isoformat():
+                completed[name] = completed.get(name, 0) + len(row.get("sets") or [])
+        planned = [{key: item[key] for key in ("name", "sets", "reps") if key in item}
+                   for item in session.get("exercises") or []][:12]
+        return {
+            "date": today.isoformat(),
+            "today": {
+                "type": session.get("today_type"),
+                "source": session.get("today_source") if session.get("has_plan") else "none",
+                "planned": planned,
+                "completed": [{"exercise": name, "sets_logged": count}
+                              for name, count in completed.items()],
+                "done": bool(session.get("done")),
+                "planned_is_not_completed": True,
+            },
+            "upcoming": [{"type": item.get("type"),
+                          "exercises": [ex.get("name") for ex in item.get("exercises") or []][:8]}
+                         for item in (payload.get("upcoming") or [])[1:4]],
+            "note": ("Planned exercises are proposals, not completed training. Only "
+                     "'completed' counts logged sets. Upcoming days follow the rotation."),
+        }
     async def complete_today_session_tool(_args):
         index, today_type, exercises, already_done = await _resolve_today_session()
         await store_client().put_session_day_state(index, domain.effective_date())
@@ -2639,6 +2720,8 @@ def _coach_tool_handlers(*, canvas=False) -> dict[str, Callable[[Mapping[str, An
             "get_readiness": readiness_tool}
     if canvas:
         handlers["preview_workout_plan"] = preview_plan_tool
+        # Canvas-only read; the typed coach's reviewed tool list is unchanged.
+        handlers["get_workout_outlook"] = get_workout_outlook_tool
     return handlers
 
 
@@ -2782,6 +2865,19 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             f"{current_user_id()}:{call_id}".encode()
         ).hexdigest()[:24]
         raw_components = args.get("components")
+        described = [str(args.get("description") or "")] + [
+            str(item.get("description") or "") for item in raw_components or []
+            if isinstance(item, Mapping)
+        ] if isinstance(raw_components, list) or raw_components is None else []
+        if any(_CALORIES_ONLY.fullmatch(text.strip()) for text in described if text.strip()):
+            # Meals store numeric protein/carbs/fat. Recording a calorie-only
+            # entry would fabricate zero macros, so ask instead of writing.
+            question = ("I can't log calories alone without guessing protein, carbs and fat, "
+                        "and I won't record them as zero. What was it, or what were its "
+                        "protein, carbs and fat?")
+            return {"status": "needs_clarification", "reason": "calories_only",
+                    "operation_id": operation_id, "question": question,
+                    "confirmation": question}
         atomic = isinstance(raw_components, list) and bool(raw_components)
         whole_found = None
         if atomic:

@@ -1,0 +1,57 @@
+{
+  "date": "2026-10-07",
+  "has_targets": false,
+  "canvas_protocol": "mmacros.canvas.v1",
+  "day_timing": {
+    "time_zone": "America/New_York",
+    "rollover_hour": 4,
+    "effective_date": "2026-10-07"
+  },
+  "day_label": "Wednesday, October 7",
+  "totals": {
+    "calories": 200.0,
+    "protein": 0.0,
+    "carbs": 0.0,
+    "fat": 0.0,
+    "fiber": 0.0
+  },
+  "targets": {
+    "calories": 2400.0,
+    "protein": 215.0,
+    "carbs": 200.0,
+    "fat": 70.0,
+    "fiber": 0.0
+  },
+  "remaining": {
+    "calories": 2200.0,
+    "protein": 215.0,
+    "carbs": 200.0,
+    "fat": 70.0,
+    "fiber": 0.0
+  },
+  "day_rollup": {
+    "date": "2026-10-07",
+    "calories": 200.0,
+    "protein": 0.0,
+    "carbs": 0.0,
+    "fat": 0.0,
+    "fiber": 0.0
+  },
+  "meal_rollups": [],
+  "meals": [
+    {
+      "id": "row-1",
+      "name": "Calorie-only snack",
+      "meal": "Snack",
+      "calories": 200.0,
+      "protein": null,
+      "carbs": null,
+      "fat": null,
+      "fiber": null,
+      "date": "2026-10-07",
+      "created_time": "2026-09-12T12:00:00+00:00"
+    }
+  ],
+  "macros_complete": false,
+  "macro_note": "Calories include all entries. Other nutrient totals are known-only subtotals; remaining nutrients are unknown."
+}

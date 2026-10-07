@@ -8,6 +8,7 @@ import logging
 import math
 import re
 import secrets
+from contextlib import asynccontextmanager
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Mapping
@@ -304,15 +305,45 @@ class Store:
             return None
         return json.loads(plan) if isinstance(plan, str) else dict(plan)
 
+    @asynccontextmanager
+    async def _workout_write(self, connection=None):
+        """Serialize this tenant's routine, session, plan and exercise mutations."""
+        if connection is None:
+            pool = await self.connect()
+            async with pool.acquire() as conn, conn.transaction():
+                async with self._workout_write(conn):
+                    yield conn
+        else:
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('workout:' || $1, 0))",
+                str(current_user_id()),
+            )
+            yield connection
+
+    async def fetch_workout_plan_context(self, day: date, *, connection=None):
+        """One statement snapshots all mutable facts used by a today preview."""
+        conn = connection or await self.connect()
+        value = await conn.fetchval(
+            "SELECT jsonb_build_object("
+            "'routine',(SELECT plan FROM workout_plans WHERE user_id=$1),"
+            "'state',(SELECT jsonb_build_object('rotation_index',rotation_index,'done_date',done_date) "
+            "FROM session_day_state WHERE user_id=$1),"
+            "'daily',(SELECT to_jsonb(d) - 'updated_at' FROM daily_workout_plans d WHERE user_id=$1 AND day=$2),"
+            "'workouts',COALESCE((SELECT jsonb_agg(to_jsonb(w) ORDER BY w.id) "
+            "FROM fitness_tracker w WHERE user_id=$1 AND day=$2),'[]'::jsonb))",
+            current_user_id(), day,
+        )
+        return json.loads(value) if isinstance(value, str) else value
+
     async def put_workout_plan(self, plan: Mapping[str, Any]) -> dict[str, Any]:
         """Upsert the authenticated user's validated workout plan."""
-        pool = await self.connect()
-        stored = await pool.fetchval(
-            "INSERT INTO workout_plans(user_id,plan) VALUES($1,$2::jsonb) "
-            "ON CONFLICT(user_id) DO UPDATE SET plan=EXCLUDED.plan,updated_at=now() "
-            "RETURNING plan",
-            current_user_id(), json.dumps(plan),
-        )
+        async with self._workout_write() as conn:
+            stored = await conn.fetchval(
+                "INSERT INTO workout_plans(user_id,plan) VALUES($1,$2::jsonb) "
+                "ON CONFLICT(user_id) DO UPDATE SET plan=EXCLUDED.plan,updated_at=now() "
+                "RETURNING plan",
+                current_user_id(), json.dumps(plan),
+            )
         return json.loads(stored) if isinstance(stored, str) else dict(stored)
 
     async def compare_and_swap_workout_plan(
@@ -320,7 +351,12 @@ class Store:
         connection: asyncpg.Connection | None = None,
     ) -> dict[str, Any] | None:
         """Apply a confirmed minimal edit only if the tenant's plan is unchanged."""
-        conn = connection or await self.connect()
+        if connection is None:
+            async with self._workout_write() as conn:
+                return await self.compare_and_swap_workout_plan(before, after, connection=conn)
+        conn = connection
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('workout:' || $1, 0))",
+                           str(current_user_id()))
         if before is None:
             stored = await conn.fetchval(
                 "INSERT INTO workout_plans(user_id,plan) VALUES($1,$2::jsonb) "
@@ -361,19 +397,36 @@ class Store:
 
     async def compare_and_swap_day_workout_plan(
         self, day: date, expected_revision: int | None, workout_type: str,
-        exercises: list[dict[str, Any]], operation_id: str,
+        exercises: list[dict[str, Any]], operation_id: str, *, expected_context=None,
+        connection=None,
     ) -> dict[str, Any] | None:
         """Save one day's plan only if its revision is unchanged (None: absent)."""
-        pool = await self.connect()
+        if connection is None:
+            async with self._workout_write() as conn:
+                return await self.compare_and_swap_day_workout_plan(
+                    day, expected_revision, workout_type, exercises, operation_id,
+                    expected_context=expected_context, connection=conn)
+        await connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended('workout:' || $1, 0))",
+            str(current_user_id()),
+        )
+        if expected_context is not None:
+            # Waiting for another workout writer can cross the 4am boundary.
+            # This API's guarded path is a TODAY preview, never a historical edit.
+            if day != effective_date():
+                return None
+            context = await self.fetch_workout_plan_context(day, connection=connection)
+            if context != expected_context:
+                return None
         if expected_revision is None:
-            row = await pool.fetchrow(
+            row = await connection.fetchrow(
                 "INSERT INTO daily_workout_plans(user_id,day,workout_type,exercises,operation_id) "
                 "VALUES($1,$2,$3,$4::jsonb,$5) ON CONFLICT (user_id, day) DO NOTHING "
                 "RETURNING day,workout_type,exercises,revision,operation_id",
                 current_user_id(), day, workout_type, json.dumps(exercises), operation_id,
             )
         else:
-            row = await pool.fetchrow(
+            row = await connection.fetchrow(
                 "UPDATE daily_workout_plans SET workout_type=$4,exercises=$5::jsonb,"
                 "operation_id=$6,revision=revision+1,updated_at=now() "
                 "WHERE user_id=$1 AND day=$2 AND revision=$3 "
@@ -395,14 +448,14 @@ class Store:
 
     async def put_session_day_state(self, rotation_index: int, done_date) -> dict[str, Any]:
         """Upsert the authenticated user's rotation day-state."""
-        pool = await self.connect()
-        row = await pool.fetchrow(
-            "INSERT INTO session_day_state(user_id,rotation_index,done_date) "
-            "VALUES($1,$2,$3) ON CONFLICT(user_id) DO UPDATE SET "
-            "rotation_index=EXCLUDED.rotation_index,done_date=EXCLUDED.done_date,"
-            "updated_at=now() RETURNING rotation_index,done_date,updated_at",
-            current_user_id(), rotation_index, done_date,
-        )
+        async with self._workout_write() as conn:
+            row = await conn.fetchrow(
+                "INSERT INTO session_day_state(user_id,rotation_index,done_date) "
+                "VALUES($1,$2,$3) ON CONFLICT(user_id) DO UPDATE SET "
+                "rotation_index=EXCLUDED.rotation_index,done_date=EXCLUDED.done_date,"
+                "updated_at=now() RETURNING rotation_index,done_date,updated_at",
+                current_user_id(), rotation_index, done_date,
+            )
         return _dict(row) or {}
 
     async def put_display_name(self, name: str) -> dict[str, str]:
@@ -537,7 +590,8 @@ class Store:
                 continue
             candidate_macros = (candidate["calories"], candidate["protein"],
                                 candidate["carbs"], candidate["fat"], candidate["fiber"])
-            if all(round(float(a or 0), 2) == round(float(b or 0), 2)
+            if all((a is None and b is None) or (a is not None and b is not None
+                   and round(float(a), 2) == round(float(b), 2))
                    for a, b in zip(target_macros, candidate_macros)):
                 return candidate
         return None
@@ -602,6 +656,9 @@ class Store:
     async def _catalog_snapshot(conn, *, name: str, macros: Mapping[str, Any], macro_source: str,
                                 serving_basis: str | None = None):
         """Create/link catalog evidence inside the caller's meal transaction."""
+        if any(macros.get(key) is None for key in ("protein", "carbs", "fat", "fiber")):
+            # User-reported energy is not evidence about a food's nutrients.
+            return None, None
         normalized = normalize_food_name(name)
         provider_match = re.match(r"^(FatSecret|OpenFoodFacts(?: barcode)?):\s*([^\s,—]+)", macro_source or "", re.I)
         if provider_match:
@@ -849,9 +906,11 @@ class Store:
             "carbs=EXCLUDED.carbs,fat=EXCLUDED.fat,fiber=EXCLUDED.fiber", user_id, day)
 
     async def insert_workout(self, *, exercise, workout_type, muscle_group, sets, day):
-        pool=await self.connect(); id=str(uuid4()); vals=[]; user_id=current_user_id()
+        id=str(uuid4()); vals=[]; user_id=current_user_id()
         for i in range(4): vals += [sets[i]["weight"], sets[i]["reps"]] if i < len(sets) else [None,None]
-        r=await pool.fetchrow("INSERT INTO fitness_tracker(id,user_id,exercise_name,workout_type,muscle_group,weight_1,reps_1,weight_2,reps_2,weight_3,reps_3,weight_4,reps_4,day) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *",id,user_id,exercise,workout_type,muscle_group,*vals,day); return workout(r)
+        async with self._workout_write() as conn:
+            r=await conn.fetchrow("INSERT INTO fitness_tracker(id,user_id,exercise_name,workout_type,muscle_group,weight_1,reps_1,weight_2,reps_2,weight_3,reps_3,weight_4,reps_4,day) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *",id,user_id,exercise,workout_type,muscle_group,*vals,day)
+        return workout(r)
 
     async def save_preset(self, values: Mapping[str, Any], existing_id: str | None = None):
         # Provenance choke point: no caller may persist a preset without citing
@@ -870,7 +929,9 @@ class Store:
         if table not in {'nutrition_entries','fitness_tracker'}: raise ValueError('invalid table')
         pool = await self.connect(); user_id=current_user_id()
         if table == 'fitness_tracker':
-            await pool.execute("DELETE FROM fitness_tracker WHERE user_id=$1 AND id=$2", user_id, id); return
+            async with self._workout_write() as conn:
+                await conn.execute("DELETE FROM fitness_tracker WHERE user_id=$1 AND id=$2", user_id, id)
+            return
         async with pool.acquire() as conn, conn.transaction():
             existing = await conn.fetchrow("SELECT day FROM nutrition_entries WHERE user_id=$1 AND id=$2", user_id, id)
             if existing is None: return

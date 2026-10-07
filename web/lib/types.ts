@@ -13,10 +13,10 @@ export type Meal = {
   name: string;
   meal: string;
   calories: number;
-  protein: number;
-  carbs: number;
-  fat: number;
-  fiber: number;
+  protein: number | null;
+  carbs: number | null;
+  fat: number | null;
+  fiber: number | null;
   date?: string;
   created_time?: string;
 };
@@ -40,6 +40,9 @@ export type LoggingDayPolicy = {
 };
 
 export type DayPayload = {
+  // Numeric nutrient aggregates are known-only subtotals when false.
+  macros_complete?: boolean;
+  macro_note?: string;
   // Additive rolling-deploy fields. Absence is unknown, not false/onboarding.
   has_targets?: boolean;
   day_timing?: LoggingDayPolicy;

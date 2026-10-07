@@ -3083,7 +3083,7 @@ async def test_voice_log_meal_with_decimal_components_uses_real_serializer_and_c
         async def run_idempotent(self, _key, _request_hash, _write, **_kwargs):
             self.idempotent_calls += 1
             return {"logged": {
-                "id": "decimal-row", "name": "ground beef 93/7", "meal": "Dinner",
+                "id": "decimal-row", "name": "6 oz 93/7 ground beef", "meal": "Dinner",
                 "calories": 255.0, "protein": 35.0, "carbs": 0.0, "fat": 13.0,
                 "fiber": 0.0, "date": "2026-09-12",
                 "created_time": "2026-09-12T19:17:29+00:00",
@@ -3091,7 +3091,7 @@ async def test_voice_log_meal_with_decimal_components_uses_real_serializer_and_c
 
         async def fetch_meals(self, _start, end=None):
             return [{
-                "id": "decimal-row", "name": "ground beef 93/7", "meal": "Dinner",
+                "id": "decimal-row", "name": "6 oz 93/7 ground beef", "meal": "Dinner",
                 "calories": 255.0, "protein": 35.0, "carbs": 0.0, "fat": 13.0,
                 "fiber": 0.0, "date": "2026-09-12",
                 "created_time": "2026-09-12T19:17:29+00:00",

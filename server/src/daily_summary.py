@@ -25,6 +25,9 @@ async def run() -> int:
         nxt = ROTATION[(ROTATION.index(last)+1) % 3] if last else None
         lines=[f"📊 *Macros — {today.isoformat()}*"]
         for icon,key,label,unit in [('🔥','calories','kcal',''),('🥩','protein','protein','g'),('🌾','carbs','carbs','g'),('🧈','fat','fat','g')]:
+            if key != 'calories' and any(m.get(key) is None for m in meals):
+                lines.append(f"  {icon} {label}: incomplete (some entries have unknown nutrients)")
+                continue
             lines.append(f"  {icon} {totals[key]:g}/{float(target.get(key) or 0):g}{unit} {label} ({float(target.get(key) or 0)-totals[key]:+.0f})")
         lines += [f"\n_Meals ({len(meals)}):_", *[f"  🍽 {m['name']} ({m['meal']}) — {m['calories']:g} kcal" for m in meals]] if meals else ["\n_No meals logged yet today._"]
         lines.append(f"\n💪 *Next workout: {nxt} day*" if nxt else "\n💪 No workout data yet — log one to start PR tracking.")

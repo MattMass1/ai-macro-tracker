@@ -170,7 +170,9 @@ async def test_custom_labels_round_trip_from_supported_plan_and_reject_bad_label
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("adapter", ["text", "voice"])
-async def test_canvas_records_real_coach_loop_usage_once_per_provider_call(adapter):
+async def test_canvas_records_real_coach_loop_usage_once_per_provider_call(adapter, monkeypatch):
+    # The provider transport below is fake; no real credential is needed.
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "fixture-not-a-credential")
     import httpx
     from coach import run_agent
     store = MemoryStore()
@@ -240,7 +242,8 @@ async def test_assigned_custom_label_survives_real_workout_writer_and_receives_c
     from datetime import datetime, timezone
     from auth import current_user_id
     saved = []
-    class Pool:
+    from workout_store_fixture import WorkoutTransactionPool
+    class Pool(WorkoutTransactionPool):
         async def fetchrow(self, sql, row_id, user_id, exercise, types, muscles, *values):
             assert 'INSERT INTO fitness_tracker' in sql
             assert user_id == current_user_id()
@@ -262,6 +265,7 @@ async def test_assigned_custom_label_survives_real_workout_writer_and_receives_c
         async def connect(self): return Pool()
         insert_workout = RealStore.insert_workout
         fetch_workouts = RealStore.fetch_workouts
+        _workout_write = RealStore._workout_write
     store = Store()
     monkeypatch.setattr(srv, "store_client", lambda: store)
     async def today(_):
@@ -318,7 +322,8 @@ async def test_coverage_classification_through_real_writer_store_coach(
     from auth import current_user_id
     saved = []
 
-    class Pool:
+    from workout_store_fixture import WorkoutTransactionPool
+    class Pool(WorkoutTransactionPool):
         async def fetchrow(self, sql, row_id, user_id, exercise, types, muscles, *values):
             assert 'INSERT INTO fitness_tracker' in sql
             assert user_id == current_user_id()
@@ -342,6 +347,7 @@ async def test_coverage_classification_through_real_writer_store_coach(
         async def connect(self): return Pool()
         insert_workout = RealStore.insert_workout
         fetch_workouts = RealStore.fetch_workouts
+        _workout_write = RealStore._workout_write
 
     store = Store()
     monkeypatch.setattr(srv, 'store_client', lambda: store)

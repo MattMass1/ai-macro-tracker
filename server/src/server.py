@@ -111,10 +111,10 @@ _ZERO_MACRO_FOODS = (
 
 _client: Store | None = None
 # "200-calorie snack", "300 kcal", "150 cals of candy": an energy amount with
-# no identifiable food. Such text must never be resolved or logged as a food.
+# no identifiable food. Its nutrients remain unknown, not a resolved food.
 _CALORIES_ONLY = re.compile(
     r"(?:(?:please\s+)?(?:log|add)\s+)?(?:an?\s+)?(?:(?:about|around|roughly|maybe)\s+)?"
-    r"\d+(?:\.\d+)?\s*-?\s*"
+    r"(?P<calories>\d+(?:\.\d+)?)\s*-?\s*"
     r"(?:k?cals?|calories?|kcals?|calorie)(?:\s+worth)?"
     r"(?:\s+(?:of\s+)?(?:a\s+)?(?:snack|food|meal|something|candy|treat|stuff|junk))?",
     re.IGNORECASE,
@@ -378,6 +378,8 @@ async def fetch_trends(days: int) -> dict[str, Any]:
     rows, metrics = await asyncio.gather(
         pool.fetch(
             "SELECT d.date,d.calories,d.protein,d.carbs,d.fat,"
+            "NOT EXISTS (SELECT 1 FROM nutrition_entries n WHERE n.user_id=d.user_id AND n.day=d.date "
+            "AND (n.protein IS NULL OR n.carbs IS NULL OR n.fat IS NULL OR n.fiber IS NULL)) AS macros_complete,"
             "COALESCE(t.calories,0) AS target_calories,"
             "COALESCE(t.protein,0) AS target_protein "
             "FROM days d LEFT JOIN LATERAL ("
@@ -411,6 +413,7 @@ async def fetch_trends(days: int) -> dict[str, Any]:
             "fat": float(row["fat"] or 0),
             "target_calories": float(row["target_calories"] or 0),
             "target_protein": float(row["target_protein"] or 0),
+            "macros_complete": row.get("macros_complete", True),
         }
         daily.append(item)
         weeks[day - timedelta(days=day.weekday())].append(item)
@@ -425,6 +428,7 @@ async def fetch_trends(days: int) -> dict[str, Any]:
                 sum(item["protein"] for item in items) / len(items), 1
             ),
             "days_logged": len(items),
+            "macros_complete": all(item["macros_complete"] for item in items),
         }
         for week_start, items in sorted(weeks.items())
     ]
@@ -494,7 +498,7 @@ def get_default_exercises_for_type(workout_type: str) -> list[str]:
     return domain.get_default_exercises_for_type(workout_type)
 
 
-async def last_workout_type(before: str | None = None) -> str | None:
+async def last_workout_type(before: str | None = None, *, rotation=None) -> str | None:
     """The workout type of the most recent split-advancing entry.
 
     Uses `Date (user input)` as the primary sort; rows without a date fall
@@ -502,6 +506,7 @@ async def last_workout_type(before: str | None = None) -> str | None:
     derived via the shared mapping when the Workout type tag is empty.
     """
     pages = await store_client().fetch_workouts()
+    rotation = domain.WORKOUT_ROTATION if rotation is None else rotation
 
     def sort_key(page: Mapping[str, Any]) -> str:
         return (
@@ -514,15 +519,17 @@ async def last_workout_type(before: str | None = None) -> str | None:
         if before is not None and sort_key(page) >= before:
             continue
         types = page.get("workout_type") or []
+        if isinstance(types, str):
+            types = [types]
         if types:
             workout_type = next(
-                (t for t in domain.WORKOUT_ROTATION if t in types),
+                (t for t in rotation if t in types),
                 types[0],
             )
         else:
             muscles = page.get("muscle_group") or []
             workout_type = domain.workout_type_from_muscle(muscles)
-        if workout_type in domain.WORKOUT_ROTATION:
+        if workout_type in rotation:
             return workout_type
     return None
 
@@ -532,6 +539,19 @@ def _as_day(value: Any) -> _date | None:
     if value is None:
         return None
     return value.date() if hasattr(value, "date") else value
+
+
+def _routine_days(plan) -> dict[str, dict[str, Any]]:
+    raw = (plan or {}).get("days")
+    if isinstance(raw, dict):
+        return {key: value for key, value in raw.items() if isinstance(value, dict)}
+    return {str(item["type"]): item for item in raw or []
+            if isinstance(item, dict) and item.get("type")}
+
+
+def _routine_rotation(plan, days) -> list[str]:
+    return [name for name in (plan or {}).get("rotation") or list(days)
+            if isinstance(name, str) and name in days]
 
 
 async def _resolve_today_session() -> tuple[int, str, list[dict[str, Any]], bool]:
@@ -546,26 +566,16 @@ async def _resolve_today_session() -> tuple[int, str, list[dict[str, Any]], bool
     today = domain.effective_date()
     day_plan = await fetch_day_plan(today)
     plan = await store_client().fetch_workout_plan()
-    if not plan:
+    days = _routine_days(plan)
+    rotation = _routine_rotation(plan, days)
+    if not rotation:
         if day_plan is None:
             raise MacroError("No workout plan yet — build one first.")
         # A confirmed today-only plan is loggable without a recurring routine.
         state = await store_client().fetch_session_day_state() or {}
         done = _as_day(state.get("done_date")) == today
         return 0, day_plan["type"], list(day_plan["exercises"]), done
-    rotation = [str(t) for t in (plan.get("rotation") or []) if str(t).strip()]
-    if not rotation:
-        rotation = list(domain.WORKOUT_ROTATION)
-    days_raw = plan.get("days")
-    if isinstance(days_raw, dict):
-        days = days_raw
-    elif isinstance(days_raw, list):
-        # Legacy plans store days as [{type, exercises}] rows, the same shape
-        # workout_plan_payload already reads.
-        days = {str(item["type"]): item
-                for item in days_raw if isinstance(item, dict) and item.get("type")}
-    else:
-        days = {}
+
     state = await store_client().fetch_session_day_state()
     index: int | None = None
     done = False
@@ -580,13 +590,26 @@ async def _resolve_today_session() -> tuple[int, str, list[dict[str, Any]], bool
             else:
                 index = int(stored_index)
     if index is None:
-        last = await last_workout_type(before=today.isoformat())
+        last = await last_workout_type(before=today.isoformat(), rotation=rotation)
         if last is not None:
             match = next((t for t in rotation if t.casefold() == last.casefold()), None)
             index = (rotation.index(match) + 1) % len(rotation) if match is not None else 0
         else:
             index = 0
     index = max(0, min(index, len(rotation) - 1))
+    if day_plan is None and not done:
+        # In-progress training pins today instead of jumping to the next day.
+        # Non-rotation add-ons do not advance the assigned program.
+        for row in await fetch_workouts(today):
+            if str(row.get("date") or "") != today.isoformat():
+                continue
+            types = row.get("workout_type") or []
+            if isinstance(types, str):
+                types = [types]
+            match = next((name for name in rotation if name in types), None)
+            if match is not None:
+                index = rotation.index(match)
+                break
     today_type = rotation[index]
     day = days.get(today_type) if isinstance(days.get(today_type), dict) else {}
     exercises = [ex for ex in day.get("exercises", []) if isinstance(ex, dict)]
@@ -621,145 +644,35 @@ async def fetch_day_plan(day: _date) -> dict[str, Any] | None:
 
 
 async def workout_plan_payload() -> dict[str, Any]:
-    """The upcoming Push → Pull → Legs rotation with exercises per day.
+    """Today's loggable session and the saved routine's following slots.
 
-    The plan derives from the most recent logged workout; Abs/Cardio days do
-    not advance the split. Exercises come from the PR log (Max Reps) tagged
-    with the planned type, plus an Abs/core list that can be done any day.
-    `upcoming` lists the next `window` rotation days in order so the user can
-    read ahead and never look up exercise names.
-
-    Smart rotation adjustment: when the user logs a workout type that differs
-    from what was scheduled, the rotation anchor shifts so tomorrow continues
-    from after the logged type instead of from the stale anchor. This prevents
-    duplicate days (e.g. two Legs days in a row) and keeps the rotation
-    aligned with what the user actually trained.
+    A date-scoped override replaces today's slot, not the routine or its future
+    order. Accounts without a routine have no invented upcoming schedule.
     """
     today_date = domain.effective_date()
-    today = today_date.isoformat()
-    todays_workouts, rotation_anchor, known, stored_plan, day_state, day_plan = await asyncio.gather(
-        fetch_workouts(today_date),
-        last_workout_type(before=today),
-        fetch_known_exercises(),
+    stored_plan, day_plan, last = await asyncio.gather(
         store_client().fetch_workout_plan(),
-        store_client().fetch_session_day_state(),
         fetch_day_plan(today_date),
+        last_workout_type(),
     )
-
-    planned_exercises = {
-        str(item.get("type")): [
-            str(exercise.get("name"))
-            for exercise in item.get("exercises", [])
-            if isinstance(exercise, dict) and exercise.get("name")
-        ]
-        for item in (stored_plan or {}).get("days", [])
-        if isinstance(item, dict) and item.get("type")
-    }
-    if isinstance((stored_plan or {}).get("days"), dict):
-        planned_exercises = {
-            workout_type: [
-                str(exercise.get("name"))
-                for exercise in day.get("exercises", [])
-                if isinstance(exercise, dict) and exercise.get("name")
-            ]
-            for workout_type, day in stored_plan["days"].items()
-            if isinstance(day, dict)
-        }
-
-    # ── Extract today's logged workout type ──────────────────────────────
-    todays_logged_type: str | None = None
-    for w in todays_workouts:
-        types = w.get("workout_type") or []
-        for t in types:
-            if t in domain.WORKOUT_ROTATION:
-                todays_logged_type = t
-                break
-        if todays_logged_type is None:
-            muscles = w.get("muscle_group") or []
-            derived = domain.workout_type_from_muscle(muscles)
-            if derived and derived in domain.WORKOUT_ROTATION:
-                todays_logged_type = derived
-        if todays_logged_type:
-            break
-
-    # Also resolve the global last workout for backward-compat `last_workout`
-    todays_last: str | None = todays_logged_type
-    if todays_last is None:
-        todays_last = await last_workout_type()
-
-    def exercises_for(workout_type: str) -> list[dict[str, Any]]:
-        # A missing plan intentionally starts empty. Matt's legacy defaults are
-        # data seeded by the migration, never a default leaked to new users.
-        # ONLY the plan's stored exercises for this day — never append the
-        # user's full PR-log history (that's what made sessions balloon).
-        names = list(planned_exercises.get(workout_type, ()))
-        return [{"name": name} for name in names[:8]]  # hard cap 8
-
-    window = 5  # a 5-day training week at most cycles the split twice
+    days = _routine_days(stored_plan)
+    rotation = _routine_rotation(stored_plan, days)
     upcoming: list[dict[str, Any]] = []
-
-    # ── Smart rotation adjustment ────────────────────────────────────────
-    scheduled = domain.next_workout_type(rotation_anchor)
-    if todays_logged_type and todays_logged_type in domain.WORKOUT_ROTATION:
-        # Today has a rotation-type workout — always show it as the first day.
-        upcoming.append(
-            {
-                "type": todays_logged_type,
-                "exercises": exercises_for(todays_logged_type),
-            }
-        )
-        if todays_logged_type != scheduled:
-            # User logged a different type than scheduled — shift the anchor
-            # so tomorrow starts after what was actually trained today.
-            try:
-                idx = domain.WORKOUT_ROTATION.index(todays_logged_type)
-                day_type = domain.WORKOUT_ROTATION[
-                    (idx + 1) % len(domain.WORKOUT_ROTATION)
-                ]
-            except ValueError:
-                day_type = domain.next_workout_type(todays_logged_type)
-        else:
-            # Logged matches scheduled — advance normally from logged type.
-            day_type = domain.next_workout_type(todays_logged_type)
-        for _ in range(window - 1):
-            upcoming.append(
-                {
-                    "type": day_type,
-                    "exercises": exercises_for(day_type),
-                }
-            )
-            day_type = domain.next_workout_type(day_type)
-    else:
-        # No rotation-type workout logged today — fall back to the anchor.
-        day_type = scheduled
-        for _ in range(window):
-            upcoming.append(
-                {
-                    "type": day_type,
-                    "exercises": exercises_for(day_type),
-                }
-            )
-            day_type = domain.next_workout_type(day_type)
-
-    # The app's Today view reads this payload: expose the per-user day-state
-    # completion flag so a session the coach marked done shows as done here.
-    if upcoming:
-        upcoming[0]["done"] = _as_day((day_state or {}).get("done_date")) == today_date
+    if rotation or day_plan is not None:
+        index, type_, exercises, done = await _resolve_today_session()
+        upcoming.append({"type": type_, "exercises": [
+            {"name": ex["name"]} for ex in exercises if ex.get("name")], "done": done})
         if day_plan is not None:
-            # Today's confirmed date-scoped plan replaces only today's card.
-            upcoming[0].update({
-                "type": day_plan["type"],
-                "exercises": [{"name": str(item["name"])} for item in day_plan["exercises"][:12]],
-                "today_plan": True,
-            })
-
-    return {
-        "rotation": list(domain.WORKOUT_ROTATION),
-        "last_workout": todays_last,
-        "upcoming": upcoming,
-        "core": exercises_for("Abs"),
-        "has_plan": bool(stored_plan),
-    }
+            upcoming[0]["today_plan"] = True
+        for offset in range(1, 5) if rotation else ():
+            type_ = rotation[(index + offset) % len(rotation)]
+            upcoming.append({"type": type_, "exercises": [
+                {"name": ex["name"]} for ex in days[type_].get("exercises", [])
+                if isinstance(ex, dict) and ex.get("name")]})
+    return {"rotation": rotation, "last_workout": last, "upcoming": upcoming,
+            "core": [{"name": ex["name"]} for ex in days.get("Abs", {}).get("exercises", [])
+                     if isinstance(ex, dict) and ex.get("name")],
+            "has_plan": bool(rotation) or day_plan is not None}
 
 
 async def workout_stats_payload() -> dict[str, Any]:
@@ -790,7 +703,7 @@ async def workout_stats_payload() -> dict[str, Any]:
         {"type": item["type"], "exercises": [ex["name"] for ex in item["exercises"]]}
         for item in upcoming
     ]
-    plan_today = compact_plan[0] if compact_plan else {"type": "Push", "exercises": []}
+    plan_today = compact_plan[0] if compact_plan else {"type": "Unplanned", "exercises": []}
     if compact_plan and upcoming[0].get("done") is not None:
         plan_today["done"] = upcoming[0]["done"]
     return {
@@ -852,6 +765,27 @@ async def write_workout(
     }
 
 
+def _macros_complete(meals) -> bool:
+    return all(all(row.get(key) is not None for key in ("protein", "carbs", "fat", "fiber"))
+               for row in meals)
+
+
+def _meal_matches(row, values) -> bool:
+    if row is None:
+        return False
+    for key in ("name", "meal", *domain.MACRO_KEYS):
+        actual, expected = row.get(key), values[key]
+        if key in {"name", "meal"}:
+            if actual != expected:
+                return False
+        elif expected is None:
+            if actual is not None:
+                return False
+        elif actual is None or abs(float(actual) - float(expected)) >= 0.001:
+            return False
+    return True
+
+
 async def day_payload(
     day: _date,
     include_presets: bool = False,
@@ -893,6 +827,9 @@ async def day_payload(
         "meal_rollups": meal_rollups,
         "meals": meals,
     }
+    if not _macros_complete(meals):
+        payload["macros_complete"] = False
+        payload["macro_note"] = "Calories include all entries. Other nutrient totals are known-only subtotals; remaining nutrients are unknown."
     if include_presets:
         payload["presets"] = [
             {
@@ -1004,7 +941,11 @@ async def _idempotent_meal_response(conn, user_id, row) -> dict[str, Any]:
         "totals": totals, "targets": targets, "remaining": domain.remaining(totals, targets),
         "day_rollup": snapshot["day_rollup"], "meal_rollups": snapshot["meal_rollups"],
         "meals": snapshot["meals"], "logged": {**logged, "macro_source": row["macro_source"]}}
-    warning = domain.atwater_warning(row["calories"], row["protein"], row["carbs"], row["fat"])
+    if not _macros_complete(snapshot["meals"]):
+        payload["macros_complete"] = False
+        payload["macro_note"] = "Nutrient totals are known-only subtotals; remaining nutrients are unknown."
+    warning = (domain.atwater_warning(row["calories"], row["protein"], row["carbs"], row["fat"])
+               if _macros_complete([logged]) else None)
     if warning:
         payload["warning"] = warning
     return payload
@@ -1015,9 +956,13 @@ def _voice_confirmation_sentence(logged: Mapping[str, Any], day_total: Mapping[s
     and the day's running total. The delegated model relays this verbatim
     instead of composing numbers itself (Matt's rule: the server is the
     source of truth, the model reads resolved facts)."""
-    macros = (f"{logged['calories']:.0f} kcal, {logged['protein']:.0f}g protein, "
+    incomplete = any(logged.get(key) is None for key in ("protein", "carbs", "fat", "fiber"))
+    macros = (f"{logged['calories']:.0f} kcal; protein, carbs, fat and fiber unknown" if incomplete else
+              f"{logged['calories']:.0f} kcal, {logged['protein']:.0f}g protein, "
               f"{logged['carbs']:.0f}g carbs, {logged['fat']:.0f}g fat")
-    totals = (f"{day_total['calories']:.0f} kcal, {day_total['protein']:.0f}g protein, "
+    totals = (f"{day_total['calories']:.0f} kcal; nutrient totals are incomplete" if incomplete
+              or day_total.get("macros_complete") is False else
+              f"{day_total['calories']:.0f} kcal, {day_total['protein']:.0f}g protein, "
               f"{day_total['carbs']:.0f}g carbs, {day_total['fat']:.0f}g fat")
     estimated = "estimate" in str(logged.get("macro_source") or "").casefold()
     action = "Estimated and logged" if estimated else "Logged"
@@ -1817,6 +1762,7 @@ async def _get_range_summary(start: str, end: str) -> dict[str, Any]:
                 "date": iso,
                 "day_label": domain.day_label(cursor),
                 "meal_count": len(day_meals),
+                "macros_complete": _macros_complete(day_meals),
                 "totals": totals,
                 "targets": targets,
                 "remaining": domain.remaining(totals, targets),
@@ -1828,6 +1774,8 @@ async def _get_range_summary(start: str, end: str) -> dict[str, Any]:
     return {
         "start": start_day.isoformat(),
         "end": end_day.isoformat(),
+        "macros_complete": _macros_complete(meals),
+        "macro_note": "Nutrient totals and averages are known-only when macros_complete is false.",
         "days": days,
         "days_with_entries": len(logged_days),
         "average_all_days": domain.average_totals([day["totals"] for day in days]),
@@ -2546,7 +2494,8 @@ def _coach_tool_handlers(*, canvas=False) -> dict[str, Callable[[Mapping[str, An
                           "exercises": [ex.get("name") for ex in item.get("exercises") or []][:8]}
                          for item in (payload.get("upcoming") or [])[1:4]],
             "note": ("Planned exercises are proposals, not completed training. Only "
-                     "'completed' counts logged sets. Upcoming days follow the rotation."),
+                     "'completed' counts logged sets. Upcoming slots follow your saved routine, "
+                     "not calendar dates. Today's override does not change future slots."),
         }
     async def complete_today_session_tool(_args):
         index, today_type, exercises, already_done = await _resolve_today_session()
@@ -2874,18 +2823,28 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         if isinstance(raw_components, list):
             described += [str(item.get("description") or "") for item in raw_components
                           if isinstance(item, Mapping)]
-        if any(_CALORIES_ONLY.fullmatch(text.strip()) for text in described if text.strip()):
-            # Meals store numeric protein/carbs/fat. Recording a calorie-only
-            # entry would fabricate zero macros, so ask instead of writing.
-            question = ("I can't log calories alone without guessing protein, carbs and fat, "
-                        "and I won't record them as zero. What was it, or what were its "
-                        "protein, carbs and fat?")
-            return {"status": "needs_clarification", "reason": "calories_only",
-                    "operation_id": operation_id, "question": question,
-                    "confirmation": question}
+        calorie_matches = [match for text in described
+                           if (match := _CALORIES_ONLY.fullmatch(text.strip().rstrip(".")))]
+        calorie_values = None
+        texts = [text for text in described if text.strip()]
+        if calorie_matches:
+            # Never silently drop another named food or invent a split of one
+            # stated energy amount over several foods.
+            if len(texts) != 1:
+                return {"status": "needs_clarification", "operation_id": operation_id,
+                        "question": "Is that calorie amount for the whole meal or only one component?",
+                        "confirmation": "Is that calorie amount for the whole meal or only one component?"}
+            calories = domain.validate_macros(calorie_matches[0]["calories"], 0, 0, 0)["calories"]
+            calorie_values = {"name": "Calorie-only snack", "calories": calories,
+                              "protein": None, "carbs": None, "fat": None, "fiber": None,
+                              "macro_source": "User supplied calories; other nutrients unknown",
+                              "meal": domain.normalize_meal(args.get("meal_type"), "Snack"),
+                              "day": domain.effective_date()}
         atomic = isinstance(raw_components, list) and bool(raw_components)
         whole_found = None
-        if atomic:
+        if calorie_values is not None:
+            components = [{"description": texts[0]}]
+        elif atomic:
             components = [item for item in raw_components if isinstance(item, Mapping)]
             if len(components) != len(raw_components) or len(components) > 12:
                 return {"status": "failed", "operation_id": operation_id,
@@ -2929,6 +2888,8 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         semaphore = asyncio.Semaphore(4)
 
         async def bounded(component: Mapping[str, Any]) -> dict[str, Any] | None:
+            if calorie_values is not None:
+                return {key: value for key, value in calorie_values.items() if key not in {"day", "meal"}}
             async with semaphore:
                 try:
                     return await resolve_component(
@@ -2961,12 +2922,13 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                     "question": question, "confirmation": question}
         resolved_components = [item for item in resolved if item is not None]
         name = " + ".join(item["name"] for item in resolved_components)
-        totals = {key: round(sum(float(item[key]) for item in resolved_components), 2)
+        totals = {key: (None if any(item[key] is None for item in resolved_components)
+                       else round(sum(float(item[key]) for item in resolved_components), 2))
                   for key in domain.MACRO_KEYS}
         source = (resolved_components[0]["macro_source"] if len(resolved_components) == 1
                   else "Composite: " + "; ".join(item["macro_source"] for item in resolved_components))
         try:
-            values = _validated_meal_values(
+            values = calorie_values if calorie_values is not None else _validated_meal_values(
                 name, *(totals[key] for key in domain.MACRO_KEYS), source,
                 args.get("meal_type"), None,
                 allow_estimate=(bool(resolved_components)
@@ -3000,11 +2962,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                     row = next((item for item in meals
                                 if str(item.get("id")) == str(record_id)), None)
                     expected = prior_uncertainty["values"]
-                    matches = row is not None and all(
-                        (str(row.get(key)) == str(expected[key]) if key in {"name", "meal"}
-                         else abs(float(row.get(key)) - float(expected[key])) < 0.001)
-                        for key in ("name", "meal", *domain.MACRO_KEYS)
-                    )
+                    matches = _meal_matches(row, expected)
                     if matches:
                         rollups = await store_client().fetch_day_rollups(values["day"], values["day"])
                         day_row = next((item for item in rollups
@@ -3013,6 +2971,8 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                             _voice_uncertain_meals.pop(uncertainty_key, None)
                             logged = {**row, "macro_source": expected["macro_source"]}
                             day_total = {key: float(day_row.get(key) or 0) for key in domain.MACRO_KEYS}
+                            if not _macros_complete(meals):
+                                day_total["macros_complete"] = False
                             return {"status": "replayed", "operation_id": operation_id,
                                     "logged": logged,
                                     "components": prior_uncertainty.get("components", []),
@@ -3056,10 +3016,12 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             logged = next((row for row in meals if str(row.get("id")) == str(stored["logged"]["id"])), None)
             day_row = next((row for row in day_rollups
                             if str(row.get("date")) == values["day"].isoformat()), None)
-            if logged is None or day_row is None:
+            if logged is None or not _meal_matches(logged, values) or day_row is None:
                 raise LookupError("committed write readback was incomplete")
-            logged_with_source = {**stored["logged"], "macro_source": source}
+            logged_with_source = {**logged, "macro_source": source}
             day_total = {key: float(day_row.get(key) or 0) for key in domain.MACRO_KEYS}
+            if not _macros_complete(meals):
+                day_total["macros_complete"] = False
         except Exception as exc:
             _voice_uncertain_meals[uncertainty_key] = {
                 "expires": time.monotonic() + _VOICE_UNCERTAIN_TTL_SECONDS,

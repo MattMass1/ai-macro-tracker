@@ -976,6 +976,8 @@ class CanvasService:
         # The existing logger only accepts standard types or the routine's own
         # day labels, so a today plan must use one of those to stay loggable.
         store = self.store_factory()
+        today = effective_date()
+        context = await store.fetch_workout_plan_context(today)
         routine = await store.fetch_workout_plan()
         loggable = list(WORKOUT_TYPES) + [
             str(day) for day in ((routine or {}).get("rotation") or [])
@@ -1014,7 +1016,6 @@ class CanvasService:
         names = [exercise["name"].casefold() for exercise in proposed]
         if len(set(names)) != len(names):
             raise ValueError("Each exercise may appear once in today's plan")
-        today = effective_date()
         current = await self.coach_factory()["get_today_session"]({})
         current_exercises = [ex for ex in current.get("exercises") or [] if isinstance(ex, Mapping)]
         # Preserve completed work: an exercise with logged sets today stays in the plan.
@@ -1032,6 +1033,8 @@ class CanvasService:
         if len(after) > 12:
             raise ValueError("Today's plan is limited to 12 exercises")
         existing = await store.fetch_day_workout_plan(today)
+        if effective_date() != today or await store.fetch_workout_plan_context(today) != context:
+            raise ValueError("Your workout changed while preparing this preview. Request a fresh preview.")
         previous = (f"Replaces today's {current.get('today_type')} plan"
                     if current.get("has_plan") and current.get("today_type") else "Creates today's plan")
         detail = (f"Today only ({today.isoformat()}): {workout_type}, {len(after)} exercises. {previous}. "
@@ -1041,6 +1044,7 @@ class CanvasService:
         session.approval = {"id": draft_id, "kind": "day_plan", "title": "Save today's workout?",
                             "detail": detail[:1000], "status": "pending", "date": today.isoformat(),
                             "expected_revision": existing["revision"] if existing else None,
+                            "expected_context": context,
                             "operation_id": f"dayplan:{draft_id}",
                             "dropped": sorted({str(ex.get("name", "")).casefold() for ex in current_exercises}
                                               - {str(ex["name"]).casefold() for ex in after}),
@@ -1083,6 +1087,8 @@ class CanvasService:
         replayed = bool(current) and current.get("operation_id") == draft["operation_id"]
         if not replayed and (current["revision"] if current else None) != draft["expected_revision"]:
             raise ValueError("Today's plan changed. Cancel and request a fresh preview.")
+        if not replayed and await store.fetch_workout_plan_context(day) != draft["expected_context"]:
+            raise ValueError("Your routine or logged workout changed. Cancel and request a fresh preview.")
         planned = {str(ex.get("name", "")).casefold() for ex in after["exercises"]}
         dropped = set(draft.get("dropped", ())) - planned
         trained = self._logged_today(await store.fetch_workouts(day), day)
@@ -1094,7 +1100,8 @@ class CanvasService:
             draft["status"] = "uncertain"
             session.canvas.revision += 1
             stored = await store.compare_and_swap_day_workout_plan(
-                day, draft["expected_revision"], after["type"], after["exercises"], draft["operation_id"])
+                day, draft["expected_revision"], after["type"], after["exercises"], draft["operation_id"],
+                expected_context=draft["expected_context"])
             if stored is None:
                 current = await store.fetch_day_workout_plan(day)
                 if not current or current.get("operation_id") != draft["operation_id"]:

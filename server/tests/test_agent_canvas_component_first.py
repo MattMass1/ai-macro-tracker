@@ -143,9 +143,10 @@ async def test_real_agent_dispatches_closed_setup_composition(setup_service, mon
 @pytest.mark.asyncio
 async def test_first_plan_store_insert_is_tenant_scoped_and_never_overwrites():
     from store import Store
+    from workout_store_fixture import WorkoutTransactionPool
     import json
     seen=[]
-    class Pool:
+    class Pool(WorkoutTransactionPool):
         async def fetchval(self,sql,*args):
             seen.append((sql,args))
             assert 'ON CONFLICT(user_id) DO NOTHING' in sql

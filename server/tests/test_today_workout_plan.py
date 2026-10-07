@@ -27,7 +27,9 @@ class DayPlanMixin:
         return deepcopy(row) if row else None
 
     async def compare_and_swap_day_workout_plan(self, day, expected_revision, workout_type,
-                                                exercises, operation_id):
+                                                exercises, operation_id, *, expected_context=None):
+        if expected_context is not None and await self.fetch_workout_plan_context(day) != expected_context:
+            return None
         key = (current_user_id(), day)
         current = self.day_plans.get(key)
         if (current is None) != (expected_revision is None):
@@ -49,6 +51,10 @@ class CanvasDayStore(DayPlanMixin, MemoryStore):
         self.plan = deepcopy(plan) if plan is not None else rotation_plan()
         self.plan_writes = []
         self.workouts = []
+
+    async def fetch_workout_plan_context(self, day):
+        return deepcopy({"routine": self.plan, "state": getattr(self, "state", None),
+                         "daily": await self.fetch_day_workout_plan(day), "workouts": self.workouts})
 
     async def fetch_workout_plan(self):
         return deepcopy(self.plan)
@@ -345,8 +351,8 @@ async def test_lost_confirm_response_reconciles_read_only_on_refresh():
     store = CanvasDayStore()
     original = store.compare_and_swap_day_workout_plan
 
-    async def stored_then_lost(*args):
-        await original(*args)
+    async def stored_then_lost(*args, **kwargs):
+        await original(*args, **kwargs)
         raise ConnectionError("response lost after commit")
     store.compare_and_swap_day_workout_plan = stored_then_lost
     service = _service(store)
@@ -415,7 +421,7 @@ async def test_routine_less_completion_does_not_skip_future_routine_start(monkey
         assert done["done"] is True and done["today_type"] == "Pull"
         assert fake.session_state["rotation_index"] == -1
         payload = await srv.workout_plan_payload()
-        assert payload["has_plan"] is False  # saved routine still absent (onboarding unchanged)
+        assert payload["has_plan"] is True  # a confirmed today plan unlocks the logger
         assert payload["upcoming"][0]["today_plan"] is True
     finally:
         reset_user(scope)
@@ -539,6 +545,13 @@ async def test_day_plan_sql_is_user_scoped_and_revision_guarded():
     captured = []
 
     class Pool:
+        def acquire(self): return self
+        def transaction(self): return self
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): pass
+        async def execute(self, sql, *args):
+            assert "pg_advisory_xact_lock" in sql
+            assert args == (str(user),)
         async def fetchrow(self, sql, *args):
             captured.append((sql, args))
             return None
@@ -594,7 +607,8 @@ async def test_voice_calorie_only_request_never_writes_zero_macros(monkeypatch, 
             "description": description, "meal_type": "Snack"})
     finally:
         reset_user(scope)
-    assert fake.insert_count == 0
-    assert result["status"] == "needs_clarification"
-    assert result["reason"] == "calories_only"
-    assert "protein" in result["question"] and "zero" in result["question"]
+    assert fake.insert_count == 1
+    assert result["status"] == "committed"
+    assert all(result["logged"][key] is None for key in ("protein", "carbs", "fat", "fiber"))
+    assert "unknown" in result["confirmation"]
+    assert "0g protein" not in result["confirmation"]

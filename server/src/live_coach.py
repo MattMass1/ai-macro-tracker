@@ -283,7 +283,8 @@ async def build_live_context(store: Any, *, today: date) -> dict[str, Any]:
     library = await store.fetch_workout_library()
 
     totals = {
-        macro: sum((_number(meal.get(macro)) for meal in meals[:100]), 0.0)
+        macro: (None if any(meal.get(macro) is None for meal in meals)
+                else sum((_number(meal.get(macro)) for meal in meals), 0.0))
         for macro in _MACROS
     }
     recent: list[dict[str, str]] = []

@@ -78,8 +78,9 @@ async def test_swap_requires_owned_draft_and_confirm_then_verified_readback():
 @pytest.mark.asyncio
 async def test_plan_compare_and_swap_is_atomic_and_tenant_scoped():
     from store import Store
+    from workout_store_fixture import WorkoutTransactionPool
     captured = []
-    class Pool:
+    class Pool(WorkoutTransactionPool):
         async def fetchval(self, sql, *args):
             captured.append((sql, args))
             return None

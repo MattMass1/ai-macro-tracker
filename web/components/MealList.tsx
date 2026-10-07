@@ -84,9 +84,9 @@ export default function MealList({ meals, pending, onDelete }: Props) {
                   <div className="numeral mt-1 text-xs text-muted">
                     {Math.round(meal.calories)} kcal ·{" "}
                     <span className="text-protein">
-                      {Math.round(meal.protein)}p
+                      {meal.protein == null ? "protein unknown" : `${Math.round(meal.protein)}p`}
                     </span>{" "}
-                    · {Math.round(meal.carbs)}c · {Math.round(meal.fat)}f
+                    · {meal.carbs == null ? "carbs unknown" : `${Math.round(meal.carbs)}c`} · {meal.fat == null ? "fat unknown" : `${Math.round(meal.fat)}f`}
                   </div>
                   <div className="mt-1 text-[0.7rem] uppercase tracking-wider text-muted">
                     {timeLabel(meal)}

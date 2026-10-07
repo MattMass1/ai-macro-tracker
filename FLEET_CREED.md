@@ -60,6 +60,8 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 | **Research and Overflow** | Grok/Cursor | Research, adversarial edge-case brainstorming, and overflow | Not a permanent correctness reviewer and cannot review its own work |
 | **Contract Owner** | Temporary designation on one existing builder | Canonical contract decisions and fixture coordination for a cross-surface task | Not a separate agent or standing role |
 
+**Task-scoped owner override — MMMacros everyday voice-coach continuation (2026-10-07):** Matthew explicitly authorized Astra to finish this task as the **sole source builder** in branch `astra/everyday-coach` and isolated worktree `ai-macro-tracker-astra`. This is an exception to Astra's standing read-only reviewer role, not a general role change. A fresh Coding/Sol read-only reviewer must review Astra's exact frozen commit before push/deploy; unresolved findings return to Astra, followed by re-review. All prior data, phone, tenancy, account, deployment and approval gates remain. Use `gpt-6-astra` on `openai-codex`; do not use the held Anthropic account or a replacement route/account. Upon task completion Astra resumes its normal read-only role.
+
 ### Legacy role aliases and ownership detail
 
 | Role | Agent | Owns | Never touches |

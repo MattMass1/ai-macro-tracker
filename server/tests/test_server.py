@@ -667,12 +667,13 @@ async def test_fetch_trends_builds_daily_weekly_and_weight_payload(monkeypatch):
         "fat": 58.0,
         "target_calories": 2400.0,
         "target_protein": 180.0,
+        "macros_complete": True,
     }
     assert result["weekly"] == [
         {"week_start": "2026-08-17", "avg_calories": 2055.0,
-         "avg_protein": 199.0, "days_logged": 1},
+         "avg_protein": 199.0, "days_logged": 1, "macros_complete": True},
         {"week_start": "2026-08-24", "avg_calories": 1746.0,
-         "avg_protein": 141.4, "days_logged": 1},
+         "avg_protein": 141.4, "days_logged": 1, "macros_complete": True},
     ]
     assert result["weight"] == {"current_kg": 88.5, "goal_kg": 80.0}
 

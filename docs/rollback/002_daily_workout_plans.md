@@ -20,10 +20,10 @@ Only with owner approval, because it deletes users' saved day plans:
 
 ```sql
 BEGIN;
-SELECT pg_advisory_lock(6291470021);
+-- Transaction-scoped: released automatically even if a statement fails.
+SELECT pg_advisory_xact_lock(6291470021);
 DROP TABLE IF EXISTS daily_workout_plans;
 DELETE FROM schema_migrations WHERE filename = '002_daily_workout_plans.sql';
-SELECT pg_advisory_unlock(6291470021);
 COMMIT;
 ```
 

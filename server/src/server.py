@@ -113,8 +113,9 @@ _client: Store | None = None
 # "200-calorie snack", "300 kcal", "150 cals of candy": an energy amount with
 # no identifiable food. Such text must never be resolved or logged as a food.
 _CALORIES_ONLY = re.compile(
-    r"(?:(?:please\s+)?(?:log|add)\s+)?(?:an?\s+)?\d+(?:\.\d+)?\s*-?\s*"
-    r"(?:k?cals?|calories?|kcals?|calorie)"
+    r"(?:(?:please\s+)?(?:log|add)\s+)?(?:an?\s+)?(?:(?:about|around|roughly|maybe)\s+)?"
+    r"\d+(?:\.\d+)?\s*-?\s*"
+    r"(?:k?cals?|calories?|kcals?|calorie)(?:\s+worth)?"
     r"(?:\s+(?:of\s+)?(?:a\s+)?(?:snack|food|meal|something|candy|treat|stuff|junk))?",
     re.IGNORECASE,
 )
@@ -585,7 +586,7 @@ async def _resolve_today_session() -> tuple[int, str, list[dict[str, Any]], bool
             index = (rotation.index(match) + 1) % len(rotation) if match is not None else 0
         else:
             index = 0
-    index = min(index, len(rotation) - 1)
+    index = max(0, min(index, len(rotation) - 1))
     today_type = rotation[index]
     day = days.get(today_type) if isinstance(days.get(today_type), dict) else {}
     exercises = [ex for ex in day.get("exercises", []) if isinstance(ex, dict)]
@@ -757,7 +758,7 @@ async def workout_plan_payload() -> dict[str, Any]:
         "last_workout": todays_last,
         "upcoming": upcoming,
         "core": exercises_for("Abs"),
-        "has_plan": bool(stored_plan) or day_plan is not None,
+        "has_plan": bool(stored_plan),
     }
 
 
@@ -2549,6 +2550,10 @@ def _coach_tool_handlers(*, canvas=False) -> dict[str, Callable[[Mapping[str, An
         }
     async def complete_today_session_tool(_args):
         index, today_type, exercises, already_done = await _resolve_today_session()
+        if not await store_client().fetch_workout_plan():
+            # Routine-less today plan: record done without advancing a future
+            # routine past its first day (-1 + 1 == rotation start).
+            index = -1
         await store_client().put_session_day_state(index, domain.effective_date())
         return {"today_type": today_type, "exercises": exercises, "done": True,
                 "already_done": bool(already_done),
@@ -2865,10 +2870,10 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             f"{current_user_id()}:{call_id}".encode()
         ).hexdigest()[:24]
         raw_components = args.get("components")
-        described = [str(args.get("description") or "")] + [
-            str(item.get("description") or "") for item in raw_components or []
-            if isinstance(item, Mapping)
-        ] if isinstance(raw_components, list) or raw_components is None else []
+        described = [str(args.get("description") or "")]
+        if isinstance(raw_components, list):
+            described += [str(item.get("description") or "") for item in raw_components
+                          if isinstance(item, Mapping)]
         if any(_CALORIES_ONLY.fullmatch(text.strip()) for text in described if text.strip()):
             # Meals store numeric protein/carbs/fat. Recording a calorie-only
             # entry would fabricate zero macros, so ask instead of writing.

@@ -295,6 +295,113 @@ async def test_canvas_catalog_and_instructions_offer_today_tools_by_default():
 
 # ── Server: day-plan overlay, outlook and SQL tenant scoping ─────────────
 
+@pytest.mark.asyncio
+async def test_today_plan_type_must_stay_loggable_by_existing_logger():
+    store = CanvasDayStore()
+    service = _service(store)
+    scope = bind_user(uuid4())
+    try:
+        session = service.session(str(uuid4()), create=True)
+        result = await service._propose_today_workout(session, {
+            "workout_type": "Upper Body", "exercises": [{"name": "Face Pull", "sets": 2, "reps": "15"}]})
+        assert result["status"] == "needs_clarification" and "Push" in result["question"]
+        assert session.approval is None
+        result = await service._propose_today_workout(session, {
+            "workout_type": "pull", "exercises": [{"name": "Face Pull", "sets": 2, "reps": "15"}]})
+        assert session.approval["after"]["type"] == "Pull"
+        assert domain.normalize_workout_type(session.approval["after"]["type"]) == "Pull"
+    finally:
+        reset_user(scope)
+
+
+@pytest.mark.asyncio
+async def test_lost_confirm_response_reconciles_read_only_on_refresh():
+    store = CanvasDayStore()
+    original = store.compare_and_swap_day_workout_plan
+
+    async def stored_then_lost(*args):
+        await original(*args)
+        raise ConnectionError("response lost after commit")
+    store.compare_and_swap_day_workout_plan = stored_then_lost
+    service = _service(store)
+    scope = bind_user(uuid4())
+    sid = str(uuid4())
+    try:
+        session = service.session(sid, create=True)
+        await service._propose_today_workout(session, deepcopy(PULL))
+        draft = session.approval["id"]
+        with pytest.raises(ConnectionError):
+            await service.action(sid, {"action": "confirm", "reference": draft})
+        assert (await service.snapshot(sid))["approval"]["status"] == "uncertain"
+        response = await service.action(sid, {"action": "refresh"})
+        assert response["approval"] is None
+        assert response["workout"]["type"] == "Pull"
+        assert len(store.day_plan_writes) == 1
+    finally:
+        reset_user(scope)
+
+
+@pytest.mark.asyncio
+async def test_confirm_refuses_when_dropped_exercise_was_trained_after_preview():
+    store = CanvasDayStore()
+    service = _service(store)
+    scope = bind_user(uuid4())
+    sid = str(uuid4())
+    try:
+        session = service.session(sid, create=True)
+        await service._propose_today_workout(session, {"workout_type": "Push", "exercises": [
+            {"name": "Incline Dumbbell Press", "sets": 3, "reps": "10"}]})
+        store.workouts = [{"id": "r9", "exercise": "Bench Press", "workout_type": "Push",
+                           "date": domain.effective_date().isoformat(), "sets": [{"weight": 95, "reps": 10}]}]
+        with pytest.raises(ValueError, match="fresh preview"):
+            await service.action(sid, {"action": "confirm", "reference": session.approval["id"]})
+        assert store.day_plan_writes == []
+    finally:
+        reset_user(scope)
+
+
+@pytest.mark.asyncio
+async def test_contextual_swap_never_edits_routine_on_today_plan_day():
+    store = CanvasDayStore()
+    service = _service(store)
+    scope = bind_user(uuid4())
+    sid = str(uuid4())
+    try:
+        session = service.session(sid, create=True)
+        await service._propose_today_workout(session, deepcopy(PULL))
+        await service.action(sid, {"action": "confirm", "reference": session.approval["id"]})
+        result = await service._request_swap(session, {"target": "last", "replacement": "Squat"})
+        assert result["status"] == "needs_clarification"
+        assert session.approval is None and store.plan_writes == []
+    finally:
+        reset_user(scope)
+
+
+@pytest.mark.asyncio
+async def test_routine_less_completion_does_not_skip_future_routine_start(monkeypatch):
+    fake = ServerDayStore(plan=None)
+    monkeypatch.setattr(srv, "_client", fake)
+    scope = bind_user(uuid4())
+    try:
+        await fake.compare_and_swap_day_workout_plan(
+            domain.effective_date(), None, "Pull", [{"name": "Lat Pulldown", "sets": 3, "reps": "10"}], "op-1")
+        done = await srv._coach_tool_handlers()["complete_today_session"]({})
+        assert done["done"] is True and done["today_type"] == "Pull"
+        assert fake.session_state["rotation_index"] == -1
+        payload = await srv.workout_plan_payload()
+        assert payload["has_plan"] is False  # saved routine still absent (onboarding unchanged)
+        assert payload["upcoming"][0]["today_plan"] is True
+    finally:
+        reset_user(scope)
+    fake.plan = rotation_plan()
+    fake.session_state["done_date"] = domain.effective_date() - __import__("datetime").timedelta(days=1)
+    scope = bind_user(uuid4())
+    try:
+        index, today_type, _exercises, _done = await srv._resolve_today_session()
+    finally:
+        reset_user(scope)
+    assert (index, today_type) == (0, "Push")
+
 FIXTURE_SESSION = "00000000-0000-4000-8000-000000000001"
 FIXTURE_DRAFT = "00000000-0000-4000-8000-000000000003"
 
@@ -445,6 +552,7 @@ def test_migration_adds_only_the_day_plan_table():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("description", [
     "a 200-calorie snack", "200 calorie snack", "300 kcal", "150 cals of candy",
+    "about 200 calories", "250 calories worth of snack",
 ])
 async def test_voice_calorie_only_request_never_writes_zero_macros(monkeypatch, description):
     from test_live_coach import FakeVoiceStore

@@ -1,5 +1,75 @@
 import XCTest
+import SwiftUI
 @testable import MacroTracker
+
+@MainActor
+final class WorkoutPlanRefreshTests: XCTestCase {
+    func testMountedSameTypePlanRefreshReplacesRowsThenShowsEmptyPlan() async throws {
+        let store = AppStore()
+        store.isLoadingWorkouts = false
+        let date = store.dateString
+        let key = WorkoutSessionCompletions.key(date: date, type: "Pull")
+        let saved = UserDefaults.standard.object(forKey: key)
+        defer { UserDefaults.standard.set(saved, forKey: key) }
+        WorkoutSessionCompletions.save(["Lat Pulldown"], date: date, type: "Pull")
+        func plan(_ names: [String]) -> WorkoutPlanPayload {
+            .init(rotation: [], upcoming: [.init(type: "Pull", exercises: names.map { .init(name: $0) })],
+                  core: [], hasPlan: true)
+        }
+        store.plan = plan(["Lat Pulldown", "Barbell Row", "Face Pull"])
+        let initial = try XCTUnwrap(store.plan?.upcoming.first)
+        let state = WorkoutSessionCardState(session: initial, date: date)
+        let host = UIHostingController(rootView: RefreshHarness(store: store, state: state))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        await settle(host)
+        XCTAssertEqual(state.exercises, ["Lat Pulldown", "Barbell Row", "Face Pull"])
+        // This is the same @Published property replaced by loadWorkoutData after Confirm.
+        store.plan = plan(["Lat Pulldown", "Leg Press"])
+        await settle(host)
+        XCTAssertEqual(state.exercises, ["Lat Pulldown", "Leg Press"], "Mounted card must adopt the saved same-type swap and shorter list")
+        XCTAssertEqual(state.completed, ["Lat Pulldown"])
+        XCTAssertEqual(WorkoutSessionCompletions.saved(date: date, type: "Pull"), ["Lat Pulldown"])
+        // An unchanged payload must preserve a local SWAP choice.
+        state.exercises[1] = "Face Pull"
+        store.plan = plan(["Lat Pulldown", "Leg Press"])
+        await settle(host)
+        XCTAssertEqual(state.exercises, ["Lat Pulldown", "Face Pull"])
+        store.plan = plan([])
+        await settle(host)
+        XCTAssertTrue(state.exercises.isEmpty, "Empty confirmed plan must render the existing empty state and Add more")
+        XCTAssertTrue(store.workouts.isEmpty, "Plan refresh is not completed training")
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "Confirmed empty today plan"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func settle(_ host: UIViewController) async {
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        try? await Task.sleep(for: .milliseconds(200))
+    }
+
+    private struct RefreshHarness: View {
+        @ObservedObject var store: AppStore
+        let state: WorkoutSessionCardState
+        var body: some View {
+            if let session = store.plan?.upcoming.first {
+                TodaysSessionCard(session: session, date: store.dateString,
+                                  onLog: { _ in }, onAddMore: {}, state: state)
+                    .id(session.type)
+            }
+        }
+    }
+}
 
 final class ModelDecodingTests: XCTestCase {
     func testCalorieOnlyDayUsesCanonicalServerFixtureWithoutInventedMacros() throws {

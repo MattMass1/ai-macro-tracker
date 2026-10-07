@@ -133,28 +133,40 @@ enum CanonicalWorkoutType {
     }
 }
 
-private struct TodaysSessionCard: View {
+/// Session-local rows and checkmarks. Saved-plan refreshes are separate from
+/// local swaps; unchanged server input must not undo a user's local selection.
+final class WorkoutSessionCardState: ObservableObject {
+    @Published var exercises: [String]
+    @Published var completed: Set<String>
+
+    init(session: WorkoutPlanPayload.PlannedDay, date: String) {
+        exercises = session.exercises.map(\.name)
+        completed = WorkoutSessionCompletions.saved(date: date, type: session.type)
+    }
+}
+
+struct TodaysSessionCard: View {
     let session: WorkoutPlanPayload.PlannedDay
     let date: String
     let onLog: (WorkoutLoggerSelection) -> Void
     let onAddMore: () -> Void
-    @State private var exercises: [String]
-    @State private var completed: Set<String>
+    @StateObject private var state: WorkoutSessionCardState
+    private var exercises: [String] { state.exercises }
+    private var completed: Set<String> { state.completed }
     @State private var swapTarget: (index: Int, name: String)?
 
     init(
         session: WorkoutPlanPayload.PlannedDay,
         date: String,
         onLog: @escaping (WorkoutLoggerSelection) -> Void,
-        onAddMore: @escaping () -> Void
+        onAddMore: @escaping () -> Void,
+        state: WorkoutSessionCardState? = nil
     ) {
         self.session = session
         self.date = date
         self.onLog = onLog
         self.onAddMore = onAddMore
-        let names = session.exercises.map(\.name)
-        _exercises = State(initialValue: names)
-        _completed = State(initialValue: WorkoutSessionCompletions.saved(date: date, type: session.type))
+        _state = StateObject(wrappedValue: state ?? WorkoutSessionCardState(session: session, date: date))
     }
 
     var body: some View {
@@ -195,6 +207,17 @@ private struct TodaysSessionCard: View {
         .task {
             WorkoutSessionCompletions.pruneOld()
         }
+        .onChange(of: session.exercises.map(\.name)) { _, names in
+            // @StateObject survives a same-type reload. Only a changed saved
+            // list replaces local swaps; completed checkmarks are kept.
+            state.exercises = names
+            swapTarget = nil
+        }
+        .onChange(of: date) { _, newDate in
+            state.exercises = session.exercises.map(\.name)
+            state.completed = WorkoutSessionCompletions.saved(date: newDate, type: session.type)
+            swapTarget = nil
+        }
         .sheet(item: Binding(
             get: { swapTarget.map { SwapTarget(index: $0.index, name: $0.name) } },
             set: { swapTarget = $0.map { (index: $0.index, name: $0.name) } }
@@ -217,14 +240,16 @@ private struct TodaysSessionCard: View {
     }
 
     private func toggle(_ name: String) {
-        if completed.contains(name) { completed.remove(name) } else { completed.insert(name) }
+        if completed.contains(name) { state.completed.remove(name) } else { state.completed.insert(name) }
         saveCompletions()
     }
 
     private func swapExercise(at index: Int, from oldName: String, to newName: String) {
-        exercises[index] = newName
-        if completed.remove(oldName) != nil {
-            completed.insert(newName)
+        // A library callback may arrive after the saved plan was shortened.
+        guard exercises.indices.contains(index), exercises[index] == oldName else { return }
+        state.exercises[index] = newName
+        if state.completed.remove(oldName) != nil {
+            state.completed.insert(newName)
         }
         saveCompletions()
     }

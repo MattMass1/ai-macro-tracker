@@ -172,10 +172,15 @@ struct AgentDailyStatus: View {
                     VStack(alignment: .leading, spacing: 8) { calorieText(day); workoutText }
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), alignment: .leading)], alignment: .leading, spacing: 8) {
+                    if !day.nutrientsComplete {
+                        Text("Other nutrient totals are incomplete. Some entries have unknown macros.")
+                            .font(.caption).foregroundStyle(Theme.muted)
+                    } else {
                     smallMacro("Protein", day.totals.protein, Theme.protein)
                     smallMacro("Carbs", day.totals.carbs, Theme.carbs)
                     smallMacro("Fat", day.totals.fat, Theme.fat)
                     smallMacro("Fiber", day.totals.fiber, Theme.fiber)
+                    }
                 }
             } else if app.isLoadingDay { ProgressView("Loading daily status") }
             else { Text("Daily status is unavailable. Pull to refresh or open your standard screens.").font(.subheadline) }
@@ -211,10 +216,15 @@ struct AgentMacroProgress: View {
             SectionLabel(text: "Remaining · \(app.day?.dayLabel ?? app.dateString)")
             if let day = app.day {
                 row("Calories", day.totals.calories, day.targets.calories, day.remaining.calories, "kcal", Theme.calories)
+                if !day.nutrientsComplete {
+                    Text("Remaining protein, carbs, fat and fiber are unknown because some entries have incomplete nutrients.")
+                        .font(.subheadline).foregroundStyle(Theme.muted)
+                } else {
                 row("Protein", day.totals.protein, day.targets.protein, day.remaining.protein, "g", Theme.protein)
                 row("Carbs", day.totals.carbs, day.targets.carbs, day.remaining.carbs, "g", Theme.carbs)
                 row("Fat", day.totals.fat, day.targets.fat, day.remaining.fat, "g", Theme.fat)
                 row("Fiber", day.totals.fiber, day.targets.fiber, day.remaining.fiber, "g", Theme.fiber)
+                }
             } else { Text("Your macro data is unavailable. No totals have been estimated.") }
         }
     }

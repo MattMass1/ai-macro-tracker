@@ -4,6 +4,7 @@ struct MacroRingsView: View {
     let totals: MacroTotals
     let targets: MacroTotals
     let remaining: MacroTotals
+    var nutrientsComplete: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -13,10 +14,15 @@ struct MacroRingsView: View {
             CalorieRing(consumed: totals.calories, target: targets.calories, remaining: remaining.calories)
                 .frame(maxWidth: .infinity)
             HStack(spacing: 8) {
+                if !nutrientsComplete {
+                    Text("Some entries have unknown nutrients. Protein, carbs, fat and fiber totals and remaining amounts are incomplete.")
+                        .font(.caption).foregroundStyle(Theme.muted)
+                } else {
                 MacroBar(title: "Protein", consumed: totals.protein, target: targets.protein, color: Theme.protein)
                 MacroBar(title: "Carbs", consumed: totals.carbs, target: targets.carbs, color: Theme.carbs)
                 MacroBar(title: "Fat", consumed: totals.fat, target: targets.fat, color: Theme.fat)
                 MacroBar(title: "Fiber", consumed: totals.fiber, target: targets.fiber, color: Theme.fiber)
+                }
             }
         }.appCard(padding: 18)
     }

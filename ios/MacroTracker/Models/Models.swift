@@ -15,14 +15,15 @@ struct FoodEntry: Codable, Identifiable, Equatable {
     var name: String
     var meal: String
     var calories: Double
-    var protein: Double
-    var carbs: Double
-    var fat: Double
-    var fiber: Double
+    var protein: Double?
+    var carbs: Double?
+    var fat: Double?
+    var fiber: Double?
     var macroSource: String?
     var date: String?
     var day: String?
     var createdTime: String?
+    var nutrientsComplete: Bool { protein != nil && carbs != nil && fat != nil && fiber != nil }
 }
 
 struct Preset: Codable, Identifiable, Equatable {
@@ -111,6 +112,10 @@ struct LoggingDayPolicy: Codable, Equatable {
 }
 
 struct DayPayload: Codable, Equatable {
+    // Aggregate values are known-only subtotals when any nutrient is unknown.
+    var macrosComplete: Bool? = nil
+    var macroNote: String? = nil
+    var nutrientsComplete: Bool { macrosComplete != false && meals.allSatisfy(\.nutrientsComplete) }
     // Missing/unsupported capability deliberately uses standard screens.
     var canvasProtocol: String? = nil
     var dayTiming: LoggingDayPolicy? = nil
@@ -175,6 +180,7 @@ struct TrendsPayload: Codable {
 }
 
 struct TrendDay: Codable, Identifiable {
+    var macrosComplete: Bool? = nil
     var id: String { date }
     var date: String
     var dayLabel: String
@@ -187,6 +193,7 @@ struct TrendDay: Codable, Identifiable {
 }
 
 struct TrendWeek: Codable, Identifiable {
+    var macrosComplete: Bool? = nil
     var id: String { weekStart }
     var weekStart: String
     var avgCalories: Double

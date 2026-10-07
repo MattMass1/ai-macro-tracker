@@ -195,7 +195,9 @@ private struct WeeklyTrendList: View {
                     Image(systemName: "calendar").foregroundStyle(Theme.accent)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(week.weekStart).font(.caption.weight(.semibold)).foregroundStyle(Theme.muted)
-                        Text("Avg \(Int(week.avgCalories).formatted()) kcal · \(Int(week.avgProtein).formatted())g protein · \(Int(week.daysLogged).formatted()) days logged")
+                        Text(week.macrosComplete == false
+                             ? "Avg \(Int(week.avgCalories).formatted()) kcal · protein incomplete · \(Int(week.daysLogged).formatted()) days logged"
+                             : "Avg \(Int(week.avgCalories).formatted()) kcal · \(Int(week.avgProtein).formatted())g protein · \(Int(week.daysLogged).formatted()) days logged")
                             .font(.subheadline.weight(.semibold)).foregroundStyle(Theme.ink)
                     }
                 }

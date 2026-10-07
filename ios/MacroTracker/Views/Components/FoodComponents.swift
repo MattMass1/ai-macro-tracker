@@ -94,6 +94,7 @@ struct MealListView: View {
     }
 
     private func mealSubtitle(_ meal: FoodEntry) -> String {
+        if !meal.nutrientsComplete { return "Calories logged · other nutrients unknown" }
         let kind = meal.meal.isEmpty ? "Meal" : meal.meal.capitalized
         guard let timestamp = meal.createdTime, !timestamp.isEmpty,
               let date = iso8601Date(from: timestamp) else { return kind }

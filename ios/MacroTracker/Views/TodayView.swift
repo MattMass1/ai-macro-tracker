@@ -15,7 +15,7 @@ struct TodayView: View {
                     CoachStrip { selectedTab = 1 }
                     if store.isLoadingDay && store.day == nil { loading }
                     else if let day = store.day {
-                        MacroRingsView(totals: day.totals, targets: day.targets, remaining: day.remaining)
+                        MacroRingsView(totals: day.totals, targets: day.targets, remaining: day.remaining, nutrientsComplete: day.nutrientsComplete)
                         MealListView(meals: day.meals, onDelete: { id in Task { await store.deleteMeal(id) } }, onAdd: { selectedTab = 1 })
                         FatSecretAttribution().frame(maxWidth: .infinity)
                         if let warning = day.warning { Label(warning, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(Theme.danger).appCard() }

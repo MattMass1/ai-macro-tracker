@@ -293,6 +293,32 @@ async def test_canvas_catalog_and_instructions_offer_today_tools_by_default():
     assert "today only" in CANVAS_INSTRUCTIONS.casefold()
 
 
+@pytest.mark.asyncio
+async def test_canvas_function_schemas_are_accepted_by_chat_completions():
+    # Production regression: Chat Completions rejects (HTTP 400) any function whose
+    # parameters carry anyOf/oneOf/allOf/enum/not at the top level, which failed
+    # every canvas turn. Conditional requirements are enforced server-side instead.
+    store = CanvasDayStore()
+    seen = {}
+
+    async def agent(**kwargs):
+        seen["catalog"] = kwargs["tool_catalog"]
+        return "ok", []
+    service = CanvasService(store_factory=lambda: store, food_factory=lambda: {},
+                            coach_factory=lambda: {"get_today_session": _service(store).coach_factory()["get_today_session"],
+                                                   "get_workout_outlook": lambda _a: None}, agent=agent)
+    scope = bind_user(uuid4())
+    try:
+        await service.turn(str(uuid4()), str(uuid4()), "Change my push day bench to 4 sets", adapter="voice")
+    finally:
+        reset_user(scope)
+    assert seen["catalog"]
+    for tool in seen["catalog"]:
+        schema = tool["input_schema"]
+        assert schema.get("type") == "object", tool["name"]
+        assert not {"anyOf", "oneOf", "allOf", "enum", "not"} & set(schema), tool["name"]
+
+
 # ── Server: day-plan overlay, outlook and SQL tenant scoping ─────────────
 
 @pytest.mark.asyncio

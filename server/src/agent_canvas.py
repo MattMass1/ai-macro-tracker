@@ -13,6 +13,7 @@ import time
 import asyncio
 import hashlib
 import json
+import logging
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from auth import current_user_id
@@ -624,6 +625,11 @@ class CanvasService:
                             "reps": {"type": "string", "minLength": 1, "maxLength": 40}},
                         "required": ["name", "sets", "reps"], "additionalProperties": False}}},
                     "required": ["workout_type", "exercises"], "additionalProperties": False}})
+            # Chat Completions rejects top-level combinators (HTTP 400 for the whole turn).
+            # Handlers already enforce these either/or requirements server-side.
+            catalog = [{**tool, "input_schema": {key: value for key, value in tool["input_schema"].items()
+                                                 if key not in {"anyOf", "oneOf", "allOf", "not"}}}
+                       for tool in catalog]
             reply = "The request could not finish. Check your data before retrying a write."
             async def record_usage(usage: Mapping[str, Any]) -> None:
                 await store.insert_coach_usage(
@@ -637,7 +643,20 @@ class CanvasService:
                     record_usage=record_usage,
                     instruction_override=CANVAS_INSTRUCTIONS,
                 )
-            except Exception:
+            except Exception as exc:
+                # Operational diagnosis only: exception class and the provider's
+                # error message (never request bodies, headers or user content).
+                cause = exc.__cause__ if exc.__cause__ is not None else exc
+                detail = ""
+                response = getattr(cause, "response", None)
+                if response is not None:
+                    try:
+                        error = response.json().get("error") or {}
+                        detail = f" status={response.status_code} provider_error={str(error.get('message', ''))[:300]}"
+                    except Exception:
+                        detail = f" status={getattr(response, 'status_code', '?')}"
+                logging.getLogger("agent_canvas").warning(
+                    "canvas agent turn failed: %s%s", type(cause).__name__, detail)
                 # A provider failure after a committed operation must not erase
                 # the verified receipt or invite a blind duplicate retry.
                 if last_food_result is not None:

@@ -537,9 +537,20 @@ async def last_workout_type(before: str | None = None, *, rotation=None) -> str 
 
 
 def _as_day(value: Any) -> _date | None:
-    """Coerce a stored timestamp/date into a plain date (None-safe)."""
+    """Coerce a stored timestamp/date/ISO string into a plain date (None-safe).
+
+    The store serialises dates to ISO strings, so a str is parsed from its
+    first 10 characters; an empty or unparseable string yields None. Objects
+    with a ``.date()`` method (datetimes) are reduced to their date; anything
+    else (e.g. a plain date) is returned unchanged.
+    """
     if value is None:
         return None
+    if isinstance(value, str):
+        try:
+            return _date.fromisoformat(value.strip()[:10])
+        except ValueError:
+            return None
     return value.date() if hasattr(value, "date") else value
 
 

@@ -20,6 +20,7 @@ enum AgentComponentKind: String, Codable, CaseIterable {
     case weeklyTrend = "WeeklyTrend", confirmationCard = "ConfirmationCard", agentMessage = "AgentMessage"
     case setupChecklist = "SetupChecklist", profileMetrics = "ProfileMetrics"
     case targetStatus = "TargetStatus", workoutPlanPreview = "WorkoutPlanPreview"
+    case receiptTimeline = "ReceiptTimeline"
 }
 
 enum AgentLifecycle: String, Codable { case transient, task, pinned, approval }
@@ -30,6 +31,7 @@ enum AgentAction: String, Codable {
     case completeWorkout = "complete_workout"
     case showSetup = "show_setup", previewPlan = "preview_plan"
     case submitMetrics = "submit_metrics", submitTargets = "submit_targets"
+    case showLog = "show_log"
 }
 
 struct AgentIntent: Codable, Equatable {
@@ -282,7 +284,7 @@ enum AgentActionGateway {
             }
         case .exerciseLogged:
             guard intent.reference != nil, envelope?.workout != nil else { throw AgentCanvasError.invalidAction }
-        case .showMacros, .startWorkout, .showProgress, .quiet, .refresh, .showSetup, .previewPlan: break
+        case .showMacros, .startWorkout, .showProgress, .showLog, .quiet, .refresh, .showSetup, .previewPlan: break
         case .submitMetrics, .submitTargets:
             guard envelope != nil, envelope?.approval == nil else { throw AgentCanvasError.invalidAction }
         }

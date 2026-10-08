@@ -141,7 +141,77 @@ struct AgentCanvasView: View {
     @ViewBuilder private var quickActions: some View {
         Button("Macros", systemImage: "chart.bar") { Task { await canvas.perform(.init(action: .showMacros)) } }
         Button("Workout", systemImage: "dumbbell") { Task { await canvas.perform(.init(action: .startWorkout)) } }
+        Button("Today's log", systemImage: "list.bullet.rectangle") { Task { await canvas.perform(.init(action: .showLog)) } }
         Button("Week", systemImage: "chart.line.uptrend.xyaxis") { Task { await canvas.perform(.init(action: .showProgress)) } }
+    }
+}
+
+/// Receipt timeline: everything saved today, newest first, from the app's
+/// authoritative day and workout reads. The server never supplies values.
+struct AgentReceiptTimeline: View {
+    @EnvironmentObject private var app: AppStore
+
+    private struct Entry: Identifiable {
+        let id: String
+        let time: Date?
+        let title: String
+        let detail: String
+        let symbol: String
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(app.isToday ? "Saved today" : "Saved \(app.day?.dayLabel ?? app.dateString)", systemImage: "list.bullet.rectangle")
+                .font(.headline)
+            let entries = entries
+            if entries.isEmpty {
+                Text(app.isLoadingDay || app.isLoadingWorkouts ? "Loading your log…" : "Nothing saved yet. Log a meal or a set and it appears here.")
+                    .font(.subheadline).foregroundStyle(Theme.sectionInk)
+            } else {
+                ForEach(entries) { entry in
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: entry.symbol).foregroundStyle(Theme.accent).frame(width: 20)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.title).font(.subheadline.weight(.semibold))
+                            Text(entry.detail).font(.caption).foregroundStyle(Theme.sectionInk)
+                        }
+                        Spacer(minLength: 4)
+                        if let time = entry.time {
+                            Text(time, style: .time).font(.caption).foregroundStyle(Theme.sectionInk).monospacedDigit()
+                        }
+                    }.accessibilityElement(children: .combine)
+                }
+                Text("\(entries.count) entries · verified by the server").font(.caption2).foregroundStyle(Theme.sectionInk)
+            }
+        }
+    }
+
+    private var entries: [Entry] {
+        let meals = (app.day?.meals ?? []).map { meal in
+            Entry(id: "meal-\(meal.id)", time: Self.date(meal.createdTime),
+                  title: meal.name,
+                  detail: meal.nutrientsComplete
+                    ? "\(Int(meal.calories)) kcal · \(Int(meal.protein ?? 0))g protein · \(meal.meal.isEmpty ? "Meal" : meal.meal.capitalized)"
+                    : "\(Int(meal.calories)) kcal · other nutrients unknown",
+                  symbol: "fork.knife")
+        }
+        let workouts = app.workouts.map { workout in
+            Entry(id: "workout-\(workout.id)", time: Self.date(workout.createdTime),
+                  title: workout.exercise,
+                  detail: workout.sets.map { "\($0.weight.formatted(.number.precision(.fractionLength(0))))×\($0.reps)" }
+                    .joined(separator: ", ") + " · \(workout.workoutType.first ?? "Workout")",
+                  symbol: "dumbbell")
+        }
+        return (meals + workouts).sorted { ($0.time ?? .distantPast) > ($1.time ?? .distantPast) }
+    }
+
+    private static func date(_ raw: String?) -> Date? {
+        guard let raw, !raw.isEmpty else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: raw) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: raw)
     }
 }
 

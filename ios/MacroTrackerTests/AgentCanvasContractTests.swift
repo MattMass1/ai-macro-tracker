@@ -99,6 +99,20 @@ final class AgentCanvasContractTests: XCTestCase {
         XCTAssertNil(snapshot.workout)
     }
 
+    func testReceiptTimelineIsANativeValueFreeTaskComponent() throws {
+        let text = String(decoding: try fixture(), as: UTF8.self)
+        let snapshot = try AgentCanvasEnvelope.decode(Data(text.replacingOccurrences(of: "MacroProgress", with: "ReceiptTimeline").utf8))
+        let component = try XCTUnwrap(snapshot.surfaces.flatMap(\.components).first(where: { $0.component == .receiptTimeline }))
+        XCTAssertTrue(component.rows.isEmpty, "The app renders its own day and workout reads; the server supplies no values")
+        var state = AgentSurfaceState(sessionId: snapshot.sessionId)
+        XCTAssertTrue(try state.apply(snapshot))
+        XCTAssertNoThrow(try AgentActionGateway.validate(AgentIntent(action: .showLog), envelope: state.envelope, authenticated: true),
+                         "Opening the log is a read-only native tap")
+        XCTAssertThrowsError(try AgentActionGateway.validate(AgentIntent(action: .showLog), envelope: state.envelope, authenticated: false))
+        XCTAssertEqual(AgentAction.showLog.rawValue, "show_log")
+        XCTAssertEqual(AgentComponentKind.receiptTimeline.rawValue, "ReceiptTimeline")
+    }
+
     func testUnknownComponentsActionsAndExtraExecutablePropertiesAreRejected() throws {
         let text = String(decoding: try fixture(), as: UTF8.self)
         for (old, new) in [("MacroProgress", "WebView"), ("\"confirm\", \"reference\"", "\"raw_post\", \"reference\""),

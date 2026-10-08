@@ -276,7 +276,7 @@ final class AgentSurfaceStore: ObservableObject {
     }
 
     private func reloadData() async {
-        if envelope?.surfaces.contains(where: { $0.components.contains(where: { $0.component == .macroProgress }) }) == true {
+        if envelope?.surfaces.contains(where: { $0.components.contains(where: { $0.component == .macroProgress || $0.component == .receiptTimeline }) }) == true {
             app?.selectCurrentDay()
         }
         await app?.loadAll()

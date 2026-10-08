@@ -159,6 +159,8 @@ private struct AgentNativeComponent: View {
                 } else { Label("Rest timer starts after a verified log", systemImage: "timer").font(.caption) }
             case .weeklyTrend:
                 AgentWeeklyTrend()
+            case .receiptTimeline:
+                AgentReceiptTimeline()
             case .confirmationCard:
                 if let approval = canvas.envelope?.approval, approval.id == item.reference {
                     Label(approval.title, systemImage: "checkmark.shield").font(.headline)

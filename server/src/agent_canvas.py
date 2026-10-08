@@ -74,12 +74,14 @@ COMPONENTS = frozenset({
     "WorkoutOverview", "ActiveExercise", "SetLogger", "RestTimer",
     "WeeklyTrend", "ConfirmationCard", "AgentMessage",
     "SetupChecklist", "ProfileMetrics", "TargetStatus", "WorkoutPlanPreview",
+    "ReceiptTimeline",
 })
 ACTIONS = frozenset({
     "show_macros", "start_workout", "show_progress", "next_exercise",
     "select_exercise", "open_set_logger", "exercise_logged",
     "confirm", "cancel", "dismiss", "quiet", "refresh", "complete_workout",
     "show_setup", "preview_plan", "submit_metrics", "submit_targets",
+    "show_log",
 })
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
 _WORKOUT_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9 /&()+.'_\-]{0,79}\Z")
@@ -497,6 +499,7 @@ class CanvasService:
                     raise ValueError("Unknown presentation")
                 order = args.get("components")
                 allowed = {"macros": {"MacroProgress"}, "progress": {"WeeklyTrend"},
+                           "log": {"ReceiptTimeline"},
                            "setup": {"SetupChecklist", "ProfileMetrics", "TargetStatus", "WorkoutPlanPreview"},
                            "plan": {"WorkoutPlanPreview"},
                            "workout": {"WorkoutOverview", "ActiveExercise", "SetLogger", "RestTimer"},
@@ -638,12 +641,13 @@ class CanvasService:
                 'Show a native task, without writing data. Example: {"view":"workout"}. '
                 'For setup use setup. For create/build/fake/sample workout use plan, not workout. '
                 'For protein left use macros. For start workout use workout; next exercise uses next. '
-                'For dismiss/go back use quiet. Progress uses progress. Optionally order/hide native components '
+                'For dismiss/go back use quiet. Progress uses progress. For what did I log / eat / lift today, '
+                'use log (a receipt timeline of today\'s saved meals and sets). Optionally order/hide native components '
                 'with components. Example: {"view":"workout","components":["ActiveExercise","SetLogger","RestTimer"]}. '
                 'Titles are presentational only; no numbers or write claims.', "input_schema": {
                     "type": "object", "properties": {"view": {"type": "string", "enum": list(PRESENTATION_ACTIONS)},
                         "components": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": True,
-                            "items": {"type": "string", "enum": ["MacroProgress", "WeeklyTrend", "WorkoutOverview", "ActiveExercise", "SetLogger", "RestTimer", "SetupChecklist", "ProfileMetrics", "TargetStatus", "WorkoutPlanPreview"]}},
+                            "items": {"type": "string", "enum": ["MacroProgress", "WeeklyTrend", "ReceiptTimeline", "WorkoutOverview", "ActiveExercise", "SetLogger", "RestTimer", "SetupChecklist", "ProfileMetrics", "TargetStatus", "WorkoutPlanPreview"]}},
                         "title": {"type": "string", "minLength": 1, "maxLength": 80}},
                     "required": ["view"], "additionalProperties": False}})
             catalog.append({"name": "request_exercise_swap", "description":
@@ -815,6 +819,11 @@ class CanvasService:
             return data
         elif name == "show_progress":
             session.canvas.present("task", "task", [{"id": "weekly", "component": "WeeklyTrend"}])
+        elif name == "show_log":
+            # The native component renders the app's own authoritative day and
+            # workout reads; no model-supplied values are placed in the surface.
+            session.canvas.present("task", "task", [{"id": "log", "component": "ReceiptTimeline",
+                                                     "title": "Today's log"}])
         elif name == "quiet":
             session.canvas.quiet()
         elif name == "dismiss":
@@ -1342,7 +1351,7 @@ There is no server target calculator. Do not invent calorie prescriptions or
 calculate nutrition yourself. request_metrics_form opens native measurements.
 Compose native cards for meaningful requests, not a text-only questionnaire.
 Use present_surface for remaining macros, starting a workout, next exercise, weekly progress,
-or dismissing/quiet view. Native components show authoritative live data, not your invented values.
+today's log (view log: a receipt timeline of saved meals and sets), or dismissing/quiet view. Native components show authoritative live data, not your invented values.
 Read via supplied tools when answering numbers. Do not imply opening a logger saved any sets.
 For today's workout, what is left, or what is next, call get_workout_outlook; say planned vs logged.
 To create, swap, shorten or remove exercises for today use propose_today_workout (today only by
@@ -1370,7 +1379,7 @@ Report only verified tool outcomes. Reply in at most two short sentences, no emo
 """
 
 PRESENTATION_ACTIONS = {"setup": "show_setup", "plan": "preview_plan", "macros": "show_macros", "workout": "start_workout",
-                        "next": "next_exercise", "progress": "show_progress", "quiet": "quiet"}
+                        "next": "next_exercise", "progress": "show_progress", "log": "show_log", "quiet": "quiet"}
 
 
 def canvas_live_start(context):

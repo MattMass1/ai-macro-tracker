@@ -33,6 +33,15 @@ services:
         value: "false"
       - key: FATSECRET_CACHE_ALLOWED
         value: "false"
+      # Release gates for unknown (NULL) nutrients. Keep unset until the owner
+      # approves each step; see docs/rollback/003_calorie_only_unknown_macros.md.
+      # APPROVED_MIGRATIONS=003_calorie_only_unknown_macros.sql:<sha256> releases 003.
+      - key: APPROVED_MIGRATIONS
+        sync: false
+      - key: CALORIE_ONLY_WRITES_ENABLED
+        value: "false"
+      - key: CALORIE_ONLY_WRITES_USER_IDS
+        sync: false
       - key: LOCAL_TZ
         value: America/New_York
       - key: DAY_ROLLOVER_HOUR

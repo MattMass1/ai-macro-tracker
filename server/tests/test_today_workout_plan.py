@@ -594,9 +594,17 @@ def test_migration_adds_only_the_day_plan_table():
     "about 200 calories", "250 calories worth of snack",
 ])
 async def test_voice_calorie_only_request_never_writes_zero_macros(monkeypatch, description):
+    """Gates open (post-rollout): calorie-only commits with NULL, never zero."""
+    import release_gates
     from test_live_coach import FakeVoiceStore
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
+    monkeypatch.setenv("CALORIE_ONLY_WRITES_ENABLED", "true")
+    monkeypatch.setattr(release_gates, "client_reads_nullable_nutrients", lambda: True)
+
+    async def schema_ready():
+        return True
+    monkeypatch.setattr(fake, "nullable_nutrients_ready", schema_ready, raising=False)
 
     async def no_lookup(_query, **_kwargs):
         raise AssertionError("calorie-only text must not be resolved as a food")
@@ -612,3 +620,30 @@ async def test_voice_calorie_only_request_never_writes_zero_macros(monkeypatch, 
     assert all(result["logged"][key] is None for key in ("protein", "carbs", "fat", "fiber"))
     assert "unknown" in result["confirmation"]
     assert "0g protein" not in result["confirmation"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("description", [
+    "a 200-calorie snack", "200 calorie snack", "300 kcal", "150 cals of candy",
+    "about 200 calories", "250 calories worth of snack",
+])
+async def test_voice_calorie_only_request_asks_while_release_gate_closed(monkeypatch, description):
+    """Default (gate closed): ask for nutrients, write nothing, never zero."""
+    from test_live_coach import FakeVoiceStore
+    fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    monkeypatch.delenv("CALORIE_ONLY_WRITES_ENABLED", raising=False)
+
+    async def no_lookup(_query, **_kwargs):
+        raise AssertionError("calorie-only text must not be resolved as a food")
+    monkeypatch.setattr(srv, "resolve_food", no_lookup)
+    scope = bind_user(uuid4())
+    try:
+        result = await srv._voice_tool_handlers()["log_meal"]("cal-only", {
+            "description": description, "meal_type": "Snack"})
+    finally:
+        reset_user(scope)
+    assert fake.insert_count == 0
+    assert result["status"] == "needs_clarification"
+    assert result["reason"] == "calories_only"
+    assert "protein" in result["question"] and "zero" in result["question"]

@@ -120,6 +120,7 @@ final class APIClient {
         request.httpBody = body
         request.timeoutInterval = canvas ? 120 : 45
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(Config.nutrientContract, forHTTPHeaderField: Config.nutrientContractHeader)
         if authenticated {
             guard let token = tokenProvider(), !token.isEmpty else {
                 NotificationCenter.default.post(name: .deviceTokenRejected, object: nil)

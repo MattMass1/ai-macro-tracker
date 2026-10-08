@@ -34,8 +34,11 @@ async def counts(conn) -> dict[str, int]:
 async def pending_rows(conn):
     result = []
     for table in TABLES:
+        # Calorie-only rows keep unknown nutrients as NULL. They are not food
+        # evidence and must never become catalog observations (or zeros).
         rows = await conn.fetch(f"SELECT id,name,macro_source,calories,protein,carbs,fat,fiber,created_at,"
-            f"NULL::text serving_text FROM {table} WHERE food_item_id IS NULL OR food_observation_id IS NULL ORDER BY id")
+            f"NULL::text serving_text FROM {table} WHERE (food_item_id IS NULL OR food_observation_id IS NULL) "
+            "AND protein IS NOT NULL AND carbs IS NOT NULL AND fat IS NOT NULL AND fiber IS NOT NULL ORDER BY id")
         result.extend((table, row) for row in rows)
     return result
 

@@ -10,6 +10,22 @@ from test_live_coach import FakeVoiceStore, _import_server
 from store import Store, meal
 
 
+@pytest.fixture(autouse=True)
+def calorie_only_gate_open(monkeypatch):
+    """These tests exercise the post-rollout behavior: every gate is open.
+
+    Gate-closed (default) behavior is covered in test_release_safeguards.py.
+    """
+    import release_gates
+    monkeypatch.setenv("CALORIE_ONLY_WRITES_ENABLED", "true")
+    monkeypatch.delenv("CALORIE_ONLY_WRITES_USER_IDS", raising=False)
+    monkeypatch.setattr(release_gates, "client_reads_nullable_nutrients", lambda: True)
+
+    async def schema_ready(self):
+        return True
+    monkeypatch.setattr(FakeVoiceStore, "nullable_nutrients_ready", schema_ready, raising=False)
+
+
 async def serialize_calorie_only_day(monkeypatch):
     srv = _import_server(monkeypatch)
     fake = FakeVoiceStore()

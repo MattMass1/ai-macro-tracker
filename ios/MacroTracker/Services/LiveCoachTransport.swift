@@ -205,6 +205,7 @@ final class LiveCoachWebSocketTransport: NSObject, LiveCoachTransporting {
         }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 15)
         request.setValue("Bearer \(cleanToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(Config.nutrientContract, forHTTPHeaderField: Config.nutrientContractHeader)
         return request
     }
 

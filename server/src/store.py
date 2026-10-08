@@ -20,6 +20,7 @@ from auth import current_user_id
 from domain import effective_date, effective_day_window, validate_macro_source
 from food_catalog import evidence_hash, normalize_food_name, provenance_state
 from migrations import MigrationError, migration_status
+from release_gates import calorie_only_write_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,42 @@ DUPLICATE_MEAL_WINDOW_SECONDS = 120
 
 class StoreError(RuntimeError):
     pass
+
+
+_NULLABLE_NUTRIENTS = ("protein", "carbs", "fat", "fiber")
+
+
+class CalorieOnlyWriteBlocked(StoreError):
+    """A NULL-nutrient write was refused by the release gate. Nothing was saved."""
+
+
+async def nullable_nutrients_schema(conn) -> bool:
+    """True only when the live schema accepts NULL for all four nutrients.
+
+    Reads the actual column definitions, not the migration ledger, so a later
+    reviewed rollback that restores NOT NULL closes this gate as well.
+    """
+    return bool(await conn.fetchval(
+        "SELECT count(*) = 4 FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = 'nutrition_entries' "
+        "AND column_name IN ('protein','carbs','fat','fiber') AND is_nullable = 'YES'"
+    ))
+
+
+async def _guard_unknown_nutrients(conn, values: Mapping[str, Any]) -> None:
+    """Last line of the calorie-only release gate: refuse NULL-nutrient writes.
+
+    Callers already ask for clarification when the gate is closed; this keeps
+    any other or future write path from storing a row that older native
+    builds cannot decode. Never substitutes zero for an unknown value.
+    """
+    if not any(values.get(key) is None for key in _NULLABLE_NUTRIENTS):
+        return
+    if not calorie_only_write_allowed() or not await nullable_nutrients_schema(conn):
+        raise CalorieOnlyWriteBlocked(
+            "Calorie-only entries are not enabled for this client yet; "
+            "nothing was saved and no nutrient was recorded as zero"
+        )
 
 
 class InviteNotFound(StoreError):
@@ -202,6 +239,12 @@ class Store:
                         raise StoreError(str(exc)) from exc
                     self.pool = pool
         return self.pool
+
+    async def nullable_nutrients_ready(self) -> bool:
+        """Whether the database currently accepts unknown (NULL) nutrients."""
+        pool = await self.connect()
+        async with pool.acquire() as conn:
+            return await nullable_nutrients_schema(conn)
 
     async def aclose(self) -> None:
         if self.pool is not None: await self.pool.close(); self.pool = None
@@ -529,6 +572,8 @@ class Store:
         For voice-originated writes only, returns an identical recent voice
         row unchanged. Other origins always insert a new row.
         """
+        await _guard_unknown_nutrients(
+            conn, {"protein": protein, "carbs": carbs, "fat": fat, "fiber": fiber})
         await conn.execute("INSERT INTO days(user_id,date) VALUES($1,$2) ON CONFLICT(user_id,date) DO NOTHING", user_id, day)
         await conn.fetchval("SELECT date FROM days WHERE user_id=$1 AND date=$2 FOR UPDATE", user_id, day)
         duplicate = None
@@ -614,6 +659,8 @@ class Store:
         user_id = current_user_id()
         inserted = []
         async with pool.acquire() as conn, conn.transaction():
+            for row in rows:
+                await _guard_unknown_nutrients(conn, row)
             await conn.execute(
                 "INSERT INTO days(user_id,date) VALUES($1,$2) "
                 "ON CONFLICT(user_id,date) DO NOTHING", user_id, day,

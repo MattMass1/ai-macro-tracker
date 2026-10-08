@@ -40,9 +40,11 @@ from fastmcp import FastMCP  # noqa: E402
 from fastmcp.exceptions import ToolError  # noqa: E402
 
 import domain  # noqa: E402
+import release_gates  # noqa: E402
 from config import get_config  # noqa: E402
 from domain import MacroError  # noqa: E402
 from store import IdempotencyConflict, Store, StoreError, meal as stored_meal  # noqa: E402
+from store import CalorieOnlyWriteBlocked  # noqa: E402
 from store import ChatQuotaExceeded, InviteAlreadyClaimed, InviteNotFound  # noqa: E402
 from auth import bind_user, current_user_id, reset_user  # noqa: E402
 from coach import CoachProviderError, run_agent  # noqa: E402
@@ -1974,7 +1976,7 @@ async def read_brief_from_notion(day: _date) -> dict[str, Any]:
 
 CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-App-Token",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-App-Token, X-Nutrient-Contract",
     "Access-Control-Max-Age": "86400",
     "Vary": "Origin",
 }
@@ -2027,6 +2029,7 @@ def api_route(path: str, methods: list[str], *, public: bool = False):
                         {"error": "Missing or invalid bearer token"}, status_code=401), request)
                 request.state.user_id = user_id
                 context_token = bind_user(user_id)
+            contract_token = release_gates.bind_client_contract(request.headers)
             try:
                 payload = await fn(request)
             except InviteNotFound:
@@ -2052,6 +2055,7 @@ def api_route(path: str, methods: list[str], *, public: bool = False):
                     JSONResponse({"error": str(exc)}, status_code=500), request
                 )
             finally:
+                release_gates.reset_client_contract(contract_token)
                 if context_token is not None:
                     reset_user(context_token)
             status = 200
@@ -2680,6 +2684,19 @@ def _coach_tool_handlers(*, canvas=False) -> dict[str, Callable[[Mapping[str, An
     return handlers
 
 
+async def _calorie_only_writes_open() -> bool:
+    """Calorie-only release gate plus a live schema check. Fails closed."""
+    if not release_gates.calorie_only_write_allowed():
+        return False
+    ready = getattr(store_client(), "nullable_nutrients_ready", None)
+    if ready is None:
+        return False
+    try:
+        return bool(await ready())
+    except Exception:
+        return False
+
+
 def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Awaitable[Any]]]:
     """Tenant-bound voice dispatch: the same four handlers the typed coach
     uses, reused as-is (immediate commit, no chat-turn staging) — except
@@ -2828,6 +2845,18 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                            if (match := _CALORIES_ONLY.fullmatch(text.strip().rstrip(".")))]
         calorie_values = None
         texts = [text for text in described if text.strip()]
+        if calorie_matches and not await _calorie_only_writes_open():
+            # Release gate (fail closed): a NULL-nutrient row breaks native
+            # builds that predate the nullable FoodEntry contract. Until the
+            # operator switch is on, this client declared it can read unknown
+            # nutrients, and the schema accepts them, ask instead of writing;
+            # never record zeros.
+            question = ("I can't log calories alone yet without guessing protein, carbs and fat, "
+                        "and I won't record them as zero. What was it, or what were its "
+                        "protein, carbs and fat?")
+            return {"status": "needs_clarification", "reason": "calories_only",
+                    "operation_id": operation_id, "question": question,
+                    "confirmation": question}
         if calorie_matches:
             # Never silently drop another named food or invent a split of one
             # stated energy amount over several foods.
@@ -2992,6 +3021,14 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                 replay_marker=True,
                 component_metadata=resolved_components, **values,
             )
+        except CalorieOnlyWriteBlocked:
+            # The gate closed between the check and the write (for example an
+            # operator disabled it). The transaction rolled back: nothing saved.
+            question = ("I can't log calories alone right now without guessing protein, carbs "
+                        "and fat. What was it, or what were its protein, carbs and fat?")
+            return {"status": "needs_clarification", "reason": "calories_only",
+                    "operation_id": operation_id, "question": question,
+                    "confirmation": question}
         except Exception as exc:
             _voice_uncertain_meals[uncertainty_key] = {
                 "expires": time.monotonic() + _VOICE_UNCERTAIN_TTL_SECONDS,

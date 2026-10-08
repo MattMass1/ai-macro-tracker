@@ -21,6 +21,7 @@ from uuid import UUID
 from websockets.asyncio.client import connect
 
 from auth import bind_user, reset_user
+import release_gates
 from coach import TOOLS as _COACH_TOOLS
 from domain import effective_date
 
@@ -860,12 +861,16 @@ class LiveCoachService:
         # tool calls executed later in `_bridge` also resolve tenancy from
         # this contextvar, never from the client or the model.
         context_token = bind_user(user_id)
+        # The client's declared nutrient contract gates calorie-only writes
+        # made by delegated tools for the whole session (see release_gates).
+        contract_token = release_gates.bind_client_contract(websocket.headers)
         try:
             context = await build_live_context(
                 self.store, today=self.today_provider()
             )
             await self._serve_bound(websocket, context, user_id, session)
         finally:
+            release_gates.reset_client_contract(contract_token)
             reset_user(context_token)
 
     async def _serve_bound(

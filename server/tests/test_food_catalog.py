@@ -296,7 +296,7 @@ async def test_migration_status_reports_pending_and_checksum_drift(monkeypatch):
     status = await migrations.migration_status(Conn())
     assert status == {
         "compatible": False, "pending": ["001.sql"],
-        "drift": ["000.sql"], "unknown": [],
+        "drift": ["000.sql"], "unknown": [], "held": [],
     }
 
 
@@ -318,7 +318,7 @@ def test_migration_cli_fails_nonzero_for_missing_or_incompatible_url(monkeypatch
 
 
 def test_migration_preflight_prints_only_database_and_host_class(monkeypatch, capsys):
-    async def applied(_url): return []
+    async def applied(_url, _held=None): return []
     monkeypatch.setattr(migrations, "apply_migrations", applied)
     assert migrations.main(["--database-url", "postgresql://alice:supersecret@db.internal/macro_clone"]) == 0
     output = capsys.readouterr().out

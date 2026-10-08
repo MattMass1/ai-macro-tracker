@@ -5,8 +5,9 @@ import argparse
 import asyncio
 import hashlib
 import ipaddress
+import os
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 from urllib.parse import urlparse
 
 import asyncpg
@@ -15,9 +16,37 @@ ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = ROOT / "migrations"
 LOCK_KEY = 6_291_470_021
 
+# Migrations that change a contract older clients depend on. The deploy runner
+# HOLDS them (applies neither them nor anything after them) until the owner
+# approves the exact file bytes with
+#   APPROVED_MIGRATIONS=<filename>:<sha256>[,<filename>:<sha256>...]
+# A missing, malformed or stale approval keeps the migration held. A held
+# migration does not make the service incompatible: application code must keep
+# working on the pre-migration schema until it is approved and applied.
+APPROVAL_REQUIRED = frozenset({"003_calorie_only_unknown_macros.sql"})
+APPROVAL_ENV = "APPROVED_MIGRATIONS"
+NULLABLE_NUTRIENTS_MIGRATION = "003_calorie_only_unknown_macros.sql"
+
 
 class MigrationError(RuntimeError):
     """Raised when migration history is missing, unknown, or has drifted."""
+
+
+def approved_migrations(raw: str | None = None) -> dict[str, str]:
+    """Parse ``filename:sha256`` approvals. Malformed entries approve nothing."""
+    text = os.environ.get(APPROVAL_ENV, "") if raw is None else raw
+    approvals: dict[str, str] = {}
+    for part in text.split(","):
+        name, separator, digest = part.strip().partition(":")
+        digest = digest.strip().casefold()
+        if name.strip() and separator and len(digest) == 64 and all(c in "0123456789abcdef" for c in digest):
+            approvals[name.strip()] = digest
+    return approvals
+
+
+def requires_hold(name: str, path: Path, approvals: Mapping[str, str]) -> bool:
+    """True when a gated migration lacks an approval for its exact checksum."""
+    return name in APPROVAL_REQUIRED and approvals.get(name) != checksum(path)
 
 
 def safe_database_identity(database_url: str) -> dict[str, str]:
@@ -75,14 +104,31 @@ async def migration_status(conn: asyncpg.Connection) -> dict[str, object]:
     drift = sorted(name for name in applied if name in expected_map and applied[name] != expected_map[name])
     unknown = sorted(set(applied) - set(expected_map))
     pending = [name for name, _ in expected if name not in applied]
-    compatible = not drift and not unknown and not pending
-    return {"compatible": compatible, "pending": pending, "drift": drift, "unknown": unknown}
+    approvals = approved_migrations()
+    paths = dict(expected)
+    # Only an unbroken tail of held gated migrations is tolerated. An ordinary
+    # migration stuck behind a held one is still pending, so this fails closed.
+    held: list[str] = []
+    for name in reversed(pending):
+        if not requires_hold(name, paths[name], approvals):
+            break
+        held.insert(0, name)
+    blocking = [name for name in pending if name not in held]
+    compatible = not drift and not unknown and not blocking
+    return {"compatible": compatible, "pending": pending, "drift": drift,
+            "unknown": unknown, "held": held}
 
 
-async def apply_migrations(database_url: str) -> list[str]:
-    """Apply pending files transactionally under a PostgreSQL advisory lock."""
+async def apply_migrations(database_url: str, held_out: list[str] | None = None) -> list[str]:
+    """Apply pending files transactionally under a PostgreSQL advisory lock.
+
+    Stops before the first gated migration without an exact-checksum approval;
+    names it (and anything after it) in ``held_out`` when a list is supplied.
+    Never deletes or rewrites ledger rows.
+    """
     conn = await asyncpg.connect(database_url)
     applied_now: list[str] = []
+    approvals = approved_migrations()
     try:
         await conn.execute("SELECT pg_advisory_lock($1)", LOCK_KEY)
         await _ensure_table(conn)
@@ -93,11 +139,17 @@ async def apply_migrations(database_url: str) -> list[str]:
         unknown = sorted(set(applied) - expected_names)
         if unknown:
             raise MigrationError("database contains unknown migration(s): " + ", ".join(unknown))
+        holding = False
         for name, path in expected:
             digest = checksum(path)
             if name in applied:
                 if applied[name] != digest:
                     raise MigrationError(f"checksum drift for applied migration {name}")
+                continue
+            if holding or requires_hold(name, path, approvals):
+                holding = True
+                if held_out is not None:
+                    held_out.append(name)
                 continue
             sql = path.read_text(encoding="utf-8")
             async with conn.transaction():
@@ -125,8 +177,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         parser.error("DATABASE_URL or --database-url is required")
     identity = safe_database_identity(args.database_url)
     print(f"migration target: database={identity['database']} host_class={identity['host_class']}")
-    applied = asyncio.run(apply_migrations(args.database_url))
+    held: list[str] = []
+    applied = asyncio.run(apply_migrations(args.database_url, held))
     print(f"migrations applied: {len(applied)}")
+    if held:
+        print("migrations held (owner approval required): " + ", ".join(held))
     return 0
 
 

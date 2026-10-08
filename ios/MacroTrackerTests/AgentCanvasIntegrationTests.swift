@@ -676,6 +676,37 @@ final class AgentCanvasIntegrationTests: XCTestCase {
         XCTAssertFalse(try state.apply(snapshot), "Late HTTP response must not overwrite newer voice output")
     }
 
+    func testEveryAPIRequestDeclaresNullableNutrientContract() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CanvasFixtureURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        var seen: [String?] = []
+        CanvasFixtureURLProtocol.observedRequest = { request in
+            seen.append(request.value(forHTTPHeaderField: "X-Nutrient-Contract"))
+        }
+        defer {
+            CanvasFixtureURLProtocol.observedRequest = nil
+            CanvasFixtureURLProtocol.response = nil
+            session.invalidateAndCancel()
+        }
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "calorie-only-day", withExtension: "json"))
+        CanvasFixtureURLProtocol.response = try Data(contentsOf: url)
+        let api = APIClient(baseURL: URL(string: "https://fixture.invalid"), tokenProvider: { "fixture-only" }, session: session)
+        let day = try await api.today()
+        XCTAssertFalse(day.nutrientsComplete, "This build decodes unknown nutrients, so it may declare the contract")
+        XCTAssertEqual(seen, ["nullable-v1"])
+    }
+
+    func testLiveRequestDeclaresNullableNutrientContract() throws {
+        let url = try XCTUnwrap(URL(string: "https://fixture.invalid"))
+        let legacy = try LiveCoachWebSocketTransport.makeRequest(baseURL: url, token: "fixture-only-not-a-credential")
+        let canvas = try LiveCoachWebSocketTransport.makeRequest(baseURL: url, token: "fixture-only-not-a-credential",
+                                                                 canvasSessionId: UUID().uuidString.lowercased())
+        XCTAssertEqual(legacy.value(forHTTPHeaderField: "X-Nutrient-Contract"), "nullable-v1")
+        XCTAssertEqual(canvas.value(forHTTPHeaderField: "X-Nutrient-Contract"), "nullable-v1")
+        XCTAssertNil(legacy.url?.query)
+    }
+
     func testLiveRequestOptsIntoSameUUIDAndKeepsBearerOffURL() throws {
         let id = UUID().uuidString.lowercased()
         let url = try XCTUnwrap(URL(string: "https://fixture.invalid"))

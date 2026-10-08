@@ -38,6 +38,7 @@ _UNIT_WORDS = frozenset({
     "cup", "cups", "tbsp", "tablespoon", "tablespoons", "tsp", "teaspoon", "teaspoons",
     "ml", "milliliter", "milliliters", "l", "liter", "liters", "kg", "kilogram", "kilograms",
     "medium", "large", "small", "slice", "slices", "piece", "pieces", "serving", "servings",
+    "strip", "strips", "rasher", "rashers",
     "can", "cans", "bottle", "bottles", "bar", "bars", "scoop", "scoops", "fillet", "fillets",
     "whole", "half",
 })

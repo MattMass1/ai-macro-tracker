@@ -12,6 +12,7 @@ COFID = (
     "UK CoFID 2021 https://www.gov.uk/government/publications/"
     "composition-of-foods-integrated-dataset-cofid"
 )
+USDA_SR = "USDA FoodData Central SR Legacy https://fdc.nal.usda.gov"
 
 FOODS: dict[str, dict[str, Any]] = {
     "93 7 ground beef": {"name":"93/7 ground beef","basis":"raw","grams":100,
@@ -28,6 +29,18 @@ FOODS: dict[str, dict[str, Any]] = {
         "count_grams":{"small":41.6,"medium":46.4,"large":52.7},
         "macros":(131,12.6,0,9,0),"source":f"{COFID}, food 12-937; Health Canada CNF food 125 serving weights"},
     "egg": {"alias_of":"eggs"},
+    # Bacon is eaten cooked; the as-eaten unit is one cooked slice (8 g, USDA
+    # portion weight). Values are the USDA SR Legacy cooked row per 100 g.
+    "bacon": {"name":"bacon","basis":"cooked, pan-fried or broiled","grams":8,
+        "unit_grams":{"slice":8,"slices":8,"strip":8,"strips":8,"rasher":8,"rashers":8,"piece":8,"pieces":8},
+        "macros":(541,37.04,1.43,41.78,0),
+        "source":f"{USDA_SR}, FDC 167712 (pork, cured, bacon, cooked, broiled, pan-fried or roasted)",
+        "assumption":"one cooked 8 g slice per count; no stated weight"},
+    "bacon slices": {"alias_of":"bacon"},
+    "bacon strips": {"alias_of":"bacon"},
+    "bacon rashers": {"alias_of":"bacon"},
+    "streaky bacon": {"alias_of":"bacon"},
+    "pork bacon": {"alias_of":"bacon"},
     "toast": {"name":"white bread, toasted","basis":"toasted, plain","grams":36,
         "unit_grams":{"slice":36,"slices":36},
         "macros":(265,9.3,49.4,3.2,2.7),

@@ -31,24 +31,18 @@
 		B00100000000000000000007 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000007 /* APIClient.swift */; };
 		B00100000000000000000008 /* AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000008 /* AuthService.swift */; };
 		B00100000000000000000009 /* TodayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000009 /* TodayView.swift */; };
-		B0010000000000000000000A /* ChatLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000A /* ChatLogView.swift */; };
 		B0010000000000000000000B /* WorkoutsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000B /* WorkoutsView.swift */; };
+		B00300000000000000000001 /* ManualFoodView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00300000000000000000001 /* ManualFoodView.swift */; };
 		B0010000000000000000000C /* MacroRingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000C /* MacroRingsView.swift */; };
 		B0010000000000000000000D /* FoodComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000D /* FoodComponents.swift */; };
-		B0010000000000000000000E /* AddBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000012 /* AddBarView.swift */; };
 		B0010000000000000000000F /* ModelDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000F /* ModelDecodingTests.swift */; };
 		B00100000000000000000010 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000013 /* Keychain.swift */; };
 		B00100000000000000000011 /* InviteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000014 /* InviteView.swift */; };
 		B00100000000000000000012 /* BarcodeScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000015 /* BarcodeScannerView.swift */; };
-		B00100000000000000000013 /* MetricsFormCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000016 /* MetricsFormCard.swift */; };
-		B00100000000000000000015 /* ExerciseVideoCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000017 /* ExerciseVideoCard.swift */; };
-		B00100000000000000000016 /* UIImage+GIF.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000018 /* UIImage+GIF.swift */; };
-		B00100000000000000000017 /* ExercisePickerPromptCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000019 /* ExercisePickerPromptCard.swift */; };
 		B00100000000000000000018 /* LiveCoachControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001A /* LiveCoachControllerTests.swift */; };
 		B00100000000000000000019 /* LiveCoachController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001B /* LiveCoachController.swift */; };
 		B0010000000000000000001A /* LiveCoachTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001C /* LiveCoachTransport.swift */; };
 		B0010000000000000000001B /* LiveCoachAudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001D /* LiveCoachAudioEngine.swift */; };
-		B0010000000000000000001C /* LiveCoachView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001E /* LiveCoachView.swift */; };
 		B00100000000000000000014 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000E /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -86,27 +80,21 @@
 		F00100000000000000000007 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
 		F00100000000000000000008 /* AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthService.swift; sourceTree = "<group>"; };
 		F00100000000000000000009 /* TodayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TodayView.swift; sourceTree = "<group>"; };
-		F0010000000000000000000A /* ChatLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatLogView.swift; sourceTree = "<group>"; };
 		F0010000000000000000000B /* WorkoutsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutsView.swift; sourceTree = "<group>"; };
+		F00300000000000000000001 /* ManualFoodView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualFoodView.swift; sourceTree = "<group>"; };
 		F0010000000000000000000C /* MacroRingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacroRingsView.swift; sourceTree = "<group>"; };
 		F0010000000000000000000D /* FoodComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoodComponents.swift; sourceTree = "<group>"; };
 		F0010000000000000000000E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F0010000000000000000000F /* ModelDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelDecodingTests.swift; sourceTree = "<group>"; };
 		F00100000000000000000010 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		F00100000000000000000011 /* Config.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.xcconfig; sourceTree = SOURCE_ROOT; };
-		F00100000000000000000012 /* AddBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddBarView.swift; sourceTree = "<group>"; };
 		F00100000000000000000013 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
 		F00100000000000000000014 /* InviteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InviteView.swift; sourceTree = "<group>"; };
 		F00100000000000000000015 /* BarcodeScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BarcodeScannerView.swift; sourceTree = "<group>"; };
-		F00100000000000000000016 /* MetricsFormCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricsFormCard.swift; sourceTree = "<group>"; };
-		F00100000000000000000017 /* ExerciseVideoCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExerciseVideoCard.swift; sourceTree = "<group>"; };
-		F00100000000000000000018 /* UIImage+GIF.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "UIImage+GIF.swift"; sourceTree = "<group>"; };
-		F00100000000000000000019 /* ExercisePickerPromptCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExercisePickerPromptCard.swift; sourceTree = "<group>"; };
 		F0010000000000000000001A /* LiveCoachControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachControllerTests.swift; sourceTree = "<group>"; };
 		F0010000000000000000001B /* LiveCoachController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachController.swift; sourceTree = "<group>"; };
 		F0010000000000000000001C /* LiveCoachTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachTransport.swift; sourceTree = "<group>"; };
 		F0010000000000000000001D /* LiveCoachAudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachAudioEngine.swift; sourceTree = "<group>"; };
-		F0010000000000000000001E /* LiveCoachView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -183,11 +171,10 @@
 			isa = PBXGroup;
 			children = (
 				F00100000000000000000009 /* TodayView.swift */,
-				F0010000000000000000000A /* ChatLogView.swift */,
 				F0010000000000000000000B /* WorkoutsView.swift */,
+				F00300000000000000000001 /* ManualFoodView.swift */,
 				F00100000000000000000014 /* InviteView.swift */,
 				F00100000000000000000015 /* BarcodeScannerView.swift */,
-				F0010000000000000000001E /* LiveCoachView.swift */,
 				F00200000000000000000003 /* AgentSurfaceRenderer.swift */,
 				F00200000000000000000004 /* AgentCanvasView.swift */,
 				A10000000000000000000005 /* Components */,
@@ -200,11 +187,6 @@
 			children = (
 				F0010000000000000000000C /* MacroRingsView.swift */,
 				F0010000000000000000000D /* FoodComponents.swift */,
-				F00100000000000000000012 /* AddBarView.swift */,
-				F00100000000000000000016 /* MetricsFormCard.swift */,
-				F00100000000000000000017 /* ExerciseVideoCard.swift */,
-				F00100000000000000000018 /* UIImage+GIF.swift */,
-				F00100000000000000000019 /* ExercisePickerPromptCard.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -368,22 +350,16 @@
 				B00100000000000000000007 /* APIClient.swift in Sources */,
 				B00100000000000000000008 /* AuthService.swift in Sources */,
 				B00100000000000000000009 /* TodayView.swift in Sources */,
-				B0010000000000000000000A /* ChatLogView.swift in Sources */,
 				B0010000000000000000000B /* WorkoutsView.swift in Sources */,
+				B00300000000000000000001 /* ManualFoodView.swift in Sources */,
 				B0010000000000000000000C /* MacroRingsView.swift in Sources */,
 				B0010000000000000000000D /* FoodComponents.swift in Sources */,
-				B0010000000000000000000E /* AddBarView.swift in Sources */,
 				B00100000000000000000010 /* Keychain.swift in Sources */,
 				B00100000000000000000011 /* InviteView.swift in Sources */,
 				B00100000000000000000012 /* BarcodeScannerView.swift in Sources */,
-				B00100000000000000000013 /* MetricsFormCard.swift in Sources */,
-				B00100000000000000000015 /* ExerciseVideoCard.swift in Sources */,
-				B00100000000000000000016 /* UIImage+GIF.swift in Sources */,
-				B00100000000000000000017 /* ExercisePickerPromptCard.swift in Sources */,
 				B00100000000000000000019 /* LiveCoachController.swift in Sources */,
 				B0010000000000000000001A /* LiveCoachTransport.swift in Sources */,
 				B0010000000000000000001B /* LiveCoachAudioEngine.swift in Sources */,
-				B0010000000000000000001C /* LiveCoachView.swift in Sources */,
 				B00200000000000000000001 /* AgentCanvasContract.swift in Sources */,
 				B00200000000000000000002 /* AgentSurfaceStore.swift in Sources */,
 				B00200000000000000000003 /* AgentSurfaceRenderer.swift in Sources */,

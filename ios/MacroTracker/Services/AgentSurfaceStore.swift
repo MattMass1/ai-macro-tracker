@@ -36,14 +36,17 @@ final class AgentSurfaceStore: ObservableObject {
     @Published var showsWorkouts = false
     @Published var showsMeals = false
     @Published var showsProgress = false
-    @Published var showsLegacyCoach = false
+    @Published var showsManualEntry = false
+    @Published var showsScanner = false
+    /// Monotonic request counter: the composer focuses when it changes. The
+    /// Canvas is the only coach entry; standard sheets hand back to it.
+    @Published private(set) var composerFocusRequest = 0
     @Published private(set) var voice: LiveCoachController
     private let api: APIClient
     private let identity: AgentSessionIdentity
     private var identityScope: String?
     private let authenticated: () -> Bool
     private var generation = UUID()
-    private var pendingLegacyCoach = false
     private var turnIdentity = AgentTurnIdentity()
     private var swapTurnIdentity = AgentTurnIdentity()
     private weak var app: AppStore?
@@ -84,18 +87,15 @@ final class AgentSurfaceStore: ObservableObject {
 
     func attach(_ app: AppStore) { self.app = app }
 
-    func handleLegacyDestination(_ destination: Int) -> Int {
-        if destination == 1 {
-            pendingLegacyCoach = true
-            showsMeals = false
-        }
-        return 2 // TodayView only emits Coach (1); re-arm every tap.
-    }
-
-    func completeLegacyNavigation() {
-        guard pendingLegacyCoach else { return }
-        pendingLegacyCoach = false
-        showsLegacyCoach = true
+    /// "Ask the coach" from a standard sheet closes that sheet and focuses the
+    /// one Canvas composer. No second chat surface is ever presented.
+    func askCoach() {
+        showsMeals = false
+        showsWorkouts = false
+        showsProgress = false
+        showsManualEntry = false
+        showsScanner = false
+        composerFocusRequest += 1
     }
 
     @discardableResult
@@ -321,8 +321,8 @@ final class AgentSurfaceStore: ObservableObject {
         errorMessage = nil
         recoveryNotice = nil
         logger = nil
-        pendingLegacyCoach = false
-        showsWorkouts = false; showsMeals = false; showsProgress = false; showsLegacyCoach = false
+        showsWorkouts = false; showsMeals = false; showsProgress = false
+        showsManualEntry = false; showsScanner = false
         if !keepDraft { draft = "" }
     }
 }

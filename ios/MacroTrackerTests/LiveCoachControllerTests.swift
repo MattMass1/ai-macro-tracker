@@ -961,7 +961,7 @@ final class LiveCoachControllerTests: XCTestCase {
         XCTAssertEqual(transport.closeCount, 1)
     }
 
-    func testFocusedSheetPresentationCoversEveryLifecycleState() {
+    func testComposerPresentationCoversEveryLifecycleState() {
         XCTAssertEqual(LiveCoachPresentation(state: .ready).status, "Ready")
         XCTAssertEqual(LiveCoachPresentation(state: .connecting).status, "Connecting")
         XCTAssertEqual(LiveCoachPresentation(state: .listening).status, "Listening")
@@ -988,7 +988,7 @@ final class LiveCoachControllerTests: XCTestCase {
         XCTAssertFalse(missingKey.showsSettingsAction)
     }
 
-    func testVoiceSheetRendersReadyMissingConfigurationAndPermissionDenied() async {
+    func testVoicePresentationCoversReadyMissingConfigurationAndPermissionDenied() async {
         let readyCalls = CallRecorder()
         let ready = LiveCoachController(
             permission: PermissionStub(granted: true, calls: readyCalls),
@@ -1027,9 +1027,10 @@ final class LiveCoachControllerTests: XCTestCase {
             retryable: false,
             settingsAvailable: true
         ))
-        attachVoiceSheet(controller: ready, name: "voice-coach-ready")
-        attachVoiceSheet(controller: missing, name: "voice-coach-missing-key")
-        attachVoiceSheet(controller: denied, name: "voice-coach-permission-denied")
+        // Voice has no sheet of its own: the Canvas composer renders these states.
+        XCTAssertEqual(LiveCoachPresentation(state: ready.state).primaryAction, "Start voice session")
+        XCTAssertFalse(LiveCoachPresentation(state: missing.state).showsSettingsAction)
+        XCTAssertTrue(LiveCoachPresentation(state: denied.state).showsSettingsAction)
     }
 
     func testWebSocketRequestUsesBearerHeaderAndNoCredentialQuery() throws {
@@ -1209,43 +1210,6 @@ final class LiveCoachControllerTests: XCTestCase {
         Mirror(reflecting: audio).children.first { $0.label == name }?.value as? T
     }
 
-    private func attachVoiceSheet(controller: LiveCoachController, name: String) {
-        let bounds = CGRect(x: 0, y: 0, width: 393, height: 852)
-        let host = UIHostingController(
-            rootView: LiveCoachView(controller: controller)
-                .environmentObject(AppStore())
-                .tint(Theme.accent)
-                .preferredColorScheme(.light)
-        )
-        guard let scene = UIApplication.shared.connectedScenes
-            .compactMap({ $0 as? UIWindowScene })
-            .first else {
-            return XCTFail("The simulator test has no window scene")
-        }
-        let window = UIWindow(windowScene: scene)
-        window.frame = bounds
-        window.overrideUserInterfaceStyle = .light
-        window.rootViewController = host
-        window.makeKeyAndVisible()
-        host.view.frame = bounds
-        host.view.setNeedsLayout()
-        host.view.layoutIfNeeded()
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 2
-        let image = UIGraphicsImageRenderer(bounds: bounds, format: format).image { _ in
-            window.drawHierarchy(in: bounds, afterScreenUpdates: true)
-        }
-        guard let png = image.pngData() else {
-            window.isHidden = true
-            return XCTFail("Could not encode the hosted voice sheet")
-        }
-        XCTAssertGreaterThan(png.count, 10_000)
-        let attachment = XCTAttachment(image: image)
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
-        window.isHidden = true
-    }
 }
 
 @MainActor

@@ -2,13 +2,16 @@ import SwiftUI
 import Charts
 import UIKit
 
+/// The single coach entry. Typing and voice share one session and one
+/// composer; standard screens are sheets that hand back to this view.
 @MainActor
 struct AgentCanvasView: View {
     @EnvironmentObject private var app: AppStore
+    @EnvironmentObject private var auth: AuthService
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var canvas: AgentSurfaceStore
-    @State private var legacyDestination = 2
     @State private var confirmNewSession = false
+    @State private var confirmSignOut = false
 
     var body: some View {
         NavigationStack {
@@ -50,11 +53,19 @@ struct AgentCanvasView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        Button("Meals", systemImage: "fork.knife") { canvas.showsMeals = true }
-                        Button("Workouts", systemImage: "dumbbell") { canvas.showsWorkouts = true }
-                        Button("Progress", systemImage: "chart.line.uptrend.xyaxis") { canvas.showsProgress = true }
-                        Button("Standard coach", systemImage: "bubble.left.and.bubble.right") { canvas.showsLegacyCoach = true }
-                        Button("Quiet view", systemImage: "rectangle") { Task { await canvas.perform(.init(action: .quiet)) } }
+                        Section("Standard screens") {
+                            Button("Meals", systemImage: "fork.knife") { canvas.showsMeals = true }
+                            Button("Workouts", systemImage: "dumbbell") { canvas.showsWorkouts = true }
+                            Button("Progress", systemImage: "chart.line.uptrend.xyaxis") { canvas.showsProgress = true }
+                        }
+                        Section("Log without the coach") {
+                            Button("Scan barcode", systemImage: "barcode.viewfinder") { canvas.showsScanner = true }
+                            Button("Manual entry", systemImage: "slider.horizontal.3") { canvas.showsManualEntry = true }
+                        }
+                        Section {
+                            Button("Quiet view", systemImage: "rectangle") { Task { await canvas.perform(.init(action: .quiet)) } }
+                            Button("Sign out", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { confirmSignOut = true }
+                        }
                     } label: { Image(systemName: "ellipsis.circle").frame(width: 44, height: 44) }
                         .accessibilityLabel("Standard screens and canvas controls")
                 }
@@ -66,9 +77,6 @@ struct AgentCanvasView: View {
             await canvas.refresh()
         }
         .onDisappear { Task { await canvas.voice.end() } }
-        .onChange(of: canvas.showsLegacyCoach) { _, shown in
-            if shown { Task { await canvas.voice.end() } }
-        }
         .sheet(item: $canvas.logger) { selection in
             WorkoutLoggerView(initialType: selection.type, initialExercise: selection.exercise) { row in
                 Task { await canvas.acknowledgeWorkout(row.id) }
@@ -80,8 +88,8 @@ struct AgentCanvasView: View {
                 .safeAreaInset(edge: .top) { closeButton { canvas.showsWorkouts = false } }
                 .environmentObject(app)
         }
-        .sheet(isPresented: $canvas.showsMeals, onDismiss: { canvas.completeLegacyNavigation() }) {
-            NavigationStack { TodayView(selectedTab: $legacyDestination) }
+        .sheet(isPresented: $canvas.showsMeals) {
+            NavigationStack { TodayView(onAskCoach: { canvas.askCoach() }) }
                 .modifier(AgentToastModifier())
                 .safeAreaInset(edge: .top) { closeButton { canvas.showsMeals = false } }
                 .environmentObject(app)
@@ -92,19 +100,25 @@ struct AgentCanvasView: View {
                 .safeAreaInset(edge: .top) { closeButton { canvas.showsProgress = false } }
                 .environmentObject(app)
         }
-        .sheet(isPresented: $canvas.showsLegacyCoach) {
-            NavigationStack { ChatLogView() }
-                .modifier(AgentToastModifier())
-                .safeAreaInset(edge: .top) { closeButton { canvas.showsLegacyCoach = false } }
-                .environmentObject(app)
+        .sheet(isPresented: $canvas.showsManualEntry, onDismiss: { Task { await canvas.refresh() } }) {
+            ManualFoodView().modifier(AgentToastModifier()).environmentObject(app)
         }
-        .onChange(of: legacyDestination) { _, destination in
-            legacyDestination = canvas.handleLegacyDestination(destination)
+        .sheet(isPresented: $canvas.showsScanner, onDismiss: { Task { await canvas.refresh() } }) {
+            // The scanner writes through the established meal path; the day
+            // reloads and the toast confirms. No chat transcript is involved.
+            ScanFoodSheet(onLogged: { _, _ in }).modifier(AgentToastModifier()).environmentObject(app)
         }
         .confirmationDialog("Start a fresh session?", isPresented: $confirmNewSession, titleVisibility: .visible) {
             Button("Start fresh") { Task { await canvas.startFreshSession() } }
         } message: {
             Text("Pending previews will not be applied. Saved meals and workouts are unchanged. Check them before repeating a request with an uncertain result.")
+        }
+        .confirmationDialog("Sign out?", isPresented: $confirmSignOut, titleVisibility: .visible) {
+            Button("Sign out", role: .destructive) {
+                Task { await canvas.voice.end(); auth.signOut() }
+            }
+        } message: {
+            Text("You'll need a new invite code to sign back in.")
         }
     }
 
@@ -132,7 +146,7 @@ struct AgentCanvasView: View {
 }
 
 /// Present in each sheet as well as the shell: a root overlay sits behind a
-/// presented sheet and would hide confirmations from the legacy write paths.
+/// presented sheet and would hide confirmations from the standard write paths.
 @MainActor
 struct AgentToastModifier: ViewModifier {
     @EnvironmentObject private var app: AppStore
@@ -274,7 +288,7 @@ struct AgentCanvasFallback: View {
     @ViewBuilder private var links: some View {
         Button("Meals") { canvas.showsMeals = true }
         Button("Workouts") { canvas.showsWorkouts = true }
-        Button("Coach") { canvas.showsLegacyCoach = true }
+        Button("Manual entry") { canvas.showsManualEntry = true }
     }
 }
 
@@ -282,6 +296,7 @@ struct AgentCanvasFallback: View {
 private struct AgentComposer: View {
     @ObservedObject var canvas: AgentSurfaceStore
     @ObservedObject var voice: LiveCoachController
+    @FocusState private var composerFocused: Bool
     private var live: Bool { [.connecting, .listening, .speaking].contains(voice.state) }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -311,6 +326,7 @@ private struct AgentComposer: View {
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Ask or log something…", text: $canvas.draft, axis: .vertical)
                     .lineLimit(1...5).padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 18))
+                    .focused($composerFocused)
                     .accessibilityLabel("Message your agent")
                 Button { Task { await canvas.send() } } label: {
                     if canvas.busy { ProgressView().frame(width: 44, height: 44) }
@@ -324,5 +340,6 @@ private struct AgentComposer: View {
             }
             if canvas.draft.count > 1000 { Text("Please keep this message under 1,000 characters.").font(.caption).foregroundStyle(Theme.danger) }
         }.padding(.horizontal, 12).padding(.vertical, 8).background(.ultraThinMaterial)
+        .onChange(of: canvas.composerFocusRequest) { _, _ in composerFocused = true }
     }
 }

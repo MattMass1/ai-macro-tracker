@@ -286,12 +286,6 @@ final class AppStore: ObservableObject {
             return false
         }
     }
-    func chat(_ message: String, metrics: ChatMetrics? = nil) async throws -> ChatReply {
-        try await api.chat(message, metrics: metrics)
-    }
-    func chatHistory(limit: Int) async throws -> [ChatHistoryMessage] {
-        try await api.chatHistory(limit: limit)
-    }
     func barcodeFood(code: String) async throws -> BarcodeFoodPayload { try await api.barcodeFood(code: code) }
 
     /// Called on sign-out so the next user never sees the previous user's data.

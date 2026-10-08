@@ -30,6 +30,62 @@ enum LiveCoachActivityState: String, Equatable {
     case error
 }
 
+/// Status copy for the Canvas composer's voice strip. Voice has no sheet of its
+/// own: the Canvas is the single coach entry for typing and speaking.
+struct LiveCoachPresentation: Equatable {
+    let status: String
+    let detail: String
+    let symbol: String
+    let primaryAction: String?
+    let showsSettingsAction: Bool
+
+    init(state: LiveCoachState) {
+        switch state {
+        case .ready:
+            status = "Ready"
+            detail = "Talk naturally with your coach. You can speak while the coach is responding."
+            symbol = "waveform.circle"
+            primaryAction = "Start voice session"
+            showsSettingsAction = false
+        case .connecting:
+            status = "Connecting"
+            detail = "Setting up a private voice session."
+            symbol = "ellipsis.circle"
+            primaryAction = nil
+            showsSettingsAction = false
+        case .listening:
+            status = "Listening"
+            detail = "Ask about today's nutrition, workout, or your current plan."
+            symbol = "mic.circle.fill"
+            primaryAction = nil
+            showsSettingsAction = false
+        case .speaking:
+            status = "Coach speaking"
+            detail = "You can interrupt naturally at any time."
+            symbol = "waveform.circle.fill"
+            primaryAction = nil
+            showsSettingsAction = false
+        case .failed(let message, let retryable, let settingsAvailable):
+            status = "Could not continue"
+            detail = message
+            symbol = "exclamationmark.circle"
+            primaryAction = retryable ? "Reconnect" : nil
+            showsSettingsAction = settingsAvailable
+        case .ended:
+            status = "Session ended"
+            detail = "Your microphone is off."
+            symbol = "checkmark.circle"
+            primaryAction = "Start another session"
+            showsSettingsAction = false
+        }
+    }
+
+    static func activityLabel(_ label: String) -> String? {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 enum LiveCoachAudioRouteChangeReason: Equatable {
     case newDeviceAvailable
     case oldDeviceUnavailable

@@ -2,7 +2,8 @@ import SwiftUI
 
 struct TodayView: View {
     @EnvironmentObject private var store: AppStore
-    @Binding var selectedTab: Int
+    /// Hands back to the Canvas composer; this sheet never opens a second coach.
+    let onAskCoach: () -> Void
     @State private var note = ""
     @State private var noteDay = ""
     @State private var lastPersistedNote = ""
@@ -12,11 +13,11 @@ struct TodayView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     DayPicker(date: store.selectedDate, canGoForward: !store.isToday, isEnabled: !store.isLoadingDay && !isChangingDay) { delta in Task { await changeDay(by: delta) } }
-                    CoachStrip { selectedTab = 1 }
+                    CoachStrip(action: onAskCoach)
                     if store.isLoadingDay && store.day == nil { loading }
                     else if let day = store.day {
                         MacroRingsView(totals: day.totals, targets: day.targets, remaining: day.remaining, nutrientsComplete: day.nutrientsComplete)
-                        MealListView(meals: day.meals, onDelete: { id in Task { await store.deleteMeal(id) } }, onAdd: { selectedTab = 1 })
+                        MealListView(meals: day.meals, onDelete: { id in Task { await store.deleteMeal(id) } }, onAdd: onAskCoach)
                         FatSecretAttribution().frame(maxWidth: .infinity)
                         if let warning = day.warning { Label(warning, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(Theme.danger).appCard() }
                         BriefCard(text: $note) { Task { await persistCurrentNote() } }

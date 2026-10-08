@@ -48,14 +48,6 @@ final class APIClient {
     func presets() async throws -> PresetsPayload { try await get("api/presets") }
     func logMeal(_ body: LogMealBody) async throws -> DayPayload { try await send("api/log", body: body) }
     func logPreset(_ body: LogPresetBody) async throws -> DayPayload { try await send("api/log-preset", body: body) }
-    func chat(_ message: String, metrics: ChatMetrics? = nil) async throws -> ChatReply {
-        try await send("api/chat", body: ChatRequest(message: message, date: nil, metrics: metrics))
-    }
-    func chatHistory(limit: Int) async throws -> [ChatHistoryMessage] {
-        struct ChatHistoryPayload: Decodable { let messages: [ChatHistoryMessage] }
-        let payload: ChatHistoryPayload = try await get("api/chat/history?limit=\(limit)")
-        return payload.messages
-    }
     func barcodeFood(code: String) async throws -> BarcodeFoodPayload {
         try await send("api/food/barcode", body: BarcodeFoodRequest(code: code))
     }

@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import A2UISwiftUI
 @testable import MacroTracker
 
@@ -173,22 +174,49 @@ final class AgentCanvasIntegrationTests: XCTestCase {
         XCTAssertTrue(CanvasFixtureURLProtocol.methods.isEmpty)
     }
 
-    func testRepeatedMealsCoachNavigation() {
-        let store = AgentSurfaceStore(authenticated: { true })
-        var destination = 2
-        for _ in 0..<2 {
-            store.showsMeals = true
-            destination = 1 // TodayView's Coach link
-            destination = store.handleLegacyDestination(destination)
-            XCTAssertEqual(destination, 2)
-            XCTAssertFalse(store.showsMeals)
-            XCTAssertFalse(store.showsLegacyCoach, "Do not present two sheets in one transaction")
-            store.completeLegacyNavigation()
-            XCTAssertTrue(store.showsLegacyCoach)
-            store.showsLegacyCoach = false
-            store.completeLegacyNavigation()
-            XCTAssertFalse(store.showsLegacyCoach)
+    func testCanvasShellRendersOneComposerAndAttachesScreenshot() throws {
+        let store = AgentSurfaceStore(authenticated: { false })
+        let bounds = CGRect(x: 0, y: 0, width: 393, height: 852)
+        let host = UIHostingController(rootView: AgentCanvasView(canvas: store)
+            .environmentObject(AppStore()).environmentObject(AuthService())
+            .tint(Theme.accent).preferredColorScheme(.light))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = bounds
+        window.overrideUserInterfaceStyle = .light
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        host.view.frame = bounds
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 2
+        let image = UIGraphicsImageRenderer(bounds: bounds, format: format).image { _ in
+            window.drawHierarchy(in: bounds, afterScreenUpdates: true)
         }
+        XCTAssertGreaterThan(try XCTUnwrap(image.pngData()).count, 10_000)
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "canvas-single-entry"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertFalse(store.showsManualEntry || store.showsScanner || store.showsMeals, "No sheet is presented by default")
+    }
+
+    func testRepeatedMealsCoachNavigationHandsBackToTheOneComposer() {
+        let store = AgentSurfaceStore(authenticated: { true })
+        let initial = store.composerFocusRequest
+        for round in 1...2 {
+            store.showsMeals = true
+            store.showsManualEntry = true
+            store.askCoach() // TodayView's Coach strip and "Add food"
+            XCTAssertFalse(store.showsMeals, "The standard sheet closes")
+            XCTAssertFalse(store.showsManualEntry)
+            XCTAssertFalse(store.showsWorkouts && store.showsProgress && store.showsScanner)
+            XCTAssertEqual(store.composerFocusRequest, initial + round, "Each tap re-arms focus on the single Canvas composer")
+        }
+        store.reset()
+        XCTAssertFalse(store.showsScanner || store.showsManualEntry || store.showsMeals)
     }
 
     func testDayReadinessAndTimingDecodeSharedServerFixture() throws {

@@ -20,8 +20,9 @@ def test_rolling_server_negotiation_and_warm_load_order_are_explicit():
     assert 'store.accountRoute == .compatibility' in root
     assert 'ChatLogView' not in root
     fallback = (ROOT / 'ios/MacroTracker/Views/AgentCanvasView.swift').read_text()
-    assert '.sheet(isPresented: $canvas.showsLegacyCoach)' in fallback
-    assert 'ChatLogView()' in fallback
+    # A legacy server degrades to the standard sheets, never to a second coach surface.
+    assert 'showsLegacyCoach' not in fallback and 'ChatLogView' not in fallback
+    assert 'Button("Manual entry") { canvas.showsManualEntry = true }' in fallback
     native = (ROOT / 'ios/MacroTrackerTests/AgentCanvasIntegrationTests.swift').read_text()
     assert 'testLegacyServerFallsBackWithoutInventingOnboarding' in native
     assert 'testWarmLoadsOverlapAndRuntimePolicyChangeRefetchesWorkoutDay' in native
@@ -38,13 +39,12 @@ def test_day_policy_resources_are_actor_cached_by_policy_not_effective_date():
     assert 'testDayPolicyCacheInvalidationAndDST' in native
 
 
-def test_standard_coach_onboarding_uses_account_not_selected_day():
-    chat = (ROOT / 'ios/MacroTracker/Views/ChatLogView.swift').read_text()
-    predicate = chat.split('private var needsOnboarding: Bool', 1)[1].split('private func', 1)[0]
-    assert 'store.accountRoute == .onboarding' in predicate
-    assert 'store.day' not in predicate and 'freshClaim' not in predicate
-    assert 'guard onboardingTurn else { return }' in chat
+def test_onboarding_readiness_uses_account_not_selected_day():
+    # The legacy chat (and its own onboarding predicate) is gone; readiness is
+    # an account fact on AppStore and the Canvas renders native setup.
+    assert not (ROOT / 'ios/MacroTracker/Views/ChatLogView.swift').exists()
     store = (ROOT / 'ios/MacroTracker/AppStore.swift').read_text()
+    assert 'func chat(' not in store and 'chatHistory' not in store
     assert 'if requestedIsToday {' in store
     assert 'accountHasTargets = loadedDay.hasTargets' in store
     assert 'accountHasTargets = nil' in store
@@ -76,12 +76,18 @@ def test_initial_route_has_no_dead_fresh_claim_parameter():
     assert 'initial(freshClaim:' not in native
 
 
-def test_meals_coach_navigation_resets_destination_and_waits_for_dismissal():
+def test_meals_coach_navigation_hands_back_to_the_single_composer():
     view = (ROOT / 'ios/MacroTracker/Views/AgentCanvasView.swift').read_text()
-    assert 'legacyDestination = canvas.handleLegacyDestination(destination)' in view
-    assert 'destination == 0' not in view
-    assert 'onDismiss: { canvas.completeLegacyNavigation() }' in view
-    assert 'testRepeatedMealsCoachNavigation' in (ROOT / 'ios/MacroTrackerTests/AgentCanvasIntegrationTests.swift').read_text()
+    assert 'TodayView(onAskCoach: { canvas.askCoach() })' in view
+    assert 'handleLegacyDestination' not in view and 'legacyDestination' not in view
+    assert '@FocusState private var composerFocused: Bool' in view
+    assert '.onChange(of: canvas.composerFocusRequest)' in view
+    store = (ROOT / 'ios/MacroTracker/Services/AgentSurfaceStore.swift').read_text()
+    assert 'func askCoach()' in store and 'composerFocusRequest += 1' in store
+    assert 'showsLegacyCoach' not in store
+    today = (ROOT / 'ios/MacroTracker/Views/TodayView.swift').read_text()
+    assert 'selectedTab' not in today and 'CoachStrip(action: onAskCoach)' in today
+    assert 'testRepeatedMealsCoachNavigationHandsBackToTheOneComposer' in (ROOT / 'ios/MacroTrackerTests/AgentCanvasIntegrationTests.swift').read_text()
 
 
 def test_session_identity_persists_only_opaque_account_scoped_id():
@@ -131,11 +137,8 @@ def test_onboarding_root_uses_server_readiness_and_completion_not_arrival():
     assert 'loader.errorMessage' in content
     assert 'testUnknownReadinessRetriesThenRecoversWithoutRelaunch' in (ROOT / 'ios/MacroTrackerTests/AgentCanvasIntegrationTests.swift').read_text()
     assert 'auth.completeOnboarding()' not in content
-    chat = (ROOT / 'ios/MacroTracker/Views/ChatLogView.swift').read_text()
-    assert 'Button("Continue to MMacros")' in chat
-    assert 'onOnboardingComplete?()' in chat
-    completion = chat.split('private var canFinishOnboarding: Bool')[1].split('private var', 1)[0]
-    assert '!isSending' in completion and '!isFinalizingOnboardingPlan' in completion
+    # Onboarding is native setup inside the Canvas; no chat-driven completion remains.
+    assert not (ROOT / 'ios/MacroTracker/Views/ChatLogView.swift').exists()
     native = (ROOT / 'ios/MacroTrackerTests/AgentCanvasIntegrationTests.swift').read_text()
     assert 'testFreshClaimAndMissingTargetsStayInEstablishedOnboarding' in native
 
@@ -196,15 +199,14 @@ def test_toast_host_covers_canvas_and_all_fallback_sheets_without_tabs():
     view = (ROOT / 'ios/MacroTracker/Views/AgentCanvasView.swift').read_text()
     assert 'if let toast = app.toast' in view
     assert 'Label(toast, systemImage: "checkmark.circle.fill")' in view
-    assert view.count('.modifier(AgentToastModifier())') == 5, 'Canvas sheets only, no second root host'
+    assert view.count('.modifier(AgentToastModifier())') == 6, 'Logger, Workouts, Meals, Progress, Manual entry and Scanner sheets; no second root host'
     root = (ROOT / 'ios/MacroTracker/ContentView.swift').read_text().split('struct ProgressDashboardView')[0]
     assert root.count('.modifier(AgentToastModifier())') == 1
     assert root.count('.alert("Could not complete that"') == 1
     assert 'store.errorMessage = nil' in root
     assert '.alert("Could not complete that"' not in view
-    chat = (ROOT / 'ios/MacroTracker/Views/ChatLogView.swift').read_text()
-    assert 'ManualFoodView().modifier(AgentToastModifier())' in chat
-    assert 'WorkoutLoggerView(initialType: selection.type, initialExercise: selection.exercise)\n                .modifier(AgentToastModifier())' in chat
+    assert 'ManualFoodView().modifier(AgentToastModifier())' in view
+    assert 'ScanFoodSheet(onLogged: { _, _ in }).modifier(AgentToastModifier())' in view
     assert 'TabView(' not in view
     assert '.allowsHitTesting(false)' in view
 
@@ -287,8 +289,31 @@ def test_coverage_unknown_is_explained_not_rendered_as_no_training():
 def test_new_swift_files_have_target_membership_and_exact_pin():
     project = (ROOT / 'ios/MacroTracker.xcodeproj/project.pbxproj').read_text()
     for name in ['AgentCanvasContract.swift', 'AgentSurfaceStore.swift', 'AgentSurfaceRenderer.swift',
-                 'AgentCanvasView.swift', 'AgentCanvasContractTests.swift', 'AgentCanvasIntegrationTests.swift']:
+                 'AgentCanvasView.swift', 'AgentCanvasContractTests.swift', 'AgentCanvasIntegrationTests.swift',
+                 'ManualFoodView.swift']:
         assert project.count(f'{name} in Sources') >= 2, name
         assert f'path = {name};' in project
     assert '4af5dda15dd050e091a80026b940cd41f8d5b93c' in project
     assert 'kind = revision;' in project
+    for name in ['ChatLogView.swift', 'LiveCoachView.swift', 'MetricsFormCard.swift', 'ExerciseVideoCard.swift',
+                 'UIImage+GIF.swift', 'ExercisePickerPromptCard.swift', 'AddBarView.swift']:
+        assert name not in project, f'{name} still referenced by the Xcode project'
+        assert not (ROOT / 'ios/MacroTracker/Views' / name).exists(), name
+        assert not (ROOT / 'ios/MacroTracker/Views/Components' / name).exists(), name
+
+
+def test_canvas_is_the_single_coach_entry():
+    """One composer for typing and voice; standard screens are sheets that hand back."""
+    sources = {path: path.read_text() for path in (ROOT / 'ios/MacroTracker').rglob('*.swift')}
+    for path, text in sources.items():
+        assert 'ChatLogView' not in text and 'LiveCoachView(' not in text and 'showsLegacyCoach' not in text, path.name
+    api = sources[ROOT / 'ios/MacroTracker/Services/APIClient.swift']
+    assert 'api/chat' not in api, 'The typed chat endpoint is no longer an app entry'
+    view = sources[ROOT / 'ios/MacroTracker/Views/AgentCanvasView.swift']
+    assert view.count('TextField(') == 1, 'Exactly one composer'
+    for item in ('Button("Scan barcode"', 'Button("Manual entry"', 'Button("Sign out"',
+                 'Button("Meals"', 'Button("Workouts"', 'Button("Progress"'):
+        assert item in view, item
+    assert 'Standard coach' not in view
+    assert 'struct LiveCoachPresentation' in sources[ROOT / 'ios/MacroTracker/Services/LiveCoachController.swift']
+    assert 'await canvas.voice.end(); auth.signOut()' in view, 'Sign out ends the voice session first'

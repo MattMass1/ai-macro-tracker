@@ -265,7 +265,8 @@ async def test_presentation_tool_and_taps_share_gateway_without_unverified_data(
         return {"remaining": {"protein": 37}}
     async def agent(**kwargs):
         assert "set_workout_plan" not in kwargs["handlers"]
-        assert "log_workout" not in kwargs["handlers"]  # generated UI cannot supply sets
+        # A coach without the workout write never exposes set logging to the model.
+        assert "log_workout" not in kwargs["handlers"] and "undo_last_set" not in kwargs["handlers"]
         await kwargs["handlers"]["present_surface"]({"view": "macros"})
         return "Your remaining protein is shown.", []
     service = CanvasService(store_factory=lambda: store, food_factory=lambda: {},

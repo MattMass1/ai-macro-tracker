@@ -138,7 +138,12 @@ async def test_real_agent_dispatches_closed_setup_composition(setup_service, mon
     assert len(payloads)==2
     tools={t['function']['name']:t['function'] for t in payloads[0]['tools']}
     assert tools['set_targets']['parameters']['properties']=={}
-    assert 'confirm' not in tools and 'log_workout' not in tools
+    assert 'confirm' not in tools, 'Approval is a native tap, never a model tool'
+    # Completed-set logging is an immediate verified write; the schema must stay
+    # Chat Completions-safe and never accept plan or approval fields.
+    assert {'log_workout', 'undo_last_set', 'complete_today_session'} <= set(tools)
+    assert tools['log_workout']['parameters']['required'] == ['exercise', 'sets']
+    assert not {'anyOf', 'oneOf', 'allOf', 'enum', 'not'} & set(tools['log_workout']['parameters'])
 
 @pytest.mark.asyncio
 async def test_first_plan_store_insert_is_tenant_scoped_and_never_overwrites():

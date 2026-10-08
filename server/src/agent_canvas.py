@@ -540,11 +540,47 @@ class CanvasService:
                 presented = result.get("status") == "awaiting_confirmation"
                 return result
 
+            # Completed sets save immediately (like meals); plan changes above
+            # still require a native Confirm tap. Each write is verified by
+            # readback before the session credits it. One turn, one write per
+            # distinct entry: an identical repeat inside the turn is replayed.
+            logged_entries: list[tuple[str, dict]] = []
+
+            async def log_workout(args):
+                nonlocal presented
+                result = await self._log_workout(session, args, logged_entries)
+                presented = True
+                return result
+
+            async def undo_last_set(args):
+                nonlocal presented
+                result = await self._undo_last_workout(session, args)
+                presented = True
+                return result
+
+            async def complete_today_session(args):
+                nonlocal presented
+                if args:
+                    raise ValueError("complete_today_session takes no values")
+                if session.workout is None or session.workout["date"] != effective_date().isoformat():
+                    await self._load_workout(session)
+                if session.workout is None:
+                    return {"status": "needs_clarification",
+                            "question": "There is no workout session for today to complete."}
+                await self._action(session, {"action": "complete_workout"})
+                presented = True
+                return {"status": "completed", "date": session.workout["date"], "type": session.workout["type"]}
+
             handlers = {"log_meal": log_meal, "lookup_food": lookup_food,
                         "present_surface": present_surface, "request_exercise_swap": request_swap,
                         "request_plan_edit": request_plan_edit,
                         "propose_today_workout": propose_today_workout}
             base = self.coach_factory()
+            if "log_workout" in base:
+                handlers["log_workout"] = log_workout
+                handlers["undo_last_set"] = undo_last_set
+            if "complete_today_session" in base and "get_today_session" in base:
+                handlers["complete_today_session"] = complete_today_session
             for name in ("get_today", "get_today_session", "get_library", "get_range_summary",
                          "get_display_name", "get_metrics", "get_targets", "get_workout_plan",
                          "get_workout_outlook"):
@@ -565,6 +601,32 @@ class CanvasService:
             catalog = [{"name": t["name"], "description": t["description"],
                         "input_schema": t["parameters"]} for t in _voice_delegation_tools()
                        if t["name"] in handlers]
+            if "log_workout" in handlers:
+                catalog.append({"name": "log_workout", "description":
+                    "Save sets the user says they COMPLETED for one exercise. Saves immediately and "
+                    "refreshes the workout card; no Confirm. Call once per exercise with the exact "
+                    "exercise name and every stated set's weight and reps (1-4 sets per call; log a "
+                    "second entry for more). workout_type defaults to today's session. Never invent "
+                    'sets, weights or reps. Example: {"exercise":"Bench Press","sets":[{"weight":185,"reps":8},'
+                    '{"weight":185,"reps":8},{"weight":185,"reps":7}]}',
+                    "input_schema": {"type": "object", "properties": {
+                        "exercise": {"type": "string", "minLength": 1, "maxLength": 160},
+                        "workout_type": {"type": "string", "minLength": 1, "maxLength": 80},
+                        "sets": {"type": "array", "minItems": 1, "maxItems": 4, "items": {
+                            "type": "object", "properties": {
+                                "weight": {"type": "number", "minimum": 0, "maximum": 2000},
+                                "reps": {"type": "number", "minimum": 0, "maximum": 300}},
+                            "required": ["weight", "reps"], "additionalProperties": False}}},
+                        "required": ["exercise", "sets"], "additionalProperties": False}})
+                catalog.append({"name": "undo_last_set", "description":
+                    "Remove the NEWEST workout entry logged today (one exercise and the sets saved with it). "
+                    "Use for undo my last set, remove that, I logged that wrong. Nothing else changes. Example: {}",
+                    "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}})
+            if "complete_today_session" in handlers:
+                catalog.append({"name": "complete_today_session", "description":
+                    "Mark today's workout session done after the user says they finished. Verified by readback; "
+                    "idempotent. Use for I'm done, finish my workout, mark today complete. Example: {}",
+                    "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}})
             from coach import TOOLS
             names = {tool["name"] for tool in catalog}
             catalog += [tool for tool in TOOLS if tool["name"] in handlers and tool["name"] not in names]
@@ -1066,6 +1128,110 @@ class CanvasService:
         ])
         return {"status": "awaiting_confirmation", "detail": session.approval["detail"]}
 
+    async def _log_workout(self, session, args, logged):
+        """Immediate, verified set logging for voice and text.
+
+        Writes through the existing tenant-bound workout operation, confirms the
+        row by independent readback, then credits the session exactly as a native
+        logger acknowledgement would. No plan or routine is changed.
+        """
+        if (not isinstance(args, Mapping) or set(args) - {"exercise", "workout_type", "sets"}
+                or "exercise" not in args or "sets" not in args):
+            raise ValueError("Provide exercise, sets and optionally workout_type")
+        exercise = args["exercise"]
+        if not isinstance(exercise, str) or not 1 <= len(exercise.strip()) <= 160:
+            raise ValueError("Exercise name must be 1-160 characters")
+        sets = args["sets"]
+        if not isinstance(sets, list) or not 1 <= len(sets) <= 4:
+            raise ValueError("Provide between 1 and 4 sets; log a second entry for more")
+        for item in sets:
+            if (not isinstance(item, Mapping) or set(item) != {"weight", "reps"}
+                    or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                           or not math.isfinite(value) or value < 0 for value in item.values())):
+                raise ValueError("Each set needs a numeric weight and reps")
+        today = effective_date()
+        if session.workout is None or session.workout["date"] != today.isoformat():
+            await self._load_workout(session)
+        workout_type = args.get("workout_type")
+        if workout_type is None:
+            if session.workout is None:
+                return {"status": "needs_clarification",
+                        "question": "Which workout type is this: " + ", ".join(WORKOUT_TYPES) + "?"}
+            workout_type = session.workout["type"]
+        if not isinstance(workout_type, str) or not _WORKOUT_LABEL.fullmatch(workout_type.strip()):
+            raise ValueError("Invalid workout label: use 1-80 safe display characters")
+        fingerprint = json.dumps({"exercise": exercise.strip().casefold(), "workout_type": workout_type.strip(),
+                                  "sets": [[float(s["weight"]), float(s["reps"])] for s in sets]}, sort_keys=True)
+        for previous_key, previous in logged:
+            if previous_key == fingerprint:
+                return deepcopy(previous)
+        store = self.store_factory()
+        row = await self.coach_factory()["log_workout"]({
+            "exercise": exercise.strip(), "workout_type": workout_type.strip(), "muscle_group": "",
+            "sets": [{"weight": s["weight"], "reps": s["reps"]} for s in sets]})
+        record_id = str((row or {}).get("id") or "")
+        if not record_id:
+            raise ValueError("The workout write returned no record. Check your workouts before retrying.")
+        rows = await store.fetch_workouts(today)
+        verified = next((r for r in rows if str(r.get("id")) == record_id), None)
+        if verified is None:
+            raise ValueError("Workout readback did not confirm this record. Check your workouts; do not retry blindly.")
+        count = len(verified.get("sets") or [])
+        if session.workout is not None:
+            await self._action(session, {"action": "exercise_logged", "reference": record_id})
+            match = next((ex for ex in session.workout["exercises"] if ex["name"] == verified.get("exercise")), None)
+            if match is not None:
+                session.canvas.present("message", "transient", [{
+                    "id": "workout-saved", "component": "AgentMessage",
+                    "text": f"Logged {verified.get('exercise')}: {count} sets. "
+                            f"{session.workout['loggedSets'].get(match['id'], 0)} verified this session."}])
+            credited = session.workout["loggedSets"].get(match["id"], 0) if match else 0
+        else:
+            session.canvas.present("message", "transient", [{
+                "id": "workout-saved", "component": "AgentMessage",
+                "text": f"Logged {verified.get('exercise')}: {count} sets. No assigned session today; saved as a standalone entry."}])
+            credited = 0
+        result = {"status": "committed", "record_id": record_id, "exercise": verified.get("exercise"),
+                  "workout_type": verified.get("workout_type"), "sets_saved": count,
+                  "sets_verified_this_session": credited, "date": str(verified.get("date") or today.isoformat())}
+        logged.append((fingerprint, deepcopy(result)))
+        return result
+
+    async def _undo_last_workout(self, session, args):
+        """Delete only the newest workout entry logged today, then verify it is gone."""
+        if args:
+            raise ValueError("undo_last_set takes no values")
+        store = self.store_factory()
+        today = effective_date()
+        rows = [r for r in await store.fetch_workouts(today)
+                if str(r.get("date") or today.isoformat()) == today.isoformat()]
+        if not rows:
+            return {"status": "needs_clarification", "question": "There is nothing logged today to undo."}
+        # fetch_workouts is newest-first; a created_time sort keeps that true for any adapter.
+        rows.sort(key=lambda r: str(r.get("created_time") or ""), reverse=True)
+        newest = rows[0]
+        record_id = str(newest.get("id"))
+        count = len(newest.get("sets") or [])
+        await store.delete("fitness_tracker", record_id)
+        if any(str(r.get("id")) == record_id for r in await store.fetch_workouts(today)):
+            raise ValueError("The workout entry could not be removed. Check your workouts.")
+        workout = session.workout
+        if workout and workout["date"] == today.isoformat():
+            if record_id in session.acknowledged_rows:
+                session.acknowledged_rows.discard(record_id)
+                match = next((ex for ex in workout["exercises"] if ex["name"] == newest.get("exercise")), None)
+                if match is not None:
+                    remaining = max(0, workout["loggedSets"].get(match["id"], 0) - count)
+                    if remaining:
+                        workout["loggedSets"][match["id"]] = remaining
+                    else:
+                        workout["loggedSets"].pop(match["id"], None)
+            self._show_workout(session)
+        session.canvas.present("message", "transient", [{
+            "id": "workout-undone", "component": "AgentMessage",
+            "text": f"Removed {newest.get('exercise')} ({count} sets). Nothing else changed."}])
+        return {"status": "removed", "record_id": record_id, "exercise": newest.get("exercise"), "sets_removed": count}
+
     @staticmethod
     def _logged_today(rows, day):
         return {str(row.get("exercise", "")).casefold() for row in rows
@@ -1185,6 +1351,11 @@ and a standard workout type or saved routine day; use history only for load guid
 An explicit request to change the SAVED ROUTINE itself (every future Push day, the template) uses
 request_plan_edit for one exercise. A contextual active/last
 swap may use request_exercise_swap. Never perform a whole-plan rewrite for either operation.
+To LOG sets the user says they completed, call log_workout once per exercise with the exact
+exercise name and each set's weight and reps; it saves immediately (no Confirm) and refreshes the
+workout card. Never invent sets, weights or reps, and never log planned sets as done.
+undo_last_set removes the newest entry logged today. complete_today_session marks today's session
+done after verified readback. Plan changes still require native Confirm.
 Workout suggestions are read-only: ground them in get_workout_plan and get_library, and clearly
 label them as suggestions. A spoken yes never confirms a pending native approval.
 set_workout_plan stages the first routine or an explicitly requested routine replacement.

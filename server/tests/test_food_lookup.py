@@ -2010,6 +2010,36 @@ async def test_generic_whole_food_acceptance_never_calls_a_provider(monkeypatch,
     assert found["macros_per_serving"]["calories"] > 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("query", "expected_name"), [
+    ("sweet potatoes", "sweet potato"),
+    ("two sweet potatoes", "sweet potato"),
+    ("white potatoes", "white potato"),
+    ("bananas", "banana"),
+    ("two apples", "apple"),
+    ("strawberry", "strawberries"),
+    ("blueberry", "blueberries"),
+])
+async def test_generic_whole_food_resolves_plural_and_singular_forms(monkeypatch, query, expected_name):
+    """Natural speech says 'sweet potatoes'/'two apples'; the curated table must
+    match a food regardless of its singular/plural surface form."""
+    async def forbidden(_query):
+        raise AssertionError("generic whole food must not call a provider")
+    monkeypatch.setattr(food_lookup, "search_fatsecret", forbidden)
+    monkeypatch.setattr(food_lookup, "search_openfoodfacts", forbidden)
+    found = food_lookup.resolve_generic_whole_food(query)
+    assert found is not None
+    assert found["name"] == expected_name
+    assert found["source"].startswith("Generic:")
+
+
+@pytest.mark.parametrize("query", ["ground turkeys", "almonds", "a fruit", "fruits"])
+def test_generic_whole_food_plural_does_not_invent_uncurated_foods(query):
+    """Singular/plural reconciliation must only match curated foods; uncurated
+    foods still fall through so the resolver asks instead of guessing macros."""
+    assert food_lookup.resolve_generic_whole_food(query) is None
+
+
 def test_generic_whole_food_does_not_capture_brands_composites_or_mixed_fractions():
     for query in ("Big Mac", "Chick-Fil-A sandwich", "Quaker oats"):
         assert food_lookup.resolve_generic_whole_food(query) is None

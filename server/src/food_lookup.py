@@ -485,10 +485,67 @@ def _clean_component(text: str) -> tuple[float | None, str | None, str]:
     return quantity, unit, remainder.strip(" .")
 
 
+def _singularize(text: str) -> str:
+    """Collapse the common English plural surface forms to a canonical stem.
+
+    Applied symmetrically to both curated keys and the spoken query, so the two
+    converge regardless of which number form the data or the speaker used. It is
+    a reconciliation stem, not grammatically correct English."""
+    def one(word: str) -> str:
+        if len(word) > 4 and word.endswith("ies"):
+            return word[:-3] + "y"
+        if len(word) > 4 and word.endswith(("oes", "ses", "xes", "zes", "ches", "shes")):
+            return word[:-2]
+        if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+            return word[:-1]
+        return word
+    return " ".join(one(word) for word in text.split())
+
+
+def _build_generic_singular_index() -> dict[str, str]:
+    """Index curated foods by singular stem so plural/singular both resolve.
+
+    Only curated identities are ever indexed, so reconciliation can never invent
+    macros for an uncurated food. A stem shared by two different foods is dropped
+    as ambiguous: the resolver then asks rather than guessing."""
+    index: dict[str, str] = {}
+    ambiguous: set[str] = set()
+
+    def target(key: str) -> str:
+        return str(GENERIC_WHOLE_FOODS[key].get("alias_of") or key)
+
+    for key in GENERIC_WHOLE_FOODS:
+        stem = _singularize(normalize_food_name(key))
+        if not stem:
+            continue
+        existing = index.get(stem)
+        if existing is None:
+            index[stem] = key
+        elif target(existing) != target(key):
+            ambiguous.add(stem)
+        elif GENERIC_WHOLE_FOODS[existing].get("alias_of") and not GENERIC_WHOLE_FOODS[key].get("alias_of"):
+            index[stem] = key  # prefer the canonical identity over an alias
+    for stem in ambiguous:
+        index.pop(stem, None)
+    return index
+
+
+_GENERIC_SINGULAR_INDEX = _build_generic_singular_index()
+
+
+def _lookup_generic(normalized: str) -> dict[str, Any] | None:
+    """Curated lookup that tolerates singular/plural surface forms."""
+    entry = GENERIC_WHOLE_FOODS.get(normalized)
+    if entry is not None:
+        return entry
+    key = _GENERIC_SINGULAR_INDEX.get(_singularize(normalized))
+    return GENERIC_WHOLE_FOODS.get(key) if key else None
+
+
 def _generic_whole_food(query: str) -> dict[str, Any] | None:
     """Resolve an exact generic whole-food identity without network access."""
     normalized = normalize_food_name(query)
-    entry = GENERIC_WHOLE_FOODS.get(normalized)
+    entry = _lookup_generic(normalized)
     explicit_basis = None
     if entry is None:
         for marker in ("raw", "cooked"):
@@ -496,14 +553,14 @@ def _generic_whole_food(query: str) -> dict[str, Any] | None:
                 explicit_basis = marker
                 normalized = " ".join(re.sub(rf"\b{marker}\b", " ", normalized).split())
                 break
-        entry = GENERIC_WHOLE_FOODS.get(normalized)
+        entry = _lookup_generic(normalized)
     count = 1.0
     counted = re.fullmatch(r"(\d+(?:\.\d+)?|a|an)\s+(.+)", normalized)
     if entry is None and counted:
         count = (1.0 if counted.group(1) in ("a", "an")
                  else float(counted.group(1)))
         normalized = counted.group(2)
-        entry = GENERIC_WHOLE_FOODS.get(normalized)
+        entry = _lookup_generic(normalized)
     if entry and entry.get("alias_of"):
         entry = GENERIC_WHOLE_FOODS[str(entry["alias_of"])]
     if not entry:

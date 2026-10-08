@@ -138,6 +138,9 @@ async def test_log_workout_requires_readback_and_rejects_bad_shapes():
         store.readback_hidden.add("row-1")
         with pytest.raises(ValueError, match="readback"):
             await handler({"exercise": "Bench Press", "sets": [{"weight": 100, "reps": 8}]})
+        # A same-args retry after an unverified outcome must NOT write again.
+        with pytest.raises(ValueError, match="unverified"):
+            await handler({"exercise": "Bench Press", "sets": [{"weight": 100, "reps": 8}]})
         outcomes["writes_after_hidden"] = len(state["writes"])
         return "Could not verify.", []
 
@@ -165,6 +168,8 @@ async def test_undo_last_set_removes_only_the_newest_entry_and_uncredits():
         assert result["status"] == "removed" and result["exercise"] == "Incline Dumbbell Press"
         with pytest.raises(ValueError):
             await kwargs["handlers"]["undo_last_set"]({"id": "row-1"})
+        # Provider retry inside the same turn replays; it never deletes a second row.
+        assert await kwargs["handlers"]["undo_last_set"]({}) == result
         return "Removed.", []
 
     service = service_with(store, coach, agent)

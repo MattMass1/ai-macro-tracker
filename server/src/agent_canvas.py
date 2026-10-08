@@ -547,7 +547,8 @@ class CanvasService:
             # still require a native Confirm tap. Each write is verified by
             # readback before the session credits it. One turn, one write per
             # distinct entry: an identical repeat inside the turn is replayed.
-            logged_entries: list[tuple[str, dict]] = []
+            logged_entries: list[tuple[str, dict | None]] = []
+            undo_fence: dict = {}
 
             async def log_workout(args):
                 nonlocal presented
@@ -557,7 +558,7 @@ class CanvasService:
 
             async def undo_last_set(args):
                 nonlocal presented
-                result = await self._undo_last_workout(session, args)
+                result = await self._undo_last_workout(session, args, undo_fence)
                 presented = True
                 return result
 
@@ -1173,7 +1174,14 @@ class CanvasService:
                                   "sets": [[float(s["weight"]), float(s["reps"])] for s in sets]}, sort_keys=True)
         for previous_key, previous in logged:
             if previous_key == fingerprint:
+                if previous is None:
+                    raise ValueError("That entry was already attempted this turn and its outcome is unverified. "
+                                     "Check your workouts before logging it again.")
                 return deepcopy(previous)
+        # Register the attempt BEFORE writing so a lost/unverified outcome can
+        # never be re-written by a same-args retry inside this turn.
+        slot = len(logged)
+        logged.append((fingerprint, None))
         store = self.store_factory()
         row = await self.coach_factory()["log_workout"]({
             "exercise": exercise.strip(), "workout_type": workout_type.strip(), "muscle_group": "",
@@ -1203,13 +1211,27 @@ class CanvasService:
         result = {"status": "committed", "record_id": record_id, "exercise": verified.get("exercise"),
                   "workout_type": verified.get("workout_type"), "sets_saved": count,
                   "sets_verified_this_session": credited, "date": str(verified.get("date") or today.isoformat())}
-        logged.append((fingerprint, deepcopy(result)))
+        logged[slot] = (fingerprint, deepcopy(result))
         return result
 
-    async def _undo_last_workout(self, session, args):
-        """Delete only the newest workout entry logged today, then verify it is gone."""
+    async def _undo_last_workout(self, session, args, fence):
+        """Delete only the newest workout entry logged today, then verify it is gone.
+
+        `fence` is per-turn state: a second call inside the same turn replays the
+        first outcome (or its failure) and never performs a second delete.
+        """
         if args:
             raise ValueError("undo_last_set takes no values")
+        if "result" in fence:
+            return deepcopy(fence["result"])
+        if fence.get("attempted"):
+            raise ValueError("Undo was already attempted this turn and could not be verified. Check your workouts.")
+        fence["attempted"] = True
+        result = await self._undo_last_workout_once(session)
+        fence["result"] = deepcopy(result)
+        return result
+
+    async def _undo_last_workout_once(self, session):
         store = self.store_factory()
         today = effective_date()
         rows = [r for r in await store.fetch_workouts(today)

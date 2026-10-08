@@ -106,27 +106,42 @@ async def restore_not_null(conn, confirm_checksum: str) -> dict[str, object]:
     if calorie_only_writes_enabled():
         raise RollbackRefused("forward-disable first: CALORIE_ONLY_WRITES_ENABLED is on; nothing changed")
     before = await migration_status(conn)
-    if NULLABLE_NUTRIENTS_MIGRATION in before["pending"]:
-        raise RollbackRefused("migration 003 is not applied; nothing to roll back")
+    _require_rollback_ledger(before)
     await conn.execute("SELECT pg_advisory_lock($1)", LOCK_KEY)
     try:
         try:
             async with conn.transaction():
+                # A migration may have run while we waited for the shared lock.
+                # Recheck before creating even the rollback ledger table.
+                locked = await migration_status(conn)
+                _require_rollback_ledger(locked)
+                if locked != before:
+                    raise RollbackRefused("migration ledger changed while acquiring lock; nothing changed")
                 await conn.execute(
                     "CREATE TABLE IF NOT EXISTS schema_rollbacks (name TEXT NOT NULL, checksum TEXT NOT NULL, "
                     "applied_at TIMESTAMPTZ NOT NULL DEFAULT now())")
                 await conn.execute(ROLLBACK_SQL.read_text(encoding="utf-8"))
                 await conn.execute("INSERT INTO schema_rollbacks(name, checksum) VALUES($1, $2)",
                                    ROLLBACK_SQL.name, digest)
+                # Both the report and the final invariant must precede commit:
+                # a refusal here rolls back the DDL and append-only record.
+                after = await preflight(conn)
+                ledger_after = await migration_status(conn)
+                if ledger_after != locked or not ledger_after["compatible"]:
+                    raise RollbackRefused("migration ledger changed unexpectedly; nothing changed")
         except asyncpg.RaiseError as exc:
             raise RollbackRefused(str(exc).splitlines()[0] + "; nothing changed") from None
     finally:
         await conn.execute("SELECT pg_advisory_unlock($1)", LOCK_KEY)
-    after = await preflight(conn)
-    ledger_after = await migration_status(conn)
-    if ledger_after["pending"] != before["pending"] or ledger_after["drift"] or ledger_after["unknown"]:
-        raise RollbackRefused("migration ledger changed unexpectedly; investigate before continuing")
     return after
+
+
+def _require_rollback_ledger(status) -> None:
+    """Refuse an unapplied 003 or incompatible history before any rollback DDL."""
+    if NULLABLE_NUTRIENTS_MIGRATION in status["pending"]:
+        raise RollbackRefused("migration 003 is not applied; nothing to roll back")
+    if not status["compatible"] or status["drift"] or status["unknown"]:
+        raise RollbackRefused("migration ledger is incompatible; nothing changed")
 
 
 async def run(database_url: str, *, restore: bool, confirm_checksum: str) -> dict[str, object]:

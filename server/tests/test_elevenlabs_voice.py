@@ -192,6 +192,7 @@ def test_token_route_allows_any_authenticated_user_and_is_flag_gated(monkeypatch
         return {"token": "tok_live", "conversation_id": "conv_1", "agent_id": agent_id}
 
     monkeypatch.setattr(srv.elevenlabs_voice, "mint_conversation_token", fake_mint)
+    elv._voice_sessions.clear()
 
     with TestClient(srv.create_app()) as client:
         url = "/api/voice/elevenlabs/token"
@@ -201,10 +202,13 @@ def test_token_route_allows_any_authenticated_user_and_is_flag_gated(monkeypatch
         assert res.status_code == 200, res.text
         assert res.json()["token"] == "tok_live"
         assert "sk-secret" not in res.text  # key never leaves the server
-        # Any authenticated (invited) user may now mint a token, not just the owner.
-        other = client.post(url, headers={"Authorization": "Bearer other-tok"})
-        assert other.status_code == 200, other.text
-        assert other.json()["token"] == "tok_live"
+        # The conversation is recorded against the signed-in user, for the webhook.
+        assert elv.resolve_voice_session("conv_1") == owner
+        # Any authenticated (invited) user may mint a token, and it records as them.
+        other_res = client.post(url, headers={"Authorization": "Bearer other-tok"})
+        assert other_res.status_code == 200, other_res.text
+        assert other_res.json()["token"] == "tok_live"
+        assert elv.resolve_voice_session("conv_1") == other  # now owned by the other user
 
 
 def test_token_route_409_when_provider_is_openai(monkeypatch):
@@ -217,17 +221,31 @@ def test_token_route_409_when_provider_is_openai(monkeypatch):
         assert res.status_code == 409
 
 
-def test_agent_turn_webhook_requires_secret_and_runs_shared_turn(monkeypatch):
-    owner = uuid4()
-    store = AuthStore(owner, uuid4())
+def test_voice_session_record_resolve_and_ttl():
+    elv._voice_sessions.clear()
+    speaker = uuid4()
+    elv.record_voice_session("c", speaker, now=1000.0)
+    assert elv.resolve_voice_session("c", now=1000.0) == speaker
+    # Expires after the TTL; unknown ids are never attributed.
+    assert elv.resolve_voice_session("c", now=1000.0 + elv._VOICE_SESSION_TTL_SECONDS + 1) is None
+    assert elv.resolve_voice_session("never-seen", now=1000.0) is None
+
+
+def test_agent_turn_webhook_binds_the_session_user_not_the_owner(monkeypatch):
+    from auth import current_user_id
+    owner, speaker = uuid4(), uuid4()
+    store = AuthStore(owner, speaker)
     monkeypatch.setattr(srv, "_client", store)
     _configure(monkeypatch, owner=owner, voice_provider="elevenlabs", elevenlabs_tool_secret="hook-secret")
+
+    elv._voice_sessions.clear()
+    elv.record_voice_session("conv_1", speaker)  # this conversation belongs to the speaker, NOT the owner
 
     calls = []
 
     class FakeCanvas:
         async def turn(self, session_id, turn_id, message, *, adapter):
-            calls.append((session_id, turn_id, message, adapter))
+            calls.append((session_id, turn_id, message, adapter, current_user_id()))
             return {"reply": "Logged it.", "surfaces": []}
 
     monkeypatch.setattr(srv, "_canvas_service", FakeCanvas(), raising=False)
@@ -235,18 +253,45 @@ def test_agent_turn_webhook_requires_secret_and_runs_shared_turn(monkeypatch):
     with TestClient(srv.create_app()) as client:
         url = "/api/voice/elevenlabs/agent-turn"
         body = {"message": "log a banana", "conversation_id": "conv_1", "turn_index": 0}
-        # Missing secret -> rejected, turn never runs.
+        # Missing / bad secret -> rejected, turn never runs.
         assert client.post(url, json=body).status_code == 401
-        assert calls == []
-        # Bad secret -> rejected.
         assert client.post(url, json=body, headers={"X-Elevenlabs-Tool-Secret": "nope"}).status_code == 401
-        # Correct secret -> runs the shared voice turn and speaks the reply.
+        assert calls == []
+        # Correct secret -> runs the shared turn bound to the SPEAKER, not the owner.
         res = client.post(url, json=body, headers={"X-Elevenlabs-Tool-Secret": "hook-secret"})
         assert res.status_code == 200, res.text
         assert res.json() == {"reply": "Logged it."}
         assert len(calls) == 1
-        session_id, turn_id, message, adapter = calls[0]
-        assert adapter == "voice"
-        assert message == "log a banana"
+        session_id, turn_id, message, adapter, bound_user = calls[0]
+        assert adapter == "voice" and message == "log a banana"
         assert session_id == elv.derive_session_id("conv_1")
         assert turn_id == elv.derive_turn_id(session_id, "conv_1", 0)
+        assert bound_user == speaker and bound_user != owner  # tenancy: acts as the speaker
+
+
+def test_agent_turn_webhook_refuses_unknown_conversation_without_touching_any_account(monkeypatch):
+    owner = uuid4()
+    store = AuthStore(owner, uuid4())
+    monkeypatch.setattr(srv, "_client", store)
+    _configure(monkeypatch, owner=owner, voice_provider="elevenlabs", elevenlabs_tool_secret="hook-secret")
+    elv._voice_sessions.clear()  # no conversation recorded
+
+    ran = []
+
+    class FakeCanvas:
+        async def turn(self, *a, **k):
+            ran.append(1)
+            return {"reply": "should not happen"}
+
+    monkeypatch.setattr(srv, "_canvas_service", FakeCanvas(), raising=False)
+
+    with TestClient(srv.create_app()) as client:
+        res = client.post(
+            "/api/voice/elevenlabs/agent-turn",
+            json={"message": "what are my macros", "conversation_id": "unknown-conv", "turn_index": 0},
+            headers={"X-Elevenlabs-Tool-Secret": "hook-secret"},
+        )
+        # Valid secret but no attribution -> refused, and NO turn ran against any account.
+        assert res.status_code == 200
+        assert "expired" in res.json().get("reply", "").lower()
+        assert ran == []

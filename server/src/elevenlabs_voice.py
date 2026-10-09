@@ -14,7 +14,8 @@ from __future__ import annotations
 import hmac
 import itertools
 import logging
-from collections import defaultdict
+import time
+from collections import OrderedDict, defaultdict
 from typing import Any, Awaitable, Callable, Mapping
 from uuid import UUID, uuid5
 
@@ -33,6 +34,36 @@ TOKEN_PATH = "/v1/convai/conversation/token"
 # send a turn index. In-process, single-worker; good enough for the spike. The
 # authoritative source is the injected system__agent_turns value.
 _fallback_turn_counters: dict[str, Any] = defaultdict(lambda: itertools.count())
+
+# Per-user attribution. At token issuance the server knows the signed-in user and
+# records which ElevenLabs conversation belongs to them; the webhook reads this to
+# act as THAT user, never the owner. In-process (single worker, WEB_CONCURRENCY=1);
+# lost on restart, after which the webhook safely rejects rather than guessing.
+_VOICE_SESSION_TTL_SECONDS = 2 * 60 * 60
+_VOICE_SESSION_MAX = 4096
+_voice_sessions: "OrderedDict[str, tuple[float, Any]]" = OrderedDict()
+
+
+def record_voice_session(conversation_id: str, user_id: Any, *, now: float | None = None) -> None:
+    """Remember which user started an ElevenLabs conversation."""
+    stamp = time.monotonic() if now is None else now
+    _voice_sessions[conversation_id] = (stamp, user_id)
+    _voice_sessions.move_to_end(conversation_id)
+    while len(_voice_sessions) > _VOICE_SESSION_MAX:
+        _voice_sessions.popitem(last=False)
+
+
+def resolve_voice_session(conversation_id: str, *, now: float | None = None) -> Any | None:
+    """The user who started this conversation, or None if unknown/expired. Never
+    falls back to an owner: unknown means the turn cannot be attributed."""
+    entry = _voice_sessions.get(conversation_id)
+    if entry is None:
+        return None
+    stamp, user_id = entry
+    if (time.monotonic() if now is None else now) - stamp > _VOICE_SESSION_TTL_SECONDS:
+        _voice_sessions.pop(conversation_id, None)
+        return None
+    return user_id
 
 
 class ElevenLabsVoiceError(RuntimeError):

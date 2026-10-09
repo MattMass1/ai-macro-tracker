@@ -3880,35 +3880,49 @@ async def api_canvas_action(request: Request) -> Any:
 async def api_elevenlabs_token(request: Request) -> Any:
     """Mint a short-lived ElevenLabs conversation token for any authenticated
     (invited) user. The API key stays server-side; only the token reaches the
-    device. NOTE (multi-user follow-up): the agent_turn webhook currently acts on
-    the owner account, so until per-user attribution lands every voice session
-    reads/writes the owner's data. Fine while the owner is the only user."""
+    device. We record which user this conversation belongs to so the agent_turn
+    webhook acts as THAT user (never the owner, never a client-supplied id)."""
     if CONFIG.voice_provider != "elevenlabs":
         return {"error": "ElevenLabs voice is not enabled"}, 409
     try:
-        return await elevenlabs_voice.mint_conversation_token(
+        result = await elevenlabs_voice.mint_conversation_token(
             api_key=CONFIG.elevenlabs_api_key,
             agent_id=CONFIG.elevenlabs_agent_id,
         )
     except elevenlabs_voice.ElevenLabsVoiceError as exc:
         return {"error": str(exc)}, 502
+    conversation_id = str(result.get("conversation_id") or "")
+    if conversation_id:
+        elevenlabs_voice.record_voice_session(conversation_id, current_user_id())
+    return result
 
 
 @api_route("/api/voice/elevenlabs/agent-turn", methods=["POST"], public=True)
 async def api_elevenlabs_agent_turn(request: Request) -> Any:
     """Server-to-server webhook the ElevenLabs agent calls once per utterance.
-    Secret-gated (not device auth). Derives server-trusted ids and runs the same
-    shared turn the GPT adapter uses, bound to the owner."""
+    Secret-gated (not device auth). Runs the same shared turn the GPT adapter
+    uses, bound to the user who started this conversation (recorded at token
+    issuance) -- never the owner, never a client-supplied id. An unrecognized
+    conversation is refused rather than attributed to anyone."""
     try:
         body = await _json_body(request)
     except Exception:
         body = {}
     provided = request.headers.get("x-elevenlabs-tool-secret", "")
+    # Gate on the shared secret before any attribution work.
+    if not elevenlabs_voice.secret_ok(provided, CONFIG.elevenlabs_tool_secret):
+        return {"error": "unauthorized"}, 401
+    conversation_id = body.get("conversation_id")
+    user_id = (elevenlabs_voice.resolve_voice_session(conversation_id.strip())
+               if isinstance(conversation_id, str) and conversation_id.strip() else None)
+    if user_id is None:
+        # Never fall back to the owner: unknown conversation = cannot attribute.
+        return {"reply": "This voice session has expired. Start a new one to continue."}, 200
 
     async def turn_fn(session_id: str, turn_id: str, message: str) -> Any:
         return await canvas_service().turn(session_id, turn_id, message, adapter="voice")
 
-    context_token = bind_user(CONFIG.matt_user_id)
+    context_token = bind_user(user_id)
     try:
         payload, status = await elevenlabs_voice.run_agent_turn(
             body,

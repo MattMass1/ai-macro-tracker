@@ -90,17 +90,23 @@ def pick_llm(api_key: str) -> str:
                 LLM_PREFERENCE[0])
 
 
-def find_by_name(items: list, name: str, id_key: str) -> str | None:
+def _name_of(item: dict) -> str | None:
+    # Tools nest the name under tool_config; agents/secrets keep it top-level.
+    return item.get("name") or (item.get("tool_config") or {}).get("name")
+
+
+def find_by_name(items: list, name: str, *id_keys: str) -> str | None:
     for item in items:
-        if isinstance(item, dict) and item.get("name") == name:
-            return item.get(id_key)
+        if isinstance(item, dict) and _name_of(item) == name:
+            for key in id_keys:
+                if item.get(key):
+                    return item[key]
     return None
 
 
 def ensure_secret(api_key: str, value: str, apply: bool) -> str:
     existing = _request("GET", "/v1/convai/secrets", api_key).get("secrets", [])
-    secret_id = find_by_name(existing, SECRET_NAME, "secret_id") or find_by_name(
-        existing, SECRET_NAME, "id")
+    secret_id = find_by_name(existing, SECRET_NAME, "secret_id", "id")
     if secret_id:
         print(f"  secret '{SECRET_NAME}' exists ({secret_id}); value not overwritten")
         return secret_id
@@ -151,7 +157,9 @@ def agent_config(llm: str, voice_id: str, tool_id: str) -> dict:
                 "language": "en",
             },
             "turn": {"turn_timeout": 7, "turn_eagerness": "normal"},
-            "tts": {"voice_id": voice_id, "model_id": "eleven_flash_v2_5"},
+            # Custom/cloned voices are fine-tuned for specific models; English
+            # agents require a turbo or flash v2 model. flash v2 = lowest latency.
+            "tts": {"voice_id": voice_id, "model_id": "eleven_flash_v2"},
         },
         "platform_settings": {
             "privacy": {"record_voice": False, "retention_days": 1,
@@ -191,7 +199,7 @@ def main() -> int:
     secret_id = ensure_secret(api_key, tool_secret, args.apply)
 
     tools = _request("GET", "/v1/convai/tools", api_key).get("tools", [])
-    tool_id = find_by_name(tools, TOOL_NAME, "id") or find_by_name(tools, TOOL_NAME, "tool_id")
+    tool_id = find_by_name(tools, TOOL_NAME, "id", "tool_id")
     tcfg = tool_config(args.webhook_url, secret_id)
     if tool_id:
         print(f"  would UPDATE tool '{TOOL_NAME}' ({tool_id})")

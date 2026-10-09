@@ -47,6 +47,8 @@ export type DayPayload = {
   has_targets?: boolean;
   day_timing?: LoggingDayPolicy;
   canvas_protocol?: string;
+  // Voice provider the app should use: "openai" (default) or "elevenlabs".
+  voice_provider?: string;
   date: string;
   day_label: string;
   totals: Macros;

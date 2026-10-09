@@ -2,6 +2,7 @@
   "date": "2026-10-07",
   "has_targets": false,
   "canvas_protocol": "mmacros.canvas.v1",
+  "voice_provider": "openai",
   "day_timing": {
     "time_zone": "America/New_York",
     "rollover_hour": 4,

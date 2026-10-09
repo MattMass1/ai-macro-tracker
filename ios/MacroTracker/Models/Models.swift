@@ -118,6 +118,8 @@ struct DayPayload: Codable, Equatable {
     var nutrientsComplete: Bool { macrosComplete != false && meals.allSatisfy(\.nutrientsComplete) }
     // Missing/unsupported capability deliberately uses standard screens.
     var canvasProtocol: String? = nil
+    // Voice provider the app should use: "openai" (default) or "elevenlabs".
+    var voiceProvider: String? = nil
     var dayTiming: LoggingDayPolicy? = nil
     // Absent/false cannot be inferred from the server's fallback display macros.
     var hasTargets: Bool? = nil

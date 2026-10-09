@@ -828,6 +828,7 @@ async def day_payload(
         "date": day.isoformat(),
         "has_targets": has_targets,
         "canvas_protocol": CANVAS_PROTOCOL,
+        "voice_provider": CONFIG.voice_provider,
         "day_timing": {"time_zone": domain.LOCAL_TZ.key,
                        "rollover_hour": domain.DAY_ROLLOVER_HOUR,
                        "effective_date": domain.effective_date().isoformat()},

@@ -354,6 +354,16 @@ class CanvasService:
 
     async def snapshot(self, session_id, *, create=False):
         session = self.session(session_id, create=create)
+        if session.lock.locked():
+            # A turn is mid-flight. Reads must not queue behind it: a waiting GET
+            # occupies one of the TENANT_ACTIVE_LIMIT slots for the whole turn,
+            # so a polling client plus a tap exhausts the budget and the UI gets
+            # errors instead of state. Return the current canvas immediately --
+            # session.snapshot() is synchronous (no await), so under asyncio it
+            # reads a consistent point-in-time state; revision ordering lets the
+            # client sequence it correctly, and surfaces the turn has already
+            # presented simply appear sooner. Setup sync runs on the locked path.
+            return session.snapshot()
         async with self.lease(session):
             await self._sync_setup(session)
             return session.snapshot()
@@ -768,7 +778,12 @@ class CanvasService:
                                                  if key not in {"anyOf", "oneOf", "allOf", "not"}}}
                        for tool in catalog]
             reply = "The request could not finish. Check your data before retrying a write."
+            llm_rounds = 0
+            turn_started = time.monotonic()
+
             async def record_usage(usage: Mapping[str, Any]) -> None:
+                nonlocal llm_rounds
+                llm_rounds += 1
                 await store.insert_coach_usage(
                     str(usage["model"]), int(usage["input_tokens"]), int(usage["output_tokens"])
                 )
@@ -798,6 +813,11 @@ class CanvasService:
                 # the verified receipt or invite a blind duplicate retry.
                 if last_food_result is not None:
                     reply = str(last_food_result.get("confirmation") or reply)
+            # Operational latency telemetry only: adapter, LLM round count and
+            # wall time. Never message content.
+            logging.getLogger("mmacros.turn").info(
+                "turn adapter=%s rounds=%d elapsed=%.1fs", adapter, llm_rounds,
+                time.monotonic() - turn_started)
             await store.insert_chat_message("assistant", reply)
             # A component request must survive a provider no-tool response.
             if not presented and last_food_result is None and not session.approval and re.search(

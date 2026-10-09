@@ -170,3 +170,83 @@ final class ElevenLabsVoiceAudio: LiveCoachAudioHandling {
     func recoverFromConfigurationChange() throws {}
     func stop() {}
 }
+
+// MARK: - Real SDK adapter
+
+// The ONLY code that imports the ElevenLabs SDK. Guarded so the app still builds
+// (GPT-only) when the package is absent. It wraps a LiveKit WebRTC `Conversation`
+// and maps it onto `ElevenLabsConversationDriving`. The SDK owns mic + speaker;
+// we only mint a short-lived token from our server and relay transcripts +
+// speaking state. Token minting and all reasoning stay server-side.
+#if canImport(ElevenLabs)
+import Combine
+import ElevenLabs
+
+@MainActor
+final class LiveElevenLabsConversation: ElevenLabsConversationDriving {
+    var onUserTranscript: ((String) -> Void)?
+    var onAgentTranscript: ((String) -> Void)?
+    var onAgentSpeaking: ((Bool) -> Void)?
+    var onStarted: (() -> Void)?
+    var onClosed: ((String) -> Void)?
+    var onFailure: ((_ code: String, _ message: String) -> Void)?
+
+    private let tokenProvider: @Sendable () async throws -> String
+    private var conversation: Conversation?
+    private var cancellables = Set<AnyCancellable>()
+
+    init(tokenProvider: @escaping @Sendable () async throws -> String = {
+        try await APIClient.shared.elevenLabsToken().token
+    }) {
+        self.tokenProvider = tokenProvider
+    }
+
+    func start() async throws {
+        let token: String
+        do {
+            token = try await tokenProvider()
+        } catch {
+            throw LiveCoachConnectionError(
+                message: "Voice coach could not connect. Try again.", retryable: true)
+        }
+        var config = ConversationConfig()
+        config.onUserTranscript = { [weak self] text, _ in
+            Task { @MainActor in self?.onUserTranscript?(text) }
+        }
+        config.onAgentResponse = { [weak self] text, _ in
+            Task { @MainActor in self?.onAgentTranscript?(text) }
+        }
+        config.onError = { [weak self] error in
+            Task { @MainActor in self?.onFailure?("provider_error", String(describing: error)) }
+        }
+        do {
+            let convo = try await ElevenLabs.startConversation(
+                conversationToken: token,
+                config: config,
+                onAgentReady: { [weak self] in Task { @MainActor in self?.onStarted?() } },
+                onDisconnect: { [weak self] reason in
+                    Task { @MainActor in self?.onClosed?(String(describing: reason)) }
+                }
+            )
+            conversation = convo
+            convo.$agentState
+                .sink { [weak self] state in
+                    Task { @MainActor in self?.onAgentSpeaking?(state == .speaking) }
+                }
+                .store(in: &cancellables)
+        } catch {
+            throw LiveCoachConnectionError(
+                message: "Voice coach could not connect. Try again.", retryable: true)
+        }
+    }
+
+    func stop() async {
+        await conversation?.endConversation()
+        cancellables.removeAll()
+        conversation = nil
+    }
+
+    func setMuted(_ muted: Bool) async { try? await conversation?.setMuted(muted) }
+    func interrupt() async { try? await conversation?.interruptAgent() }
+}
+#endif

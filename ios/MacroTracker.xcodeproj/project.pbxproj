@@ -45,6 +45,7 @@
 		B0010000000000000000001B /* LiveCoachAudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001D /* LiveCoachAudioEngine.swift */; };
 		B00200000000000000000020 /* ElevenLabsVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000020 /* ElevenLabsVoice.swift */; };
 		B00200000000000000000021 /* ElevenLabsVoiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000021 /* ElevenLabsVoiceTests.swift */; };
+		B00200000000000000000031 /* ElevenLabs in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000004 /* ElevenLabs */; };
 		B00100000000000000000014 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000E /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -108,6 +109,7 @@
 			files = (
 				B00200000000000000000008 /* A2UISwiftCore in Frameworks */,
 				B00200000000000000000009 /* A2UISwiftUI in Frameworks */,
+				B00200000000000000000031 /* ElevenLabs in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -251,6 +253,7 @@
 			packageProductDependencies = (
 				A30000000000000000000001 /* A2UISwiftCore */,
 				A30000000000000000000002 /* A2UISwiftUI */,
+				A30000000000000000000004 /* ElevenLabs */,
 			);
 			productName = MacroTracker;
 			productReference = F00000000000000000000001 /* MacroTracker.app */;
@@ -310,6 +313,7 @@
 			projectRoot = "";
 			packageReferences = (
 				A20000000000000000000001 /* XCRemoteSwiftPackageReference "a2ui-swift" */,
+				A20000000000000000000002 /* XCRemoteSwiftPackageReference "elevenlabs-swift-sdk" */,
 			);
 			targets = (
 				A00000000000000000000001 /* MacroTracker */,
@@ -530,12 +534,18 @@
 			repositoryURL = "https://github.com/BBC6BAE9/a2ui-swift.git";
 			requirement = { kind = revision; revision = 4af5dda15dd050e091a80026b940cd41f8d5b93c; };
 		};
+		A20000000000000000000002 /* XCRemoteSwiftPackageReference "elevenlabs-swift-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/elevenlabs/elevenlabs-swift-sdk.git";
+			requirement = { kind = upToNextMajorVersion; minimumVersion = 3.4.0; };
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		A30000000000000000000001 /* A2UISwiftCore */ = { isa = XCSwiftPackageProductDependency; package = A20000000000000000000001; productName = A2UISwiftCore; };
 		A30000000000000000000002 /* A2UISwiftUI */ = { isa = XCSwiftPackageProductDependency; package = A20000000000000000000001; productName = A2UISwiftUI; };
 		A30000000000000000000003 /* A2UISwiftUI */ = { isa = XCSwiftPackageProductDependency; package = A20000000000000000000001; productName = A2UISwiftUI; };
+		A30000000000000000000004 /* ElevenLabs */ = { isa = XCSwiftPackageProductDependency; package = A20000000000000000000002; productName = ElevenLabs; };
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A00000000000000000000000 /* Project object */;

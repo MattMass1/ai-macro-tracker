@@ -49,6 +49,7 @@ from store import ChatQuotaExceeded, InviteAlreadyClaimed, InviteNotFound  # noq
 from auth import bind_user, current_user_id, reset_user  # noqa: E402
 from coach import CoachProviderError, run_agent  # noqa: E402
 from agent_canvas import PROTOCOL as CANVAS_PROTOCOL, CanvasService, canvas_live_start, canvas_tool_event  # noqa: E402
+import elevenlabs_voice  # noqa: E402
 import food_lookup  # noqa: E402
 from live_coach import (  # noqa: E402
     LiveCoachService,
@@ -3872,6 +3873,50 @@ async def api_canvas_action(request: Request) -> Any:
         return await canvas_service().action(request.path_params["session_id"], dict(body))
     except ValueError as exc:
         raise MacroError(str(exc)) from None
+
+
+@api_route("/api/voice/elevenlabs/token", methods=["POST"])
+async def api_elevenlabs_token(request: Request) -> Any:
+    """Owner-only: mint a short-lived ElevenLabs conversation token. The API key
+    stays server-side; only the token reaches the device."""
+    if current_user_id() != CONFIG.matt_user_id:
+        return {"error": "Voice is limited to the account owner"}, 403
+    if CONFIG.voice_provider != "elevenlabs":
+        return {"error": "ElevenLabs voice is not enabled"}, 409
+    try:
+        return await elevenlabs_voice.mint_conversation_token(
+            api_key=CONFIG.elevenlabs_api_key,
+            agent_id=CONFIG.elevenlabs_agent_id,
+        )
+    except elevenlabs_voice.ElevenLabsVoiceError as exc:
+        return {"error": str(exc)}, 502
+
+
+@api_route("/api/voice/elevenlabs/agent-turn", methods=["POST"], public=True)
+async def api_elevenlabs_agent_turn(request: Request) -> Any:
+    """Server-to-server webhook the ElevenLabs agent calls once per utterance.
+    Secret-gated (not device auth). Derives server-trusted ids and runs the same
+    shared turn the GPT adapter uses, bound to the owner."""
+    try:
+        body = await _json_body(request)
+    except Exception:
+        body = {}
+    provided = request.headers.get("x-elevenlabs-tool-secret", "")
+
+    async def turn_fn(session_id: str, turn_id: str, message: str) -> Any:
+        return await canvas_service().turn(session_id, turn_id, message, adapter="voice")
+
+    context_token = bind_user(CONFIG.matt_user_id)
+    try:
+        payload, status = await elevenlabs_voice.run_agent_turn(
+            body,
+            provided_secret=provided,
+            expected_secret=CONFIG.elevenlabs_tool_secret,
+            turn_fn=turn_fn,
+        )
+    finally:
+        reset_user(context_token)
+    return payload, status
 
 
 def create_app(*, live_service: LiveCoachService | None = None) -> Any:

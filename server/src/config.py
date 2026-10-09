@@ -55,6 +55,12 @@ class Config:
     matt_user_id: UUID
     allowed_origins: list[str] = field(default_factory=list)
     openai_api_key: str = ""
+    # Voice provider flag. GPT Realtime stays the default until the owner flips
+    # it. The ElevenLabs settings are only consulted when the flag is elevenlabs.
+    voice_provider: str = "openai"
+    elevenlabs_api_key: str = ""
+    elevenlabs_agent_id: str = ""
+    elevenlabs_tool_secret: str = ""
 
 
 def _require(name: str, missing: list[str], default: str = "") -> str:
@@ -85,6 +91,15 @@ def load_config() -> Config:
             if origin.strip()
         ],
         openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
+        voice_provider=(
+            os.environ.get("VOICE_PROVIDER", "openai").strip().lower()
+            if os.environ.get("VOICE_PROVIDER", "openai").strip().lower()
+            in {"openai", "elevenlabs"}
+            else "openai"
+        ),
+        elevenlabs_api_key=os.environ.get("ELEVENLABS_API_KEY", "").strip(),
+        elevenlabs_agent_id=os.environ.get("ELEVENLABS_AGENT_ID", "").strip(),
+        elevenlabs_tool_secret=os.environ.get("ELEVENLABS_TOOL_SECRET", "").strip(),
     )
 
     if missing:

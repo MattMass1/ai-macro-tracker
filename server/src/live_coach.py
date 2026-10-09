@@ -418,7 +418,9 @@ def _voice_delegation_tools() -> list[dict[str, Any]]:
         "description": (
             "Log food the user explicitly consumed. Send food descriptions and "
             "stated portions, never macro numbers. The server resolves every "
-            "component and either commits the complete meal or asks for clarification."
+            "component and either commits the complete meal or asks for clarification. "
+            "If the result asks the user to confirm a web estimate, ask them that exact "
+            "question; if they agree, repeat the identical call adding its confirm_ref."
         ),
         "parameters": {
             "type": "object",
@@ -426,6 +428,7 @@ def _voice_delegation_tools() -> list[dict[str, Any]]:
                 "description": {"type": "string", "minLength": 1, "maxLength": 240},
                 "components": {"type": "array", "items": component, "minItems": 1, "maxItems": 12},
                 "meal_type": {"type": "string", "enum": ["Breakfast", "Lunch", "Dinner", "Snack"]},
+                "confirm_ref": {"type": "string", "maxLength": 64},
             },
             "additionalProperties": False,
             "anyOf": [{"required": ["description"]}, {"required": ["components"]}],

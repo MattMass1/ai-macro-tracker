@@ -62,6 +62,13 @@ logger = logging.getLogger(__name__)
 _logging_configured = False
 _VOICE_UNCERTAIN_TTL_SECONDS = 10 * 60
 _voice_uncertain_meals: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
+# One-tap confirm for web-estimated macros (spec 2026-10-09): a web estimate is
+# never auto-logged. The first log attempt returns a question plus a short-lived
+# ticket; the confirming call repeats the identical request with confirm_ref.
+# The ticket binds (user, ref) to the exact request hash, so a confirmation can
+# never commit different food than the one the user approved.
+_WEB_CONFIRM_TTL_SECONDS = 5 * 60
+_web_estimate_confirmations: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
 
 
 def configure_logging() -> None:
@@ -3027,6 +3034,48 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                 "status": "status_check_needed", "operation_id": operation_id,
                 "confirmation": "A prior save has an unknown outcome. Refresh Today to check it before logging this again.",
             }
+        # Web-assessed macros are estimates: never auto-logged. First attempt
+        # returns the found values as a question + ticket; the user's yes makes
+        # the model repeat the identical call with confirm_ref, which must match
+        # this exact request hash for THIS user within the TTL.
+        has_web_estimate = calorie_values is None and any(
+            item.get("estimate_provenance") == "server_web_estimate"
+            or (isinstance(item.get("component_metadata"), list)
+                and any(isinstance(meta, Mapping)
+                        and meta.get("estimate_provenance") == "server_web_estimate"
+                        for meta in item["component_metadata"]))
+            for item in resolved_components)
+        if has_web_estimate:
+            user_key = str(current_user_id())
+            ticket_now = time.monotonic()
+            for key, ticket in list(_web_estimate_confirmations.items()):
+                if ticket["expires"] <= ticket_now:
+                    _web_estimate_confirmations.pop(key, None)
+            confirm_ref = str(args.get("confirm_ref") or "")
+            ticket = _web_estimate_confirmations.get((user_key, confirm_ref)) if confirm_ref else None
+            if ticket is not None and ticket["request_hash"] != request_hash:
+                ticket = None  # a ref never confirms different food than it was issued for
+            if ticket is None:
+                ref = uuid4().hex[:16]
+                _web_estimate_confirmations[(user_key, ref)] = {
+                    "expires": ticket_now + _WEB_CONFIRM_TTL_SECONDS,
+                    "request_hash": request_hash,
+                }
+                while len(_web_estimate_confirmations) > 256:
+                    _web_estimate_confirmations.popitem(last=False)
+                host = next((str(item.get("attribution", {}).get("source_host") or "")
+                             for item in resolved_components
+                             if isinstance(item.get("attribution"), Mapping)
+                             and item["attribution"].get("source_host")), "")
+                calories = totals.get("calories")
+                question = (f"Closest I found for {name[:60]}: about "
+                            f"{round(float(calories)) if calories is not None else 'unknown'} calories"
+                            + (f" (web estimate, {host})" if host else " (web estimate)")
+                            + ". Should I log it?")
+                return {"status": "needs_clarification", "reason": "web_estimate_confirmation",
+                        "operation_id": operation_id, "confirm_ref": ref,
+                        "question": question, "confirmation": question}
+            _web_estimate_confirmations.pop((user_key, confirm_ref), None)
         try:
             stored = await store_client().insert_meal_idempotent(
                 f"voice-log-meal:{call_id}", request_hash,

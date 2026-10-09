@@ -2771,6 +2771,50 @@ async def test_voice_curated_multi_item_order_stays_whole_with_web_forbidden(mon
 
 
 @pytest.mark.asyncio
+async def test_web_estimate_requires_one_tap_confirm_then_commits(monkeypatch):
+    """Spec 2026-10-09: web-assessed macros are never auto-logged. The first
+    log attempt returns a question + confirm_ref; repeating the identical call
+    with that ref commits. A ref never confirms different food."""
+    srv = _import_server(monkeypatch); fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    monkeypatch.setattr(srv.food_lookup.cofid_lookup, "lookup",
+                        lambda _q: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_provider_mode", lambda: None)
+    monkeypatch.setattr(srv.food_lookup.web_nutrition_lookup, "lookup",
+                        lambda query: asyncio.sleep(0, result=_web_estimate(query=query)))
+    srv._resolved_food_cache.clear()
+    srv._web_estimate_confirmations.clear()
+    token = bind_user(uuid4())
+    try:
+        handlers = srv._voice_tool_handlers()
+        first = await handlers["log_meal"](
+            "web-confirm-1", {"description": "200 g cooked red quinoa"})
+        assert first["status"] == "needs_clarification"
+        assert first["reason"] == "web_estimate_confirmation"
+        assert fake.insert_count == 0
+        ref = first["confirm_ref"]
+        assert ref and len(first["confirmation"]) < 200
+        # Wrong/absent ref still refuses to write.
+        again = await handlers["log_meal"](
+            "web-confirm-2", {"description": "200 g cooked red quinoa",
+                              "confirm_ref": "bogus"})
+        assert again["status"] == "needs_clarification" and fake.insert_count == 0
+        # A ref issued for this food cannot confirm different food.
+        other = await handlers["log_meal"](
+            "web-confirm-3", {"description": "300 g cooked red quinoa",
+                              "confirm_ref": ref})
+        assert other["status"] == "needs_clarification" and fake.insert_count == 0
+        # The identical request with the issued ref commits exactly once.
+        confirmed = await handlers["log_meal"](
+            "web-confirm-4", {"description": "200 g cooked red quinoa",
+                              "confirm_ref": ref})
+        assert confirmed["status"] == "committed"
+        assert fake.insert_count == 1
+    finally:
+        reset_user(token)
+
+
+@pytest.mark.asyncio
 async def test_exact_tenant_catalog_outranks_generic_same_name(monkeypatch):
     srv = _import_server(monkeypatch); fake = FakeVoiceStore()
     async def catalog(query):

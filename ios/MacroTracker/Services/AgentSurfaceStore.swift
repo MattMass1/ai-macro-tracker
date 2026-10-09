@@ -69,7 +69,15 @@ final class AgentSurfaceStore: ObservableObject {
     }
 
     private static func makeVoice(_ sessionId: String) -> LiveCoachController {
-        LiveCoachController(permission: SystemMicrophonePermission(),
+        #if canImport(ElevenLabs)
+        if VoiceProviderPreference.resolved() == "elevenlabs" {
+            let coordinator = ElevenLabsCoordinator(conversation: LiveElevenLabsConversation())
+            return LiveCoachController(permission: SystemMicrophonePermission(),
+                transport: ElevenLabsVoiceTransport(coordinator: coordinator),
+                audio: ElevenLabsVoiceAudio(coordinator: coordinator))
+        }
+        #endif
+        return LiveCoachController(permission: SystemMicrophonePermission(),
             transport: LiveCoachWebSocketTransport(canvasSessionId: sessionId), audio: LiveCoachAudioEngine())
     }
 

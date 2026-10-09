@@ -70,6 +70,11 @@ final class APIClient {
     func brief(_ date: String? = nil) async throws -> BriefPayload { try await get("api/brief\(date.map { "?date=\(encoded($0))" } ?? "")") }
     func saveBrief(_ text: String, date: String? = nil) async throws -> BriefPayload { try await send("api/brief", body: BriefRequest(text: text, date: date)) }
     func trends(days: Int) async throws -> TrendsPayload { try await get("api/trends?days=\(days)") }
+    /// Owner-only: mint a short-lived ElevenLabs conversation token. The API key
+    /// stays server-side; only this token reaches the device.
+    func elevenLabsToken() async throws -> ElevenLabsTokenPayload {
+        try await request("api/voice/elevenlabs/token", method: "POST", body: Optional<Data>.none)
+    }
 
     /// Opaque high-entropy credential fingerprint, never the token itself.
     /// Include the API origin/path so test and production cannot share UI state.

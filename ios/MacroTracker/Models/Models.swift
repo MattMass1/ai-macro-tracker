@@ -111,6 +111,12 @@ struct LoggingDayPolicy: Codable, Equatable {
     }
 }
 
+struct ElevenLabsTokenPayload: Decodable, Equatable {
+    let token: String
+    let conversationId: String
+    let agentId: String
+}
+
 struct DayPayload: Codable, Equatable {
     // Aggregate values are known-only subtotals when any nutrient is unknown.
     var macrosComplete: Bool? = nil

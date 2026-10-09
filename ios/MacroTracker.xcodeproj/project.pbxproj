@@ -43,6 +43,8 @@
 		B00100000000000000000019 /* LiveCoachController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001B /* LiveCoachController.swift */; };
 		B0010000000000000000001A /* LiveCoachTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001C /* LiveCoachTransport.swift */; };
 		B0010000000000000000001B /* LiveCoachAudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001D /* LiveCoachAudioEngine.swift */; };
+		B00200000000000000000020 /* ElevenLabsVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000020 /* ElevenLabsVoice.swift */; };
+		B00200000000000000000021 /* ElevenLabsVoiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000021 /* ElevenLabsVoiceTests.swift */; };
 		B00100000000000000000014 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000E /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -95,6 +97,8 @@
 		F0010000000000000000001B /* LiveCoachController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachController.swift; sourceTree = "<group>"; };
 		F0010000000000000000001C /* LiveCoachTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachTransport.swift; sourceTree = "<group>"; };
 		F0010000000000000000001D /* LiveCoachAudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachAudioEngine.swift; sourceTree = "<group>"; };
+		F00200000000000000000020 /* ElevenLabsVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ElevenLabsVoice.swift; sourceTree = "<group>"; };
+		F00200000000000000000021 /* ElevenLabsVoiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ElevenLabsVoiceTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -163,6 +167,7 @@
 				F0010000000000000000001B /* LiveCoachController.swift */,
 				F0010000000000000000001C /* LiveCoachTransport.swift */,
 				F0010000000000000000001D /* LiveCoachAudioEngine.swift */,
+				F00200000000000000000020 /* ElevenLabsVoice.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -205,6 +210,7 @@
 			children = (
 				F0010000000000000000000F /* ModelDecodingTests.swift */,
 				F0010000000000000000001A /* LiveCoachControllerTests.swift */,
+				F00200000000000000000021 /* ElevenLabsVoiceTests.swift */,
 				F00200000000000000000005 /* AgentCanvasContractTests.swift */,
 				F00200000000000000000006 /* AgentCanvasIntegrationTests.swift */,
 				F00200000000000000000007 /* snapshot.json */,
@@ -360,6 +366,7 @@
 				B00100000000000000000019 /* LiveCoachController.swift in Sources */,
 				B0010000000000000000001A /* LiveCoachTransport.swift in Sources */,
 				B0010000000000000000001B /* LiveCoachAudioEngine.swift in Sources */,
+				B00200000000000000000020 /* ElevenLabsVoice.swift in Sources */,
 				B00200000000000000000001 /* AgentCanvasContract.swift in Sources */,
 				B00200000000000000000002 /* AgentSurfaceStore.swift in Sources */,
 				B00200000000000000000003 /* AgentSurfaceRenderer.swift in Sources */,
@@ -373,6 +380,7 @@
 			files = (
 				B0010000000000000000000F /* ModelDecodingTests.swift in Sources */,
 				B00100000000000000000018 /* LiveCoachControllerTests.swift in Sources */,
+				B00200000000000000000021 /* ElevenLabsVoiceTests.swift in Sources */,
 				B00200000000000000000005 /* AgentCanvasContractTests.swift in Sources */,
 				B00200000000000000000006 /* AgentCanvasIntegrationTests.swift in Sources */,
 			);

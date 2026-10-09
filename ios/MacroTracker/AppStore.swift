@@ -108,6 +108,8 @@ final class AppStore: ObservableObject {
             if requestedIsToday {
                 hasAccountResponse = true
                 accountCanvasProtocol = loadedDay.canvasProtocol
+                // Cache the server's voice provider; it applies on next launch.
+                VoiceProviderPreference.cacheServerValue(loadedDay.voiceProvider)
                 accountHasTargets = loadedDay.hasTargets
                 accountTargetCalories = loadedDay.targets.calories
             }

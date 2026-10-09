@@ -336,6 +336,14 @@ def _full_query_relevant(query: str, food: Mapping[str, Any]) -> bool:
     candidate_tokens -= {"raw", "fresh"}
     if query_tokens and query_tokens == candidate_tokens:
         return True
+    # A provider's brand field is metadata, never a contradiction: a query that
+    # exactly matches the item NAME auto-matches even when the brand is unspoken
+    # ("crunchwrap supreme" vs Taco Bell's "Crunchwrap Supreme").
+    name_tokens = {_canon_food_token(w)
+                   for w in normalize_food_name(str(food.get("food_name") or "")).split()
+                   if len(w) > 1 and w not in _CONNECTIVES} - {"raw", "fresh"}
+    if query_tokens and query_tokens == name_tokens:
+        return True
     brand_tokens = _canon_food_tokens(food.get("brand_name")) - _BRAND_FILLER
     anchored = query_tokens & brand_tokens
     if not anchored:

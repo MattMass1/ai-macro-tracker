@@ -181,7 +181,7 @@ def _configure(monkeypatch, **overrides):
     monkeypatch.setattr(srv, "CONFIG", cfg)
 
 
-def test_token_route_owner_only_and_flag_gated(monkeypatch):
+def test_token_route_allows_any_authenticated_user_and_is_flag_gated(monkeypatch):
     owner, other = uuid4(), uuid4()
     store = AuthStore(owner, other)
     monkeypatch.setattr(srv, "_client", store)
@@ -201,8 +201,10 @@ def test_token_route_owner_only_and_flag_gated(monkeypatch):
         assert res.status_code == 200, res.text
         assert res.json()["token"] == "tok_live"
         assert "sk-secret" not in res.text  # key never leaves the server
-        # Non-owner is refused even with a valid device token.
-        assert client.post(url, headers={"Authorization": "Bearer other-tok"}).status_code == 403
+        # Any authenticated (invited) user may now mint a token, not just the owner.
+        other = client.post(url, headers={"Authorization": "Bearer other-tok"})
+        assert other.status_code == 200, other.text
+        assert other.json()["token"] == "tok_live"
 
 
 def test_token_route_409_when_provider_is_openai(monkeypatch):

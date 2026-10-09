@@ -7,21 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		B00200000000000000000001 /* AgentCanvasContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000001 /* AgentCanvasContract.swift */; };
-		B00200000000000000000002 /* AgentSurfaceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000002 /* AgentSurfaceStore.swift */; };
-		B00200000000000000000003 /* AgentSurfaceRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000003 /* AgentSurfaceRenderer.swift */; };
-		B00200000000000000000004 /* AgentCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000004 /* AgentCanvasView.swift */; };
-		B00200000000000000000005 /* AgentCanvasContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000005 /* AgentCanvasContractTests.swift */; };
-		B00200000000000000000006 /* AgentCanvasIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000006 /* AgentCanvasIntegrationTests.swift */; };
-		B00200000000000000000007 /* snapshot.json in Resources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000007 /* snapshot.json */; };
-		B0020000000000000000000B /* workout-labels.json in Resources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000008 /* workout-labels.json */; };
-		B0020000000000000000000C /* day-readiness.json in Resources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000009 /* day-readiness.json */; };
-		B0020000000000000000000D /* plan-edit.json in Resources */ = {isa = PBXBuildFile; fileRef = F0020000000000000000000A /* plan-edit.json */; };
-		B0020000000000000000000E /* day-plan.json in Resources */ = {isa = PBXBuildFile; fileRef = F0020000000000000000000B /* day-plan.json */; };
-		B0020000000000000000000F /* calorie-only-day.json in Resources */ = {isa = PBXBuildFile; fileRef = F0020000000000000000000C /* calorie-only-day.json */; };
-		B00200000000000000000008 /* A2UISwiftCore in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000001 /* A2UISwiftCore */; };
-		B00200000000000000000009 /* A2UISwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000002 /* A2UISwiftUI */; };
-		B0020000000000000000000A /* A2UISwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000003 /* A2UISwiftUI */; };
 		B00100000000000000000001 /* MacroTrackerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000001 /* MacroTrackerApp.swift */; };
 		B00100000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000002 /* ContentView.swift */; };
 		B00100000000000000000003 /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000003 /* AppStore.swift */; };
@@ -32,21 +17,36 @@
 		B00100000000000000000008 /* AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000008 /* AuthService.swift */; };
 		B00100000000000000000009 /* TodayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000009 /* TodayView.swift */; };
 		B0010000000000000000000B /* WorkoutsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000B /* WorkoutsView.swift */; };
-		B00300000000000000000001 /* ManualFoodView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00300000000000000000001 /* ManualFoodView.swift */; };
 		B0010000000000000000000C /* MacroRingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000C /* MacroRingsView.swift */; };
 		B0010000000000000000000D /* FoodComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000D /* FoodComponents.swift */; };
 		B0010000000000000000000F /* ModelDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000F /* ModelDecodingTests.swift */; };
 		B00100000000000000000010 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000013 /* Keychain.swift */; };
 		B00100000000000000000011 /* InviteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000014 /* InviteView.swift */; };
 		B00100000000000000000012 /* BarcodeScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000015 /* BarcodeScannerView.swift */; };
+		B00100000000000000000014 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000E /* Assets.xcassets */; };
 		B00100000000000000000018 /* LiveCoachControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001A /* LiveCoachControllerTests.swift */; };
 		B00100000000000000000019 /* LiveCoachController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001B /* LiveCoachController.swift */; };
 		B0010000000000000000001A /* LiveCoachTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001C /* LiveCoachTransport.swift */; };
 		B0010000000000000000001B /* LiveCoachAudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000001D /* LiveCoachAudioEngine.swift */; };
+		B00200000000000000000001 /* AgentCanvasContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000001 /* AgentCanvasContract.swift */; };
+		B00200000000000000000002 /* AgentSurfaceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000002 /* AgentSurfaceStore.swift */; };
+		B00200000000000000000003 /* AgentSurfaceRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000003 /* AgentSurfaceRenderer.swift */; };
+		B00200000000000000000004 /* AgentCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000004 /* AgentCanvasView.swift */; };
+		B00200000000000000000005 /* AgentCanvasContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000005 /* AgentCanvasContractTests.swift */; };
+		B00200000000000000000006 /* AgentCanvasIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000006 /* AgentCanvasIntegrationTests.swift */; };
+		B00200000000000000000007 /* snapshot.json in Resources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000007 /* snapshot.json */; };
+		B00200000000000000000008 /* A2UISwiftCore in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000001 /* A2UISwiftCore */; };
+		B00200000000000000000009 /* A2UISwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000002 /* A2UISwiftUI */; };
+		B0020000000000000000000A /* A2UISwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000003 /* A2UISwiftUI */; };
+		B0020000000000000000000B /* workout-labels.json in Resources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000008 /* workout-labels.json */; };
+		B0020000000000000000000C /* day-readiness.json in Resources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000009 /* day-readiness.json */; };
+		B0020000000000000000000D /* plan-edit.json in Resources */ = {isa = PBXBuildFile; fileRef = F0020000000000000000000A /* plan-edit.json */; };
+		B0020000000000000000000E /* day-plan.json in Resources */ = {isa = PBXBuildFile; fileRef = F0020000000000000000000B /* day-plan.json */; };
+		B0020000000000000000000F /* calorie-only-day.json in Resources */ = {isa = PBXBuildFile; fileRef = F0020000000000000000000C /* calorie-only-day.json */; };
 		B00200000000000000000020 /* ElevenLabsVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000020 /* ElevenLabsVoice.swift */; };
 		B00200000000000000000021 /* ElevenLabsVoiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000021 /* ElevenLabsVoiceTests.swift */; };
 		B00200000000000000000031 /* ElevenLabs in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000004 /* ElevenLabs */; };
-		B00100000000000000000014 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0010000000000000000000E /* Assets.xcassets */; };
+		B00300000000000000000001 /* ManualFoodView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00300000000000000000001 /* ManualFoodView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -60,18 +60,6 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		F00200000000000000000001 /* AgentCanvasContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCanvasContract.swift; sourceTree = "<group>"; };
-		F00200000000000000000002 /* AgentSurfaceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSurfaceStore.swift; sourceTree = "<group>"; };
-		F00200000000000000000003 /* AgentSurfaceRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSurfaceRenderer.swift; sourceTree = "<group>"; };
-		F00200000000000000000004 /* AgentCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCanvasView.swift; sourceTree = "<group>"; };
-		F00200000000000000000005 /* AgentCanvasContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCanvasContractTests.swift; sourceTree = "<group>"; };
-		F00200000000000000000006 /* AgentCanvasIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCanvasIntegrationTests.swift; sourceTree = "<group>"; };
-		F00200000000000000000007 /* snapshot.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = snapshot.json; path = "../docs/agent-canvas/fixtures/snapshot.json"; sourceTree = SOURCE_ROOT; };
-		F00200000000000000000008 /* workout-labels.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "workout-labels.json"; path = "../docs/agent-canvas/fixtures/workout-labels.json"; sourceTree = SOURCE_ROOT; };
-		F00200000000000000000009 /* day-readiness.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "day-readiness.json"; path = "../docs/agent-canvas/fixtures/day-readiness.json"; sourceTree = SOURCE_ROOT; };
-		F0020000000000000000000A /* plan-edit.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "plan-edit.json"; path = "../docs/agent-canvas/fixtures/plan-edit.json"; sourceTree = SOURCE_ROOT; };
-		F0020000000000000000000B /* day-plan.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "day-plan.json"; path = "../docs/agent-canvas/fixtures/day-plan.json"; sourceTree = SOURCE_ROOT; };
-		F0020000000000000000000C /* calorie-only-day.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "calorie-only-day.json"; path = "../docs/agent-canvas/fixtures/calorie-only-day.json"; sourceTree = SOURCE_ROOT; };
 		F00000000000000000000001 /* MacroTracker.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MacroTracker.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F00000000000000000000002 /* MacroTrackerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MacroTrackerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F00100000000000000000001 /* MacroTrackerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacroTrackerApp.swift; sourceTree = "<group>"; };
@@ -84,7 +72,6 @@
 		F00100000000000000000008 /* AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthService.swift; sourceTree = "<group>"; };
 		F00100000000000000000009 /* TodayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TodayView.swift; sourceTree = "<group>"; };
 		F0010000000000000000000B /* WorkoutsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutsView.swift; sourceTree = "<group>"; };
-		F00300000000000000000001 /* ManualFoodView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualFoodView.swift; sourceTree = "<group>"; };
 		F0010000000000000000000C /* MacroRingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacroRingsView.swift; sourceTree = "<group>"; };
 		F0010000000000000000000D /* FoodComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoodComponents.swift; sourceTree = "<group>"; };
 		F0010000000000000000000E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -98,8 +85,21 @@
 		F0010000000000000000001B /* LiveCoachController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachController.swift; sourceTree = "<group>"; };
 		F0010000000000000000001C /* LiveCoachTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachTransport.swift; sourceTree = "<group>"; };
 		F0010000000000000000001D /* LiveCoachAudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCoachAudioEngine.swift; sourceTree = "<group>"; };
+		F00200000000000000000001 /* AgentCanvasContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCanvasContract.swift; sourceTree = "<group>"; };
+		F00200000000000000000002 /* AgentSurfaceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSurfaceStore.swift; sourceTree = "<group>"; };
+		F00200000000000000000003 /* AgentSurfaceRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSurfaceRenderer.swift; sourceTree = "<group>"; };
+		F00200000000000000000004 /* AgentCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCanvasView.swift; sourceTree = "<group>"; };
+		F00200000000000000000005 /* AgentCanvasContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCanvasContractTests.swift; sourceTree = "<group>"; };
+		F00200000000000000000006 /* AgentCanvasIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCanvasIntegrationTests.swift; sourceTree = "<group>"; };
+		F00200000000000000000007 /* snapshot.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = snapshot.json; path = "../docs/agent-canvas/fixtures/snapshot.json"; sourceTree = SOURCE_ROOT; };
+		F00200000000000000000008 /* workout-labels.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "workout-labels.json"; path = "../docs/agent-canvas/fixtures/workout-labels.json"; sourceTree = SOURCE_ROOT; };
+		F00200000000000000000009 /* day-readiness.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "day-readiness.json"; path = "../docs/agent-canvas/fixtures/day-readiness.json"; sourceTree = SOURCE_ROOT; };
+		F0020000000000000000000A /* plan-edit.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "plan-edit.json"; path = "../docs/agent-canvas/fixtures/plan-edit.json"; sourceTree = SOURCE_ROOT; };
+		F0020000000000000000000B /* day-plan.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "day-plan.json"; path = "../docs/agent-canvas/fixtures/day-plan.json"; sourceTree = SOURCE_ROOT; };
+		F0020000000000000000000C /* calorie-only-day.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "calorie-only-day.json"; path = "../docs/agent-canvas/fixtures/calorie-only-day.json"; sourceTree = SOURCE_ROOT; };
 		F00200000000000000000020 /* ElevenLabsVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ElevenLabsVoice.swift; sourceTree = "<group>"; };
 		F00200000000000000000021 /* ElevenLabsVoiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ElevenLabsVoiceTests.swift; sourceTree = "<group>"; };
+		F00300000000000000000001 /* ManualFoodView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualFoodView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -308,13 +308,13 @@
 				Base,
 			);
 			mainGroup = A10000000000000000000000;
-			productRefGroup = A10000000000000000000008 /* Products */;
-			projectDirPath = "";
-			projectRoot = "";
 			packageReferences = (
 				A20000000000000000000001 /* XCRemoteSwiftPackageReference "a2ui-swift" */,
 				A20000000000000000000002 /* XCRemoteSwiftPackageReference "elevenlabs-swift-sdk" */,
 			);
+			productRefGroup = A10000000000000000000008 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
 			targets = (
 				A00000000000000000000001 /* MacroTracker */,
 				A00000000000000000000002 /* MacroTrackerTests */,
@@ -532,20 +532,42 @@
 		A20000000000000000000001 /* XCRemoteSwiftPackageReference "a2ui-swift" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/BBC6BAE9/a2ui-swift.git";
-			requirement = { kind = revision; revision = 4af5dda15dd050e091a80026b940cd41f8d5b93c; };
+			requirement = {
+				kind = revision;
+				revision = 4af5dda15dd050e091a80026b940cd41f8d5b93c;
+			};
 		};
 		A20000000000000000000002 /* XCRemoteSwiftPackageReference "elevenlabs-swift-sdk" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/elevenlabs/elevenlabs-swift-sdk.git";
-			requirement = { kind = upToNextMajorVersion; minimumVersion = 3.4.0; };
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.4.0;
+			};
 		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		A30000000000000000000001 /* A2UISwiftCore */ = { isa = XCSwiftPackageProductDependency; package = A20000000000000000000001; productName = A2UISwiftCore; };
-		A30000000000000000000002 /* A2UISwiftUI */ = { isa = XCSwiftPackageProductDependency; package = A20000000000000000000001; productName = A2UISwiftUI; };
-		A30000000000000000000003 /* A2UISwiftUI */ = { isa = XCSwiftPackageProductDependency; package = A20000000000000000000001; productName = A2UISwiftUI; };
-		A30000000000000000000004 /* ElevenLabs */ = { isa = XCSwiftPackageProductDependency; package = A20000000000000000000002; productName = ElevenLabs; };
+		A30000000000000000000001 /* A2UISwiftCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A20000000000000000000001 /* XCRemoteSwiftPackageReference "a2ui-swift" */;
+			productName = A2UISwiftCore;
+		};
+		A30000000000000000000002 /* A2UISwiftUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A20000000000000000000001 /* XCRemoteSwiftPackageReference "a2ui-swift" */;
+			productName = A2UISwiftUI;
+		};
+		A30000000000000000000003 /* A2UISwiftUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A20000000000000000000001 /* XCRemoteSwiftPackageReference "a2ui-swift" */;
+			productName = A2UISwiftUI;
+		};
+		A30000000000000000000004 /* ElevenLabs */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A20000000000000000000002 /* XCRemoteSwiftPackageReference "elevenlabs-swift-sdk" */;
+			productName = ElevenLabs;
+		};
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A00000000000000000000000 /* Project object */;

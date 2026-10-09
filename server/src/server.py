@@ -2966,9 +2966,19 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                     "operation_id": operation_id, "question": question,
                     "confirmation": question}
         if unresolved:
-            question = f"I couldn't verify {unresolved[0]}. What exact food or label should I use?"
+            # Offer the closest provider variants instead of demanding a label.
+            try:
+                options = await food_lookup.fatsecret_name_options(unresolved[0])
+            except Exception:
+                options = []
+            if len(options) >= 2:
+                question = f"For {unresolved[0]}, did you mean " + " or ".join(options) + "?"
+            elif len(options) == 1:
+                question = f"I couldn't verify {unresolved[0]}. Did you mean {options[0]}?"
+            else:
+                question = f"I couldn't verify {unresolved[0]}. What exact food or label should I use?"
             return {"status": "needs_clarification", "operation_id": operation_id,
-                    "unresolved": unresolved,
+                    "unresolved": unresolved, "options": options,
                     "question": question, "confirmation": question}
         resolved_components = [item for item in resolved if item is not None]
         name = " + ".join(item["name"] for item in resolved_components)

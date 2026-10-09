@@ -374,6 +374,32 @@ async def search_fatsecret(query: str) -> dict[str, Any] | None:
     return None
 
 
+async def fatsecret_name_options(query: str, limit: int = 3) -> list[str]:
+    """Closest provider names for a failed resolution, so the coach can ask one
+    specific pick-a-variant question instead of demanding a label. Display
+    names only; the user's pick is resolved and portioned like any request."""
+    if _fatsecret_provider_mode() is None:
+        return []
+    try:
+        search = await _fatsecret_request({"method": "foods.search",
+                                           "search_expression": query, "max_results": 8})
+    except Exception:
+        return []
+    options: list[str] = []
+    for food in _unwrap_foods(search):
+        if not isinstance(food, Mapping) or not _fatsecret_relevant(query, food):
+            continue
+        name = str(food.get("food_name") or "").strip()
+        brand = str(food.get("brand_name") or "").strip()
+        label = (f"{brand} {name}".strip()
+                 if brand and brand.casefold() not in name.casefold() else name)
+        if label and label.casefold() not in {option.casefold() for option in options}:
+            options.append(label[:80])
+        if len(options) >= limit:
+            break
+    return options
+
+
 def _macros(values: Mapping[str, Any]) -> dict[str, float] | None:
     result = {}
     for key in MACRO_KEYS:

@@ -36,7 +36,6 @@
 		B00200000000000000000006 /* AgentCanvasIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000006 /* AgentCanvasIntegrationTests.swift */; };
 		B00200000000000000000007 /* snapshot.json in Resources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000007 /* snapshot.json */; };
 		B00200000000000000000008 /* A2UISwiftCore in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000001 /* A2UISwiftCore */; };
-		B00200000000000000000009 /* A2UISwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000002 /* A2UISwiftUI */; };
 		B0020000000000000000000A /* A2UISwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000003 /* A2UISwiftUI */; };
 		B0020000000000000000000B /* workout-labels.json in Resources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000008 /* workout-labels.json */; };
 		B0020000000000000000000C /* day-readiness.json in Resources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000009 /* day-readiness.json */; };
@@ -46,7 +45,10 @@
 		B00200000000000000000020 /* ElevenLabsVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000020 /* ElevenLabsVoice.swift */; };
 		B00200000000000000000021 /* ElevenLabsVoiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000021 /* ElevenLabsVoiceTests.swift */; };
 		B00200000000000000000031 /* ElevenLabs in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000004 /* ElevenLabs */; };
+		B00200000000000000000050 /* LiveKitWebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000005 /* LiveKitWebRTC */; };
+		B00200000000000000000051 /* LiveKitUniFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000006 /* LiveKitUniFFI */; };
 		B00300000000000000000001 /* ManualFoodView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00300000000000000000001 /* ManualFoodView.swift */; };
+		FAFF9FF93079910C00277000 /* A2UISwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = FAFF9FF83079910C00277000 /* A2UISwiftUI */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -107,9 +109,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FAFF9FF93079910C00277000 /* A2UISwiftUI in Frameworks */,
 				B00200000000000000000008 /* A2UISwiftCore in Frameworks */,
-				B00200000000000000000009 /* A2UISwiftUI in Frameworks */,
 				B00200000000000000000031 /* ElevenLabs in Frameworks */,
+				B00200000000000000000050 /* LiveKitWebRTC in Frameworks */,
+				B00200000000000000000051 /* LiveKitUniFFI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -130,6 +134,7 @@
 				A10000000000000000000001 /* MacroTracker */,
 				A10000000000000000000007 /* MacroTrackerTests */,
 				F00100000000000000000011 /* Config.xcconfig */,
+				FAFF9FF73079910B00277000 /* Frameworks */,
 				A10000000000000000000008 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -234,6 +239,13 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		FAFF9FF73079910B00277000 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -252,8 +264,10 @@
 			name = MacroTracker;
 			packageProductDependencies = (
 				A30000000000000000000001 /* A2UISwiftCore */,
-				A30000000000000000000002 /* A2UISwiftUI */,
 				A30000000000000000000004 /* ElevenLabs */,
+				A30000000000000000000005 /* LiveKitWebRTC */,
+				A30000000000000000000006 /* LiveKitUniFFI */,
+				FAFF9FF83079910C00277000 /* A2UISwiftUI */,
 			);
 			productName = MacroTracker;
 			productReference = F00000000000000000000001 /* MacroTracker.app */;
@@ -311,6 +325,8 @@
 			packageReferences = (
 				A20000000000000000000001 /* XCRemoteSwiftPackageReference "a2ui-swift" */,
 				A20000000000000000000002 /* XCRemoteSwiftPackageReference "elevenlabs-swift-sdk" */,
+				A20000000000000000000003 /* XCRemoteSwiftPackageReference "webrtc-xcframework" */,
+				A20000000000000000000004 /* XCRemoteSwiftPackageReference "livekit-uniffi-xcframework" */,
 			);
 			productRefGroup = A10000000000000000000008 /* Products */;
 			projectDirPath = "";
@@ -436,6 +452,10 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = MacroTracker/Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.biz21.macrotracker;
 				PRODUCT_NAME = MacroTracker;
 				SDKROOT = iphoneos;
@@ -455,6 +475,10 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = MacroTracker/Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.biz21.macrotracker;
 				PRODUCT_NAME = MacroTracker;
 				SDKROOT = iphoneos;
@@ -545,6 +569,22 @@
 				minimumVersion = 3.4.0;
 			};
 		};
+		A20000000000000000000003 /* XCRemoteSwiftPackageReference "webrtc-xcframework" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/livekit/webrtc-xcframework.git";
+			requirement = {
+				kind = exactVersion;
+				version = 150.7871.2;
+			};
+		};
+		A20000000000000000000004 /* XCRemoteSwiftPackageReference "livekit-uniffi-xcframework" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/livekit/livekit-uniffi-xcframework.git";
+			requirement = {
+				kind = exactVersion;
+				version = 0.1.9;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -552,11 +592,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A20000000000000000000001 /* XCRemoteSwiftPackageReference "a2ui-swift" */;
 			productName = A2UISwiftCore;
-		};
-		A30000000000000000000002 /* A2UISwiftUI */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A20000000000000000000001 /* XCRemoteSwiftPackageReference "a2ui-swift" */;
-			productName = A2UISwiftUI;
 		};
 		A30000000000000000000003 /* A2UISwiftUI */ = {
 			isa = XCSwiftPackageProductDependency;
@@ -567,6 +602,21 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A20000000000000000000002 /* XCRemoteSwiftPackageReference "elevenlabs-swift-sdk" */;
 			productName = ElevenLabs;
+		};
+		A30000000000000000000005 /* LiveKitWebRTC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A20000000000000000000003 /* XCRemoteSwiftPackageReference "webrtc-xcframework" */;
+			productName = LiveKitWebRTC;
+		};
+		A30000000000000000000006 /* LiveKitUniFFI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A20000000000000000000004 /* XCRemoteSwiftPackageReference "livekit-uniffi-xcframework" */;
+			productName = LiveKitUniFFI;
+		};
+		FAFF9FF83079910C00277000 /* A2UISwiftUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A20000000000000000000001 /* XCRemoteSwiftPackageReference "a2ui-swift" */;
+			productName = A2UISwiftUI;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

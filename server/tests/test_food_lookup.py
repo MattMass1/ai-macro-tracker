@@ -62,39 +62,39 @@ async def test_allow_web_false_keeps_provider_chain_and_blocks_web(monkeypatch, 
     async def miss(_query): return None
     async def provider(query):
         calls.append(("provider", query))
-        return {"name": query, "source": "OpenFoodFacts: fixture",
+        return {"name": query, "source": "FatSecret: fixture",
                 "macros_per_serving": {"calories": 10, "protein": 1,
                                        "carbs": 1, "fat": 0, "fiber": 0}}
     async def forbidden(_query):
         raise AssertionError("allow_web=False must block hosted web")
     async def catalog_miss(_query): return None
     monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", miss)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", provider)
+    monkeypatch.setattr(food_lookup, "_fatsecret_provider_mode", lambda: "oauth1")
+    monkeypatch.setattr(food_lookup, "search_fatsecret", provider)
     monkeypatch.setattr(food_lookup.web_nutrition_lookup, "lookup", forbidden)
     found = await food_lookup.resolve_food(
         "fixture provider food", atomic=True, allow_web=False,
         catalog_lookup=catalog_miss if catalog else None,
     )
-    assert found["source"] == "OpenFoodFacts: fixture"
+    assert found["source"] == "FatSecret: fixture"
     assert calls[0] == ("provider", "fixture provider food")
     assert len(calls) <= 4
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("catalog", [True, False])
-async def test_allow_web_false_keeps_curated_whole_restaurant_order(monkeypatch, catalog):
-    async def forbidden(_query):
-        raise AssertionError("curated whole order must not reach providers or web")
-    monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", forbidden)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", forbidden)
-    monkeypatch.setattr(food_lookup.web_nutrition_lookup, "lookup", forbidden)
+async def test_curated_menu_no_longer_hijacks_cross_brand_items(monkeypatch):
+    """Regression (spec 2026-10-09): a Panera item containing another chain's
+    name must never resolve through that chain's curated menu. With every
+    network layer missing, the lookup now honestly fails instead of returning
+    Chipotle macros for a Panera sandwich."""
+    async def miss(_query): return None
+    monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", miss)
+    monkeypatch.setattr(food_lookup, "_fatsecret_provider_mode", lambda: None)
+    monkeypatch.setattr(food_lookup.web_nutrition_lookup, "lookup", miss)
     found = await food_lookup.resolve_food(
-        "chick fil a grilled club and 8ct grilled nuggets",
-        atomic=True, allow_web=False,
-        catalog_lookup=(lambda _q: asyncio.sleep(0)) if catalog else None,
+        "panera chipotle chicken avocado melt", atomic=True, allow_web=False,
     )
-    assert found is not None
-    assert found["source"].startswith("Restaurant menu:")
+    assert found is None  # no curated cross-brand result, no invented macros
 
 
 @pytest.mark.asyncio

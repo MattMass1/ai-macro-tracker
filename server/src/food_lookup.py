@@ -9,13 +9,14 @@ from food_catalog import normalize_food_name
 import cofid_lookup
 import web_nutrition_lookup
 from generic_foods import COFID, FOODS as GENERIC_WHOLE_FOODS
-from restaurant_menu import restaurant_lookup
 
 logger = logging.getLogger(__name__)
 
 TIMEOUT = 5.0
 PROVIDER_DEADLINE_SECONDS = 2.5
-RESOLUTION_DEADLINE_SECONDS = 6.0
+# Covers the provider phase (2.5s) plus the web fallback's own 12s budget.
+# Only lookups that actually reach the web phase approach this cap.
+RESOLUTION_DEADLINE_SECONDS = 16.0
 PROVIDER_PREFERENCE_GRACE_SECONDS = 0.15
 USER_AGENT = "MacroCoach/1.0 (ai-macro-tracker; contact@biz21.com)"
 OFF_SEARCH_URL = "https://world.openfoodfacts.org/cgi/search.pl"
@@ -246,17 +247,48 @@ def _unwrap_food(body: Any) -> Mapping[str, Any] | None:
     return value if isinstance(value, Mapping) else None
 
 
+# Spoken-food synonym canonicalization. Small and curated on purpose: each
+# entry maps spelling variants of the SAME identity, never similar foods.
+_FOOD_SYNONYMS = {
+    "barbecue": "bbq", "barbeque": "bbq", "bar-b-q": "bbq",
+    "mayonnaise": "mayo",
+    "veggie": "vegetable", "veggies": "vegetable",
+    "doughnut": "donut", "doughnuts": "donut",
+    "mac": "macaroni",
+}
+# Corporate filler words that appear in provider brand strings but carry no
+# food identity ("Panera Bread" vs the spoken "Panera").
+_BRAND_FILLER = frozenset({"bread", "inc", "co", "llc", "restaurant", "restaurants", "the"})
+# Connectives carry no food identity on either side of a match.
+_CONNECTIVES = frozenset({"and", "with", "plus", "of", "on", "in"})
+
+
+def _canon_food_token(token: str) -> str:
+    token = _FOOD_SYNONYMS.get(token, token)
+    if len(token) > 3 and token.endswith("es"):
+        return _FOOD_SYNONYMS.get(token[:-2], token[:-2])
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return _FOOD_SYNONYMS.get(token[:-1], token[:-1])
+    return token
+
+
+def _canon_food_tokens(text: Any) -> set[str]:
+    """Meaningful, synonym/plural-canonical identity tokens of a food string."""
+    return {_canon_food_token(word) for word in normalize_food_name(str(text or "")).split()
+            if word not in _UNIT_WORDS and word not in _CONNECTIVES and len(word) > 1}
+
+
 def _fatsecret_relevant(query: str, food: Mapping[str, Any]) -> bool:
-    """Require exact normalized name/brand identity for provider text search."""
-    normalized_query = normalize_food_name(query)
-    name = normalize_food_name(str(food.get("food_name") or ""))
-    brand = normalize_food_name(str(food.get("brand_name") or ""))
-    if not normalized_query or not name:
+    """Search-stage gate: the candidate must cover the query identity (synonym
+    and plural tolerant). Final auto-acceptance stays with the stricter
+    `_full_query_relevant`; this gate only decides which hit to inspect."""
+    query_tokens = _canon_food_tokens(query)
+    candidate_tokens = (_canon_food_tokens(food.get("food_name"))
+                        | _canon_food_tokens(food.get("brand_name")))
+    if not query_tokens or not candidate_tokens:
         return False
-    accepted = {name}
-    if brand:
-        accepted.update((f"{brand} {name}", f"{name} {brand}"))
-    return normalized_query in accepted
+    overlap = len(query_tokens & candidate_tokens)
+    return query_tokens <= candidate_tokens or overlap / len(query_tokens) >= 0.6
 
 
 def _relevant(query: str, food: Mapping[str, Any]) -> bool:
@@ -273,29 +305,43 @@ def _relevant(query: str, food: Mapping[str, Any]) -> bool:
 
 
 def _full_query_relevant(query: str, food: Mapping[str, Any]) -> bool:
-    """Require the original food identity, including separate brand evidence."""
+    """Final auto-acceptance gate for a provider hit.
+
+    Two ways in, both conservative:
+    1. Identity equality (synonym/plural tolerant) -- the historical rule.
+    2. Brand-anchored coverage: the query names the candidate's brand AND the
+       candidate covers every remaining query token AND the query carries at
+       least two non-brand identity tokens. "panera bbq smokehouse sandwich"
+       accepts the provider's "Panera Bread BBQ Smokehouse Chicken Sandwich";
+       a bare "panera sandwich" does NOT auto-match anything.
+    Unbranded partials ("chicken" vs "Fried Chicken Nuggets") never auto-match.
+    """
     _quantity, _unit, query_identity = _clean_component(query)
     query_words = normalize_food_name(query_identity or query).split()
     candidate_words = normalize_food_name(" ".join(
         str(food.get(key) or "") for key in ("food_name", "brand_name", "food_description")
     )).split()
-    meaningful = query_words
 
-    def identity(words: list[str]) -> set[str]:
-        return {word[:-1] if len(word) > 3 and word.endswith("s") else word for word in words}
-
-    query_ratios = {pair for pair in _LEAN_FAT_PAIRS if f"{pair[0]}/{pair[1]}" in meaningful}
+    query_ratios = {pair for pair in _LEAN_FAT_PAIRS if f"{pair[0]}/{pair[1]}" in query_words}
     candidate_ratios = {pair for pair in _LEAN_FAT_PAIRS if f"{pair[0]}/{pair[1]}" in candidate_words}
     if query_ratios and query_ratios != candidate_ratios:
         return False
-    candidate_identity = set(identity(candidate_words))
+    query_tokens = {_canon_food_token(w) for w in query_words
+                    if len(w) > 1 and w not in _CONNECTIVES}
+    candidate_tokens = {_canon_food_token(w) for w in candidate_words
+                        if len(w) > 1 and w not in _CONNECTIVES}
     # Providers often append a neutral state descriptor to a whole food.
     # Product-making modifiers (coated, meatballs, flavored, etc.) remain
     # identity-bearing and therefore cannot be ignored.
-    candidate_identity -= {"raw", "fresh"}
-    if meaningful and set(identity(meaningful)) == candidate_identity:
+    candidate_tokens -= {"raw", "fresh"}
+    if query_tokens and query_tokens == candidate_tokens:
         return True
-    return False
+    brand_tokens = _canon_food_tokens(food.get("brand_name")) - _BRAND_FILLER
+    anchored = query_tokens & brand_tokens
+    if not anchored:
+        return False
+    remaining = query_tokens - brand_tokens
+    return len(remaining) >= 2 and remaining <= (candidate_tokens | _BRAND_FILLER)
 
 
 async def search_fatsecret(query: str) -> dict[str, Any] | None:
@@ -648,12 +694,15 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,
             found = await catalog_lookup(query)
             if found: return found
         except Exception: pass
-    curated = restaurant_lookup(query)
-    if curated: return curated
+    # Two retrieval layers only (spec 2026-10-09): FatSecret brand-first, then
+    # the web fallback. The curated restaurant menu is no longer consulted --
+    # its chain-alias matching cross-contaminated brands (a Panera "Chipotle
+    # Chicken Avocado Melt" selected Chipotle's menu). OFF text search is out
+    # of the chain too; the OFF barcode path is a separate feature and stays.
     cofid = await cofid_lookup.lookup(query)
     if cofid: return cofid
     fatsecret_enabled = _fatsecret_provider_mode() is not None
-    providers = [search_fatsecret, search_openfoodfacts] if fatsecret_enabled else [search_openfoodfacts]
+    providers = [search_fatsecret] if fatsecret_enabled else []
     searches = [
         (variant_index, provider_index, provider(variant))
         for variant_index, variant in enumerate(_query_variants(query))

@@ -17,8 +17,10 @@ import unicodedata
 import httpx
 
 RESPONSES_URL = "https://api.openai.com/v1/responses"
-# Leaves cleanup/headroom inside food_lookup's six-second operation deadline.
-TIMEOUT_SECONDS = 2.5
+# The web fallback owns a real budget: a Responses call with web_search takes
+# 5-12s. food_lookup's resolution deadline accounts for this phase; strangling
+# it to 2.5s made the fallback time out on virtually every live lookup.
+TIMEOUT_SECONDS = 12.0
 CACHE_TTL_SECONDS = 3600.0
 NEGATIVE_CACHE_TTL_SECONDS = 15.0
 MAX_RESPONSE_BYTES = 262_144

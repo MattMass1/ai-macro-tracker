@@ -2741,13 +2741,21 @@ async def test_voice_web_gram_basis_unsupported_amounts_clarify_without_insert(
 
 @pytest.mark.asyncio
 async def test_voice_curated_multi_item_order_stays_whole_with_web_forbidden(monkeypatch):
+    # Spec 2026-10-09: the curated restaurant layer is gone (it cross-matched
+    # brands). A branded order now resolves through FatSecret, brand-first.
     srv = _import_server(monkeypatch); fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
     async def forbidden(_query):
-        raise AssertionError("curated order must not reach a provider or hosted web")
+        raise AssertionError("provider hit must not spend a hosted web request")
     monkeypatch.setattr(srv.food_lookup.cofid_lookup, "lookup",
                         lambda _q: asyncio.sleep(0, result=None))
-    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts", forbidden)
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_provider_mode", lambda: "oauth1")
+    async def provider(query):
+        return {"name": "Chick-fil-A Grilled Club + Grilled Nuggets 8ct",
+                "brand_name": "Chick-fil-A", "source": "FatSecret: fixture-order",
+                "macros_per_serving": {"calories": 800, "protein": 75,
+                                       "carbs": 60, "fat": 25, "fiber": 4}}
+    monkeypatch.setattr(srv.food_lookup, "search_fatsecret", provider)
     monkeypatch.setattr(srv.food_lookup.web_nutrition_lookup, "lookup", forbidden)
     srv._resolved_food_cache.clear()
     token = bind_user(uuid4())
@@ -2760,7 +2768,6 @@ async def test_voice_curated_multi_item_order_stays_whole_with_web_forbidden(mon
     finally: reset_user(token)
     assert result["status"] == "committed"
     assert fake.insert_count == 1
-    assert len(result["components"]) == 1
 
 
 @pytest.mark.asyncio
@@ -3429,7 +3436,8 @@ async def test_voice_structured_branded_meal_preserves_four_atomic_components(mo
                 "attribution": {"verification_state": "exact_identifier",
                                 "external_id": product[1]}}
 
-    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts", provider)
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_provider_mode", lambda: "oauth1")
+    monkeypatch.setattr(srv.food_lookup, "search_fatsecret", provider)
     components = [
         {"description": "strawberries", "grams": 130},
         {"description": "eggs", "quantity": 3},

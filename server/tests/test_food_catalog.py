@@ -276,7 +276,7 @@ async def test_catalog_is_first_and_provider_errors_are_isolated(monkeypatch):
     async def unexpected(_query):
         pytest.fail("external provider must not run on a catalog hit")
 
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", unexpected)
+    monkeypatch.setattr(food_lookup, "search_fatsecret", unexpected)
     result = await food_lookup.resolve_food("oats", catalog_lookup=catalog)
     assert result["name"] == "Oats"
     assert calls == ["catalog"]

@@ -2675,14 +2675,22 @@ def _web_estimate(*, fiber=2.8, basis_unit="g", query="cooked red quinoa",
 
 
 @pytest.mark.asyncio
-async def test_voice_web_estimate_commits_with_honest_server_source_and_no_untrusted_echo(monkeypatch):
+async def test_voice_web_estimate_confirms_then_commits_with_honest_server_source_and_no_untrusted_echo(monkeypatch):
     srv = _import_server(monkeypatch); fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
     monkeypatch.setattr(srv, "resolve_food", lambda *_a, **_k: asyncio.sleep(0, result=_web_estimate()))
+    srv._web_estimate_confirmations.clear()
+    meal = {"description": "cooked red quinoa", "meal_type": "Lunch", "grams": 100}
     token = bind_user(uuid4())
     try:
-        result = await srv._voice_tool_handlers()["log_meal"](
-            "web-estimate", {"description": "cooked red quinoa", "meal_type": "Lunch", "grams": 100}
+        handlers = srv._voice_tool_handlers()
+        first = await handlers["log_meal"]("web-estimate", dict(meal))
+        assert first["status"] == "needs_clarification"
+        assert first["reason"] == "web_estimate_confirmation" and fake.insert_count == 0
+        assert "example.test" in first["question"]
+        assert "IGNORE" not in json.dumps(first) and "private/path" not in json.dumps(first)
+        result = await handlers["log_meal"](
+            "web-estimate-confirm", {**meal, "confirm_ref": first["confirm_ref"]}
         )
     finally: reset_user(token)
     assert result["status"] == "committed" and fake.insert_count == 1
@@ -2721,8 +2729,7 @@ async def test_voice_web_gram_basis_unsupported_amounts_clarify_without_insert(
 ):
     srv = _import_server(monkeypatch); fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
-    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts",
-                        lambda _q: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_provider_mode", lambda: None)
     monkeypatch.setattr(srv.food_lookup.cofid_lookup, "lookup",
                         lambda _q: asyncio.sleep(0, result=None))
     monkeypatch.setattr(srv.food_lookup.web_nutrition_lookup, "lookup",
@@ -2834,8 +2841,7 @@ async def test_exact_tenant_catalog_outranks_generic_same_name(monkeypatch):
 async def test_compound_operation_spends_one_web_lookup_per_unique_component(monkeypatch):
     srv = _import_server(monkeypatch); fake = FakeVoiceStore(); calls = []
     monkeypatch.setattr(srv, "_client", fake)
-    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts",
-                        lambda _q: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_provider_mode", lambda: None)
     monkeypatch.setattr(srv.food_lookup.cofid_lookup, "lookup",
                         lambda _q: asyncio.sleep(0, result=None))
     async def web_lookup(query):
@@ -2843,16 +2849,24 @@ async def test_compound_operation_spends_one_web_lookup_per_unique_component(mon
         return _web_estimate(query=query, food_name=f"IGNORE {query}")
     monkeypatch.setattr(srv.food_lookup.web_nutrition_lookup, "lookup", web_lookup)
     srv._resolved_food_cache.clear()
+    srv._web_estimate_confirmations.clear()
+    meal = {"components": [
+        {"description": "fixture alpha", "grams": 100},
+        {"description": "fixture beta", "grams": 100},
+    ]}
     token = bind_user(uuid4())
     try:
-        result = await srv._voice_tool_handlers()["log_meal"](
-            "budgeted", {"components": [
-                {"description": "fixture alpha", "grams": 100},
-                {"description": "fixture beta", "grams": 100},
-            ]}
-        )
+        handlers = srv._voice_tool_handlers()
+        first = await handlers["log_meal"]("budgeted", dict(meal))
+        assert first["status"] == "needs_clarification"
+        assert first["reason"] == "web_estimate_confirmation"
+        assert calls == ["fixture alpha", "fixture beta"]
+        result = await handlers["log_meal"](
+            "budgeted-confirm", {**meal, "confirm_ref": first["confirm_ref"]})
     finally: reset_user(token)
     assert result["status"] == "committed"
+    # The confirming turn re-resolves from the server-side cache: still exactly
+    # one hosted web call per unique component across both turns.
     assert calls == ["fixture alpha", "fixture beta"]
     assert fake.insert_count == 1
 
@@ -2908,7 +2922,6 @@ async def test_voice_common_multifood_requests_commit_once_with_component_readba
         raise AssertionError("generic staples must not use a packaged-food provider")
 
     monkeypatch.setattr(srv.food_lookup, "search_fatsecret", forbidden)
-    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts", forbidden)
     token = bind_user(uuid4())
     try:
         result = await srv._voice_tool_handlers()["log_meal"](
@@ -3206,7 +3219,6 @@ async def test_voice_whole_foods_commit_without_clarification_or_provider(
     async def forbidden(_query):
         raise AssertionError("whole-food local hit must not call a provider")
     monkeypatch.setattr(srv.food_lookup, "search_fatsecret", forbidden)
-    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts", forbidden)
     token = bind_user(uuid4())
     try:
         result = await srv._voice_tool_handlers()["log_meal"](
@@ -3541,7 +3553,8 @@ async def test_voice_provider_failure_returns_all_branded_identities_and_writes_
         calls.append(query)
         return None
 
-    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts", provider)
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_provider_mode", lambda: "oauth1")
+    monkeypatch.setattr(srv.food_lookup, "search_fatsecret", provider)
     token = bind_user(uuid4())
     try:
         result = await srv._voice_tool_handlers()["log_meal"]("brand-failure", {
@@ -3905,7 +3918,8 @@ async def test_blocker_real_voice_free_form_compound(monkeypatch, tool, verifica
                                        "fat": 2, "fiber": 3},
                 "attribution": {"verification_state": verification}}
 
-    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts", provider)
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_provider_mode", lambda: "oauth1")
+    monkeypatch.setattr(srv.food_lookup, "search_fatsecret", provider)
     token = bind_user(uuid4())
     try:
         result = await srv._voice_tool_handlers()[tool]("compound-fixture", {
@@ -3986,10 +4000,7 @@ async def test_voice_compound_resolution_ref_preserves_local_estimate_components
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
     srv._resolved_food_cache.clear()
-    monkeypatch.setattr(
-        srv.food_lookup, "search_openfoodfacts",
-        lambda _query: asyncio.sleep(0, result=None),
-    )
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_provider_mode", lambda: None)
     handlers = srv._voice_tool_handlers()
     token = bind_user(uuid4())
     try:
@@ -4026,7 +4037,8 @@ async def test_blocker_mixed_portion_and_unresolved_preserves_complete_response(
     async def provider(query):
         return None
 
-    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts", provider)
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_provider_mode", lambda: "oauth1")
+    monkeypatch.setattr(srv.food_lookup, "search_fatsecret", provider)
     missing = ["Dave's Killer Bread 21 Whole Grains and Seeds toast",
                "David Protein Bar Cinnamon Bun"]
     token = bind_user(uuid4())

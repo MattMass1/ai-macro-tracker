@@ -1076,8 +1076,8 @@ def _short_circuit_known_food(message: str) -> dict[str, Any] | None:
     """Deterministically match a known brand to its base macros.
 
     Branded items match only for single-food messages, so the parser handles
-    mixed meals like ``a Barebells and a banana``. Restaurant matches now live
-    in :mod:`restaurant_menu` and run at the start of the lookup cascade.
+    mixed meals like ``a Barebells and a banana``. Restaurant items resolve
+    through the two-layer lookup (FatSecret brand-first, then web estimate).
     """
     lowered = " ".join(message.split()).casefold()
 
@@ -2717,6 +2717,30 @@ async def _calorie_only_writes_open() -> bool:
         return False
 
 
+async def _closest_food_options(description: str) -> list[str]:
+    try:
+        return await food_lookup.fatsecret_name_options(description)
+    except Exception:
+        return []
+
+
+def _unresolved_food_question(description: str, options: list[str]) -> str:
+    """One specific question for food neither layer could verify. It never asks
+    the user to supply a label and never invents numbers; a lookup outage is
+    named as an outage, not disguised as "not found"."""
+    if len(options) >= 2:
+        return f"For {description}, did you mean " + " or ".join(options) + "?"
+    if len(options) == 1:
+        return f"I couldn't verify {description}. Did you mean {options[0]}?"
+    _quantity, _unit, identity = food_lookup._clean_component(description)
+    reason = food_lookup.web_nutrition_lookup.recent_failure(identity or description)
+    if reason in food_lookup.web_nutrition_lookup.INFRASTRUCTURE_REASONS:
+        return (f"The nutrition lookup service was unreachable for {description}. "
+                "Try again in a moment.")
+    return (f"I couldn't verify {description}. What was it exactly: the brand, "
+            "the dish, or how it was prepared?")
+
+
 def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Awaitable[Any]]]:
     """Tenant-bound voice dispatch: the same four handlers the typed coach
     uses, reused as-is (immediate commit, no chat-turn staging) — except
@@ -2966,17 +2990,8 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                     "operation_id": operation_id, "question": question,
                     "confirmation": question}
         if unresolved:
-            # Offer the closest provider variants instead of demanding a label.
-            try:
-                options = await food_lookup.fatsecret_name_options(unresolved[0])
-            except Exception:
-                options = []
-            if len(options) >= 2:
-                question = f"For {unresolved[0]}, did you mean " + " or ".join(options) + "?"
-            elif len(options) == 1:
-                question = f"I couldn't verify {unresolved[0]}. Did you mean {options[0]}?"
-            else:
-                question = f"I couldn't verify {unresolved[0]}. What exact food or label should I use?"
+            options = await _closest_food_options(unresolved[0])
+            question = _unresolved_food_question(unresolved[0], options)
             return {"status": "needs_clarification", "operation_id": operation_id,
                     "unresolved": unresolved, "options": options,
                     "question": question, "confirmation": question}
@@ -3173,10 +3188,12 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                     "reason": "invalid_portion",
                     "question": "I found the food, but I couldn't use that portion. What amount should I use?",
                 }
+            options = await _closest_food_options(query)
             return {
                 "result": "not found",
                 "status": "needs_clarification",
-                "question": "What exact food or nutrition label should I use?",
+                "options": options,
+                "question": _unresolved_food_question(query, options),
             }
         resolution_ref = uuid4().hex
         if len(resolution_cache) >= 128:
@@ -3961,7 +3978,7 @@ async def api_elevenlabs_token(request: Request) -> Any:
         elevenlabs_voice.record_voice_session(
             conversation_id, current_user_id(), app_session_id=app_session_id
         )
-        logging.getLogger("mmacros.voice").info(
+        logging.getLogger("mmacros.voice").debug(
             "token minted conv=%s app_session=%s", conversation_id[:12], app_session_id)
     return result
 
@@ -3992,15 +4009,15 @@ async def api_elevenlabs_agent_turn(request: Request) -> Any:
     # app is viewing -- the same behavior the typed path already gets.
     app_session_id = elevenlabs_voice.resolve_voice_app_session(conversation_id.strip())
     _vlog = logging.getLogger("mmacros.voice")
-    _vlog.info("webhook conv=%s user_bound=%s app_session=%s",
-               conversation_id.strip()[:12], user_id is not None, app_session_id)
+    _vlog.debug("webhook conv=%s user_bound=%s app_session=%s",
+                conversation_id.strip()[:12], user_id is not None, app_session_id)
 
     async def turn_fn(session_id: str, turn_id: str, message: str) -> Any:
         result = await canvas_service().turn(session_id, turn_id, message, adapter="voice")
         surfaces = len(result.get("surfaces") or []) if isinstance(result, Mapping) else -1
         approval = bool(result.get("approval")) if isinstance(result, Mapping) else False
-        _vlog.info("voice turn ran session=%s surfaces=%d approval=%s",
-                   session_id, surfaces, approval)
+        _vlog.debug("voice turn ran session=%s surfaces=%d approval=%s",
+                    session_id, surfaces, approval)
         return result
 
     context_token = bind_user(user_id)

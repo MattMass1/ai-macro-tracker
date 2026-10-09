@@ -137,7 +137,10 @@ async def test_typed_and_voice_share_one_operation_and_replay_never_writes_twice
 
 
 @pytest.mark.asyncio
-async def test_canvas_real_food_handler_persists_web_result_only_as_unverified_estimate(monkeypatch):
+async def test_canvas_real_food_handler_web_estimate_needs_one_tap_then_logs_as_unverified(monkeypatch):
+    """Spec 2026-10-09: a web-assessed food is never auto-logged. The first
+    log_meal returns the estimate as a question + confirm_ref; the identical
+    call carrying that ref commits, labeled as an unverified web estimate."""
     import asyncio
     monkeypatch.setenv("DATABASE_URL", "postgresql://fixture.invalid/macro_tracker")
     monkeypatch.setenv("APP_SHARED_TOKEN", "fixture-shared-token")
@@ -148,26 +151,41 @@ async def test_canvas_real_food_handler_persists_web_result_only_as_unverified_e
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
     monkeypatch.setattr(srv, "resolve_food", lambda *_a, **_k: asyncio.sleep(0, result=_web_estimate()))
+    srv._web_estimate_confirmations.clear()
+    meal = {"description": "cooked red quinoa", "meal_type": "Lunch", "grams": 100}
+    stage: dict = {}
 
     async def agent(**kwargs):
-        lookup = await kwargs["handlers"]["lookup_food"]({
-            "query": "cooked red quinoa"
-        })
-        result = await kwargs["handlers"]["log_meal"]({
-            "description": "cooked red quinoa", "meal_type": "Lunch", "grams": 100
-        })
-        return result["confirmation"] + " " + json.dumps(lookup), []
+        handlers = kwargs["handlers"]
+        if "ref" not in stage:
+            # Turn 1: the model looks the food up and tries to log it.
+            stage["lookup"] = await handlers["lookup_food"]({"query": "cooked red quinoa"})
+            first = await handlers["log_meal"](dict(meal))
+            assert first["status"] == "needs_clarification"
+            assert first["reason"] == "web_estimate_confirmation"
+            assert fake.insert_count == 0
+            stage["ref"] = first["confirm_ref"]
+            return first["question"], []
+        # Turn 2: the user agreed; the model repeats the identical call with the ref.
+        confirmed = await handlers["log_meal"]({**meal, "confirm_ref": stage["ref"]})
+        return confirmed["confirmation"] + " " + json.dumps(stage["lookup"]), []
 
     service = CanvasService(store_factory=lambda: MemoryStore(),
                             food_factory=srv._voice_tool_handlers,
                             coach_factory=lambda: {}, agent=agent)
     scope = bind_user(uuid4())
     try:
-        output = await service.turn(str(uuid4()), str(uuid4()),
-                                    "log cooked red quinoa", adapter="text")
+        session_id = str(uuid4())
+        asked = await service.turn(session_id, str(uuid4()),
+                                   "log cooked red quinoa", adapter="text")
+        assert fake.insert_count == 0
+        assert "FoodClarification" in json.dumps(asked)
+        assert "Should I log it?" in json.dumps(asked)
+        output = await service.turn(session_id, str(uuid4()), "yes", adapter="text")
     finally: reset_user(scope)
     rendered = json.dumps(output)
     assert fake.insert_count == 1
+    assert "MealReceipt" in rendered
     assert "Estimated and logged" in rendered
     assert "WEB ESTIMATE (unverified): example.test" in rendered
     assert "IGNORE" not in rendered and "SYSTEM OVERRIDE" not in rendered

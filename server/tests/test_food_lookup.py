@@ -36,7 +36,6 @@ async def test_shared_resolver_uses_web_fallback_only_after_known_sources_miss(m
     async def miss(_query): return None
     monkeypatch.setattr(food_lookup.web_nutrition_lookup, "lookup", web_lookup)
     monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", miss)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", miss)
     found = await food_lookup.resolve_food("200 g cooked red quinoa")
     assert calls == ["cooked red quinoa"]
     assert found["applied_quantity"] == 200 and found["applied_unit"] == "g"
@@ -107,7 +106,6 @@ async def test_web_100g_basis_never_invents_unit_or_composite_grams(monkeypatch,
     async def miss(_query): return None
     async def web_lookup(identity): return _web_estimate(query=identity, food_name=f"IGNORE {identity}")
     monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", miss)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", miss)
     monkeypatch.setattr(food_lookup.web_nutrition_lookup, "lookup", web_lookup)
     assert await food_lookup.resolve_food(query) is None
 
@@ -117,7 +115,6 @@ async def test_web_100g_basis_explicit_grams_scale_exactly_once(monkeypatch):
     from test_live_coach import _web_estimate
     async def miss(_query): return None
     monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", miss)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", miss)
     monkeypatch.setattr(food_lookup.web_nutrition_lookup, "lookup",
                         lambda identity: asyncio.sleep(0, result=_web_estimate(query=identity)))
     found = await food_lookup.resolve_food("200 g cooked red quinoa")
@@ -130,7 +127,6 @@ async def test_web_serving_basis_scales_real_serving_count(monkeypatch):
     from test_live_coach import _web_estimate
     async def miss(_query): return None
     monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", miss)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", miss)
     monkeypatch.setattr(food_lookup.web_nutrition_lookup, "lookup",
                         lambda identity: asyncio.sleep(0, result=_web_estimate(
                             query=identity, basis_unit="serving")))
@@ -139,19 +135,22 @@ async def test_web_serving_basis_scales_real_serving_count(monkeypatch):
     assert found["applied_quantity"] == 2
 
 
-def test_provider_defaults_and_global_off_license_metadata(monkeypatch):
+def test_provider_defaults_and_barcode_off_license_metadata(monkeypatch):
     monkeypatch.delenv("FATSECRET_ATTRIBUTION_ENABLED", raising=False)
     assert os.environ.get("FATSECRET_ATTRIBUTION_ENABLED", "false") == "false"
     product = {"product_name": "Bar", "nutriments": {
         "energy-kcal_100g": 200, "proteins_100g": 10,
         "carbohydrates_100g": 20, "fat_100g": 8, "fiber_100g": 2}}
-    exact = food_lookup._off_result(product, "123", exact=True)
-    text = food_lookup._off_result(product, "123", exact=False)
+    exact = food_lookup._off_result(product, "123")
+    assert exact["source"] == "OpenFoodFacts barcode: 123"
+    assert exact["attribution"]["identifier_type"] == "barcode"
+    assert exact["attribution"]["verification_state"] == "exact_identifier"
     assert exact["attribution"]["cache_allowed"] is True
     assert exact["attribution"]["license"] == "Open Database License (ODbL) 1.0"
     assert exact["attribution"]["license_url"].endswith("/odbl/1-0/")
-    assert text["attribution"]["cache_allowed"] is False
-    assert text["attribution"]["verification_state"] == "unknown"
+    # Spec 2026-10-09: OpenFoodFacts text search left the chain; only the
+    # scanner's exact-barcode path remains.
+    assert not hasattr(food_lookup, "search_openfoodfacts")
 
 OFF_PAYLOAD = {"products": [{
     "code": "737628064502",
@@ -259,70 +258,15 @@ async def test_barcode_network_error_returns_none(monkeypatch):
     assert await food_lookup.search_openfoodfacts_by_code("737628064502") is None
 
 
-async def test_openfoodfacts_hit_parses_macros_and_source(monkeypatch):
-    def handler(request):
-        assert request.method == "GET"
-        assert request.url.host == "world.openfoodfacts.org"
-        assert request.url.params["search_terms"] == "banana"
-        return httpx.Response(200, json={"products": [{
-            "code": "4011",
-            "product_name": "Bananas, raw",
-            "nutriments": {
-                "energy-kcal_100g": 89, "proteins_100g": 1.09,
-                "carbohydrates_100g": 22.84, "fat_100g": 0.33,
-                "fiber_100g": 2.6,
-            },
-        }]})
-
-    calls = mock_transport(monkeypatch, handler)
-    assert without_attribution(await food_lookup.resolve_food("banana")) == BANANA_HIT
-    assert len(calls) == 1  # Tavily is never contacted on an OpenFoodFacts hit
-
-
-
-
-
-
-
-
-
-
-
-
-async def test_openfoodfacts_resolves_without_tavily(monkeypatch):
-    def handler(request):
-        assert request.url.host == "world.openfoodfacts.org"
-        assert request.url.params["search_terms"] == "rice noodles"
-        return httpx.Response(200, json=OFF_PAYLOAD)
-
-    calls = mock_transport(monkeypatch, handler)
-    result = await food_lookup.resolve_food("rice noodles")
-    assert without_attribution(result) == {
-        "name": "Rice noodles",
-        "macros_per_100g": {"calories": 355.0, "protein": 7.1, "carbs": 78.6,
-                            "fat": 1.2, "fiber": 1.8},
-        "source": "OpenFoodFacts: 737628064502",
-    }
-    assert [c.url.host for c in calls] == ["world.openfoodfacts.org"]
-
-
-async def test_both_databases_missing_returns_none(monkeypatch):
-    def handler(_request):
-        return httpx.Response(200, json={"products": []})
-
-    mock_transport(monkeypatch, handler)
+async def test_unknown_food_never_contacts_openfoodfacts_text_search(monkeypatch):
+    # Spec 2026-10-09: with no provider configured and the web fallback off
+    # (no token), an unknown food resolves to nothing -- no OFF text search,
+    # no invented macros.
+    monkeypatch.delenv("FATSECRET_ATTRIBUTION_ENABLED", raising=False)
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+    calls = mock_transport(monkeypatch, lambda _request: httpx.Response(200, json={"products": []}))
     assert await food_lookup.resolve_food("unicorn steak") is None
-
-
-async def test_openfoodfacts_requires_no_api_key(monkeypatch):
-    def handler(request):
-        assert request.url.host == "world.openfoodfacts.org"
-        return httpx.Response(200, json=OFF_PAYLOAD)
-
-    calls = mock_transport(monkeypatch, handler)
-    result = await food_lookup.resolve_food("rice noodles")
-    assert result["source"] == "OpenFoodFacts: 737628064502"
-    assert [c.url.host for c in calls] == ["world.openfoodfacts.org"]
+    assert calls == []
 
 
 
@@ -976,15 +920,6 @@ async def test_food_path_weightless_preset_grams_use_cascade(monkeypatch):
 
 LOVEN_QUERY = "L'oven fresh Cinnamon Raisin bread"
 
-LOVEN_OFF_PAYLOAD = {"products": [{
-    "code": "4099100179378",
-    "product_name": "Cinnamon Raisin Bread",
-    "nutriments": {"energy-kcal_100g": 230, "proteins_100g": 7.7,
-                   "carbohydrates_100g": 46.2, "fat_100g": 3.8,
-                   "fiber_100g": 3.8},
-}]}
-
-
 def test_query_variants_ladder_covers_brand_flavor_and_generic():
     assert food_lookup._query_variants(LOVEN_QUERY) == [
         LOVEN_QUERY,
@@ -999,20 +934,23 @@ def test_query_variants_ladder_covers_brand_flavor_and_generic():
 
 async def test_branded_flavor_query_rejects_generic_variant_without_brand_evidence(monkeypatch):
     # A generic flavor hit does not verify the originally requested brand.
-    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    _enable_fatsecret(monkeypatch)
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+    searched = []
 
-    def handler(request):
-        assert request.url.host == "world.openfoodfacts.org"
-        if request.url.params["search_terms"].casefold() == "cinnamon raisin bread":
-            return httpx.Response(200, json=LOVEN_OFF_PAYLOAD)
-        return httpx.Response(200, json={"products": []})
+    async def fake_request(data):
+        if data.get("method") == "foods.search":
+            searched.append(data["search_expression"])
+            if data["search_expression"].casefold() == "cinnamon raisin bread":
+                return _fatsecret_search_hit("4099100179378", "Cinnamon Raisin Bread")
+            return {"foods": {"food": []}}
+        return _fatsecret_get_hit("Cinnamon Raisin Bread", description="1 slice", grams=43,
+                                 calories=100, protein=3, carbs=20, fat=1.5, fiber=1.5)
 
-    calls = mock_transport(monkeypatch, handler)
+    monkeypatch.setattr(food_lookup, "_fatsecret_request", fake_request)
     result = await food_lookup.resolve_food(LOVEN_QUERY)
     assert result is None
-    assert set(c.url.params["search_terms"] for c in calls) == set(
-        food_lookup._query_variants(LOVEN_QUERY)
-    )
+    assert set(searched) == set(food_lookup._query_variants(LOVEN_QUERY))
 
 
 
@@ -1358,15 +1296,38 @@ def test_relevance_check_never_lets_a_bare_unit_match_an_unrelated_brand():
     # naive query-window slicer used to generate matched "Oz Miel" (a honey
     # brand) purely because "oz" is a substring token of "Oz". A unit word
     # must never count as meaningful overlap.
-    assert not food_lookup._relevant("6 oz", {"food_name": "Oz Miel"})
-    assert food_lookup._relevant("ground beef", {"food_name": "Ground Beef 93/7"})
+    assert not food_lookup._fatsecret_relevant("6 oz", {"food_name": "Oz Miel"})
+    assert food_lookup._fatsecret_relevant("93/7 ground beef", {"food_name": "Ground Beef 93/7"})
+    # An unqualified query never silently takes a more specific provider row.
+    assert not food_lookup._fatsecret_relevant("ground beef", {"food_name": "Ground Beef 93/7"})
+
+
+def test_search_gate_ranks_exact_item_name_above_broader_brand_match():
+    hits = [
+        {"food_id": "2", "food_name": "Grilled Chicken Sandwich", "brand_name": "Chick-fil-A"},
+        {"food_id": "9", "food_name": "Chicken Broth", "brand_name": "Chick-fil-A"},
+        {"food_id": "1", "food_name": "Chicken Sandwich", "brand_name": "Chick-fil-A"},
+    ]
+    ranked = food_lookup._rank_hits("chick fil a chicken sandwich", hits)
+    assert [food["food_id"] for food in ranked] == ["1", "2"]
+    # A bare generic never selects a broader product; only did-you-mean options may.
+    assert food_lookup._rank_hits("chicken", [{"food_id": "3", "food_name": "Chicken Broth Concentrate"}]) == []
+    assert food_lookup._fatsecret_option_relevant(
+        "protein bar", {"food_name": "Chocolate Protein Bar"})
 
 
 async def test_query_normalization_strips_quantity_parens_and_hedge_before_search(monkeypatch):
-    monkeypatch.delenv("FATSECRET_ATTRIBUTION_ENABLED", raising=False)
-    calls = mock_transport(monkeypatch, lambda _request: httpx.Response(200, json={"products": []}))
+    _enable_fatsecret(monkeypatch)
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+    searched = []
+
+    async def fake_request(data):
+        if data.get("method") == "foods.search":
+            searched.append(data["search_expression"])
+        return {"foods": {"food": []}}
+
+    monkeypatch.setattr(food_lookup, "_fatsecret_request", fake_request)
     await food_lookup.resolve_food("6 oz ground beef (93/7, estimated)")
-    searched = [c.url.params["search_terms"] for c in calls]
     assert "ground beef 93/7" in searched
     assert not any(term in ("oz", "estimated)", "6 oz") for term in searched)
 
@@ -1613,7 +1574,8 @@ async def test_atomic_branded_product_reaches_provider_as_one_identity(monkeypat
                 }, "serving_size": "1 slice", "source": "FixtureProvider: bread",
                 "attribution": {"verification_state": "exact_identifier"}}
 
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", provider)
+    monkeypatch.setattr(food_lookup, "_fatsecret_provider_mode", lambda: "oauth1")
+    monkeypatch.setattr(food_lookup, "search_fatsecret", provider)
     result = await food_lookup.resolve_food(
         "1 slice Dave's Killer Bread 21 Whole Grains and Seeds toast", atomic=True
     )
@@ -1643,7 +1605,6 @@ async def test_unresolved_split_falls_back_to_whole_food(monkeypatch):
 
     async def no_provider(_query): return None
     monkeypatch.setattr(food_lookup, "search_fatsecret", no_provider)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", no_provider)
 
     async def catalog(name):
         calls.append(name)
@@ -1714,7 +1675,6 @@ async def test_spoken_ratio_resolves_against_full_normalized_identity(monkeypatc
         )
 
     monkeypatch.setattr(food_lookup, "_fatsecret_request", fake_request)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", lambda _query: asyncio.sleep(0, result=None))
     found = await food_lookup.resolve_food("ninety three seven ground beef")
     assert found["name"] == "93/7 Ground Beef"
     assert found["source"] == "FatSecret: 111"
@@ -1792,7 +1752,6 @@ async def test_saved_preset_resolves_before_providers(monkeypatch):
 
     monkeypatch.setattr(srv, "_client", PresetStore())
     monkeypatch.setattr(food_lookup, "search_fatsecret", forbidden)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", forbidden)
     srv._resolved_food_cache.clear()
     token = bind_user(uuid4())
     try:
@@ -1842,11 +1801,12 @@ async def test_shared_resolver_uses_live_cofid_for_uncovered_cooked_identity(mon
         return expected
 
     async def forbidden(_query):
-        raise AssertionError("OFF must not supersede an exact official whole-food row")
+        raise AssertionError("a provider must not supersede an exact official whole-food row")
 
     monkeypatch.setattr(srv, "_client", EmptyStore())
     monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", live_lookup)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", forbidden)
+    monkeypatch.setattr(food_lookup, "_fatsecret_provider_mode", lambda: "oauth1")
+    monkeypatch.setattr(food_lookup, "search_fatsecret", forbidden)
     srv._resolved_food_cache.clear()
     token = bind_user(uuid4())
     try:
@@ -1894,7 +1854,6 @@ async def test_cofid_failure_falls_back_transparently_without_fake_verified_url(
     async def no_provider(_query): return None
 
     monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", no_cofid)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", no_provider)
     result = await food_lookup.resolve_food("grilled chicken breast")
     assert result["estimate_provenance"] == "curated_generic_assumption"
     assert "BOUNDED ESTIMATE" in result["source"]
@@ -1921,7 +1880,6 @@ async def test_other_local_food_sources_short_circuit_providers(monkeypatch, sou
 
     monkeypatch.setattr(srv, "_client", LocalStore())
     monkeypatch.setattr(food_lookup, "search_fatsecret", forbidden)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", forbidden)
     srv._resolved_food_cache.clear()
     token = bind_user(uuid4())
     try:
@@ -1931,46 +1889,44 @@ async def test_other_local_food_sources_short_circuit_providers(monkeypatch, sou
     assert result is not None
 
 
-async def test_provider_searches_start_concurrently_and_prefer_higher_trust(monkeypatch):
+async def test_variant_searches_start_concurrently_and_prefer_the_fullest_query(monkeypatch):
     _enable_fatsecret(monkeypatch)
-    both_started = asyncio.Event()
-    started = set()
+    variants = food_lookup._query_variants("93/7 ground beef")
+    all_started = asyncio.Event()
+    started = []
 
-    async def result(provider, query):
-        started.add(provider)
-        if len(started) == 2:
-            both_started.set()
-        await asyncio.wait_for(both_started.wait(), timeout=0.2)
+    async def provider(query):
+        started.append(query)
+        if len(started) == len(variants):
+            all_started.set()
+        await asyncio.wait_for(all_started.wait(), timeout=0.2)
         return {"name": "Ground Beef 93/7", "macros_per_serving": {
             "calories": 170, "protein": 23, "carbs": 0, "fat": 8, "fiber": 0,
-        }, "source": f"{provider}: {query}"}
+        }, "source": f"FatSecret: {query}"}
 
-    monkeypatch.setattr(food_lookup, "search_fatsecret", lambda query: result("FatSecret", query))
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", lambda query: result("OpenFoodFacts", query))
+    monkeypatch.setattr(food_lookup, "search_fatsecret", provider)
     found = await food_lookup.resolve_food("93/7 ground beef")
-    assert started == {"FatSecret", "OpenFoodFacts"}
-    assert found["source"].startswith("FatSecret:")
+    assert set(started) == set(variants) and len(variants) > 1
+    assert found["source"] == "FatSecret: 93/7 ground beef"
 
 
-async def test_slow_higher_trust_provider_does_not_hold_fast_valid_result(monkeypatch):
+async def test_slow_fullest_variant_does_not_hold_a_fast_valid_result(monkeypatch):
     _enable_fatsecret(monkeypatch)
 
-    async def slow_fatsecret(_query):
-        await asyncio.sleep(1)
-        return None
-
-    async def fast_openfoodfacts(_query):
+    async def provider(query):
+        if query == "93/7 ground beef":
+            await asyncio.sleep(1)
+            return None
         await asyncio.sleep(0.01)
         return {"name": "Ground Beef 93/7", "macros_per_serving": {
             "calories": 170, "protein": 23, "carbs": 0, "fat": 8, "fiber": 0,
-        }, "source": "OpenFoodFacts: fast"}
+        }, "source": f"FatSecret: {query}"}
 
-    monkeypatch.setattr(food_lookup, "search_fatsecret", slow_fatsecret)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", fast_openfoodfacts)
+    monkeypatch.setattr(food_lookup, "search_fatsecret", provider)
     started = time.monotonic()
     found = await food_lookup.resolve_food("93/7 ground beef")
     elapsed = time.monotonic() - started
-    assert found["source"] == "OpenFoodFacts: fast"
+    assert found["source"] == "FatSecret: ground beef"
     assert elapsed < 0.4
 
 
@@ -2002,7 +1958,6 @@ async def test_generic_whole_food_acceptance_never_calls_a_provider(monkeypatch,
     async def forbidden(_query):
         raise AssertionError("generic whole food must not call a provider")
     monkeypatch.setattr(food_lookup, "search_fatsecret", forbidden)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", forbidden)
     found = food_lookup.resolve_generic_whole_food(query)
     assert found is not None
     assert found["source"].startswith("Generic:")
@@ -2026,7 +1981,6 @@ async def test_generic_whole_food_resolves_plural_and_singular_forms(monkeypatch
     async def forbidden(_query):
         raise AssertionError("generic whole food must not call a provider")
     monkeypatch.setattr(food_lookup, "search_fatsecret", forbidden)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", forbidden)
     found = food_lookup.resolve_generic_whole_food(query)
     assert found is not None
     assert found["name"] == expected_name
@@ -2185,7 +2139,6 @@ async def test_blocker_separate_provider_brand_validated_against_original(monkey
         return None
 
     monkeypatch.setattr(food_lookup, "_fatsecret_request", request)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", no_off)
     provider = await food_lookup.search_fatsecret(name)
     assert provider is not None
     result = await food_lookup.resolve_food("David Protein Bar Cinnamon Bun", atomic=True)
@@ -2219,7 +2172,6 @@ async def test_blocker_conflicting_brand_cannot_reach_real_voice_write(monkeypat
         return None
 
     monkeypatch.setattr(food_lookup, "_fatsecret_request", request)
-    monkeypatch.setattr(food_lookup, "search_openfoodfacts", no_off)
     token = bind_user(uuid4())
     try:
         result = await srv._voice_tool_handlers()["log_meal"]("conflicting-brand", {

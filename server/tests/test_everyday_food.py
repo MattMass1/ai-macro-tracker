@@ -17,7 +17,6 @@ async def test_live_wording_chicken_and_cooked_white_rice_commits_one_composite(
         raise AssertionError("known generic aliases must resolve locally")
 
     monkeypatch.setattr(srv.food_lookup, "search_fatsecret", forbidden)
-    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts", forbidden)
     scope = bind_user(uuid4())
     try:
         result = await srv._voice_tool_handlers()["log_meal"]("canary-words", {
@@ -73,7 +72,6 @@ async def test_canvas_and_voice_log_bacon_without_asking_to_verify(monkeypatch):
         raise AssertionError("bacon must resolve locally, never via a provider")
 
     monkeypatch.setattr(srv.food_lookup, "search_fatsecret", forbidden)
-    monkeypatch.setattr(srv.food_lookup, "search_openfoodfacts", forbidden)
     monkeypatch.setattr(srv.food_lookup.web_nutrition_lookup, "lookup", forbidden)
     scope = bind_user(uuid4())
     try:

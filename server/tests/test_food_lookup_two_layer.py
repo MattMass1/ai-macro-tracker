@@ -1,0 +1,136 @@
+"""Two-layer lookup finish (spec 2026-10-09): one ranked provider gate, honest
+outage wording, and did-you-mean options that reuse the first search."""
+import asyncio
+import json
+import os
+from uuid import uuid4
+
+import httpx
+import pytest
+
+os.environ.setdefault("APP_SHARED_TOKEN", "test-token")
+os.environ.setdefault("DATABASE_URL", "postgresql://test/test")
+
+import food_lookup  # noqa: E402
+import server as srv  # noqa: E402
+import web_nutrition_lookup as web  # noqa: E402
+from auth import bind_user, reset_user  # noqa: E402
+from test_food_lookup import _enable_fatsecret, _fatsecret_get_hit  # noqa: E402
+from test_live_coach import FakeVoiceStore  # noqa: E402
+
+
+async def test_search_fetches_ranked_hits_in_order_and_at_most_two(monkeypatch):
+    _enable_fatsecret(monkeypatch)
+    fetched = []
+
+    async def request(data):
+        if data["method"] == "foods.search":
+            return {"foods": {"food": [
+                {"food_id": "broad", "food_name": "Grilled Chicken Sandwich", "brand_name": "Chick-fil-A"},
+                {"food_id": "exact-empty", "food_name": "Chicken Sandwich", "brand_name": "Chick-fil-A"},
+                {"food_id": "exact", "food_name": "Chicken Sandwich", "brand_name": "Chick-fil-A"},
+            ]}}
+        fetched.append(data["food_id"])
+        if data["food_id"] == "exact-empty":
+            return {"food": {"food_name": "Chicken Sandwich", "brand_name": "Chick-fil-A",
+                             "servings": {"serving": []}}}
+        body = _fatsecret_get_hit("Chicken Sandwich", description="1 sandwich", grams=183,
+                                 calories=440, protein=28, carbs=41, fat=17, fiber=1)
+        body["food"]["brand_name"] = "Chick-fil-A"
+        return body
+
+    monkeypatch.setattr(food_lookup, "_fatsecret_request", request)
+    found = await food_lookup.search_fatsecret("chick fil a chicken sandwich")
+    # Exact item names outrank the broader brand match; a hit without usable
+    # servings yields to the next one; the broad hit is never fetched.
+    assert fetched == ["exact-empty", "exact"]
+    assert found["source"] == "FatSecret: exact"
+    assert found["macros_per_serving"]["calories"] == 440
+
+
+async def test_did_you_mean_reuses_the_failed_resolutions_search(monkeypatch):
+    _enable_fatsecret(monkeypatch)
+    searches = []
+
+    async def request(data):
+        if data["method"] == "foods.search":
+            searches.append(data["search_expression"])
+            return {"foods": {"food": [
+                {"food_id": "1", "food_name": "Spicy Chicken Sandwich", "brand_name": "Chick-fil-A"},
+                {"food_id": "2", "food_name": "Grilled Chicken Sandwich", "brand_name": "Chick-fil-A"},
+            ]}}
+        raise AssertionError("no acceptable hit, so no item is fetched")
+
+    monkeypatch.setattr(food_lookup, "_fatsecret_request", request)
+    assert await food_lookup.search_fatsecret("chick fil a chicken") is None
+    options = await food_lookup.fatsecret_name_options("chick fil a chicken")
+    assert options == ["Chick-fil-A Spicy Chicken Sandwich",
+                       "Chick-fil-A Grilled Chicken Sandwich"]
+    assert searches == ["chick fil a chicken"]
+
+
+async def test_web_recent_failure_reports_the_fresh_reason_only(monkeypatch):
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "token")
+
+    async def post(_token, _payload):
+        raise httpx.ReadTimeout("slow")
+
+    with pytest.raises(web.NutritionLookupError) as error:
+        await web.lookup("fixture zebra steak", post=post)
+    assert error.value.reason == "timeout"
+    assert web.recent_failure("fixture zebra steak") == "timeout"
+    assert web.recent_failure("Fixture  Zebra Steak") == "timeout"
+    assert web.recent_failure("something else") is None
+    web.clear_cache()
+    assert web.recent_failure("fixture zebra steak") is None
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+    with pytest.raises(web.NutritionLookupError):
+        await web.lookup("fixture zebra steak")
+    assert web.recent_failure("fixture zebra steak") == "not_configured"
+    assert "not_configured" in web.INFRASTRUCTURE_REASONS
+    assert "no_results" not in web.INFRASTRUCTURE_REASONS
+
+
+def _no_evidence_post(_token, _payload):
+    return asyncio.sleep(0, result=httpx.Response(
+        200, json={"output": []}, headers={"content-type": "application/json"}))
+
+
+async def _timeout_post(_token, _payload):
+    raise httpx.ReadTimeout("slow")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("post", "expected"), [
+    (_timeout_post, "The nutrition lookup service was unreachable for fixture zebra steak. "
+                    "Try again in a moment."),
+    (_no_evidence_post, "I couldn't verify fixture zebra steak. What was it exactly: "
+                        "the brand, the dish, or how it was prepared?"),
+])
+async def test_unverified_food_names_an_outage_and_never_asks_for_a_label(monkeypatch, post, expected):
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "token")
+    fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    srv._resolved_food_cache.clear()
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_provider_mode", lambda: None)
+    monkeypatch.setattr(srv.food_lookup.cofid_lookup, "lookup",
+                        lambda _q: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(web, "post_responses", post)
+    token = bind_user(uuid4())
+    try:
+        handlers = srv._voice_tool_handlers()
+        logged = await handlers["log_meal"]("outage-log", {
+            "description": "fixture zebra steak", "meal_type": "Dinner"})
+        looked_up = await handlers["lookup_food"]("outage-lookup", {
+            "query": "fixture zebra steak"})
+    finally:
+        reset_user(token)
+    assert logged["status"] == "needs_clarification"
+    assert logged["question"] == logged["confirmation"] == expected
+    assert logged["unresolved"] == ["fixture zebra steak"]
+    assert looked_up["status"] == "needs_clarification"
+    assert looked_up["question"] == expected
+    assert fake.insert_count == 0
+    for payload in (logged, looked_up):
+        assert "label" not in json.dumps(payload).casefold()
+        assert "ESTIMATE" not in json.dumps(payload)

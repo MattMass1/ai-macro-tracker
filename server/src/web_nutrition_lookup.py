@@ -38,6 +38,34 @@ class NutritionLookupError(RuntimeError):
         self.reason = reason
 
 
+# Reasons that mean the service, not the evidence, failed. The coach must tell
+# the user the lookup was unreachable and to try again -- never "food not
+# found", and never ask them to supply a label instead.
+INFRASTRUCTURE_REASONS = frozenset({
+    "not_configured", "timeout", "transport", "unauthorized", "rate_limited",
+    "provider_unavailable", "provider_rejected", "unsupported_model", "bad_request",
+    "invalid_content_type", "response_too_large", "invalid_json", "shared_lookup_cancelled",
+})
+
+
+def _cache_key(model: str, text: str) -> str:
+    return hashlib.sha256(f"{model}\0{text.casefold()}".encode()).hexdigest()
+
+
+def recent_failure(query: str) -> str | None:
+    """Why the latest lookup of this exact identity failed, while that failure
+    is still fresh (the negative-cache window). ``None`` when it did not fail
+    recently or succeeded."""
+    model = os.environ.get("COACH_MODEL", "gpt-5.6-luna").strip()
+    text = " ".join(str(query or "").split())
+    if not text:
+        return None
+    negative = _NEGATIVE_CACHE.get(_cache_key(model, text))
+    if negative and negative[0] > time.monotonic():
+        return negative[1]
+    return None
+
+
 PostResponses = Callable[[str, dict[str, Any]], Awaitable[httpx.Response]]
 
 
@@ -247,13 +275,17 @@ async def _uncached(query: str, token: str, model: str, post: PostResponses) -> 
 async def lookup(query: str, *, post: PostResponses | None = None) -> dict[str, Any]:
     """Resolve one bounded food request, cached and single-flighted by identity."""
     token = os.environ.get("OPENAI_ACCESS_TOKEN", "").strip()
-    if not token: raise NutritionLookupError("not_configured")
-    if post is None: post = post_responses
     model = os.environ.get("COACH_MODEL", "gpt-5.6-luna").strip()
     text = " ".join(str(query or "").split())
+    if not token:
+        if text:
+            _NEGATIVE_CACHE[_cache_key(model, text)] = (
+                time.monotonic() + NEGATIVE_CACHE_TTL_SECONDS, "not_configured")
+        raise NutritionLookupError("not_configured")
+    if post is None: post = post_responses
     if not text or len(text) > 240 or any(ord(char) < 32 for char in text):
         raise NutritionLookupError("invalid_query")
-    key = hashlib.sha256(f"{model}\0{text.casefold()}".encode()).hexdigest()
+    key = _cache_key(model, text)
     now = time.monotonic()
     cached = _CACHE.get(key)
     if cached and cached[0] > now: return deepcopy(cached[1])

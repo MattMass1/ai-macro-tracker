@@ -1,27 +1,10 @@
-"""Deterministic official restaurant menu lookup tests."""
-import pytest
+"""Curated restaurant rows: retained as future Layer 1 cache seeds only.
 
-import food_lookup
-from restaurant_menu import RESTAURANT_MENU, restaurant_lookup
-
-
-@pytest.mark.parametrize(("query", "name"), [
-    ("chick fil a egg white grill", "Egg White Grill"),
-    ("chipotle double chicken bowl", "Double Chicken Burrito Bowl"),
-    ("raising cane's 3 finger combo", "3 Finger Combo Without Drink"),
-    ("mcdonald's 10 piece mcnuggets", "Chicken McNuggets 10 Piece"),
-])
-async def test_curated_restaurant_queries_match_exact_table(query, name):
-    expected = next(item for items in RESTAURANT_MENU.values()
-                    for item in items if item["name"] == name)
-    result = await food_lookup.resolve_food(query)
-    assert result is not None
-    assert result["name"] == name
-    assert result["macros_per_serving"] == {
-        key: float(expected[key])
-        for key in ("calories", "protein", "carbs", "fat", "fiber")
-    }
-    assert result["source"].startswith("Restaurant menu: https://")
+Spec 2026-10-09 removed this module from the resolution chain (its chain-alias
+matching cross-contaminated brands); `food_lookup` never consults it. The
+hand-verified table and its deterministic matcher stay testable on their own.
+"""
+from restaurant_menu import restaurant_lookup
 
 
 def test_multi_item_order_aggregates_each_curated_match():

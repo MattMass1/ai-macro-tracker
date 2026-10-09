@@ -1,7 +1,9 @@
-"""Catalog, curated menu, FatSecret, and OpenFoodFacts food lookup."""
+"""Two-layer food lookup: FatSecret brand-first, then a labeled web-search
+estimate. The OpenFoodFacts barcode path serves the scanner only."""
 from __future__ import annotations
 
 import asyncio, base64, hashlib, hmac, json, logging, math, os, re, secrets, time
+from collections import OrderedDict
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
 import httpx
@@ -19,7 +21,6 @@ PROVIDER_DEADLINE_SECONDS = 2.5
 RESOLUTION_DEADLINE_SECONDS = 16.0
 PROVIDER_PREFERENCE_GRACE_SECONDS = 0.15
 USER_AGENT = "MacroCoach/1.0 (ai-macro-tracker; contact@biz21.com)"
-OFF_SEARCH_URL = "https://world.openfoodfacts.org/cgi/search.pl"
 OFF_PRODUCT_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
 FATSECRET_TOKEN_URL = "https://oauth.fatsecret.com/connect/token"
 FATSECRET_API_URL = "https://platform.fatsecret.com/rest/server.api"
@@ -115,6 +116,14 @@ _OFF_NUTRIMENTS = {"energy-kcal_100g":"calories", "proteins_100g":"protein",
 _OFF_SERVING = {"energy-kcal_serving":"calories", "proteins_serving":"protein",
     "carbohydrates_serving":"carbs", "fat_serving":"fat", "fiber_serving":"fiber"}
 _TOKEN: tuple[str, float, str, str] | None = None
+# One FatSecret search serves both the resolution attempt and, when that fails,
+# the did-you-mean options: the hits are kept briefly so the options never cost
+# a second provider round trip.
+_SEARCH_HITS_TTL_SECONDS = 60.0
+_SEARCH_HITS_MAX = 128
+_SEARCH_MAX_RESULTS = 8
+_SEARCH_MAX_INSPECT = 2
+_search_hits: OrderedDict[str, tuple[float, list[Any]]] = OrderedDict()
 
 
 def _rfc3986(value: Any) -> str:
@@ -278,38 +287,69 @@ def _canon_food_tokens(text: Any) -> set[str]:
             if word not in _UNIT_WORDS and word not in _CONNECTIVES and len(word) > 1}
 
 
+# Providers often append a neutral state descriptor to a whole food.
+# Product-making modifiers (coated, meatballs, flavored, etc.) remain
+# identity-bearing and therefore cannot be ignored.
+_STATE_WORDS = frozenset({"raw", "fresh"})
+
+
+def _identity_tokens(words) -> set[str]:
+    return {_canon_food_token(w) for w in words if len(w) > 1 and w not in _CONNECTIVES}
+
+
+def _query_identity_tokens(query: str) -> set[str]:
+    _quantity, _unit, identity = _clean_component(query)
+    return _identity_tokens(normalize_food_name(identity or query).split())
+
+
+def _name_identity_tokens(food: Mapping[str, Any]) -> set[str]:
+    return _identity_tokens(
+        normalize_food_name(str(food.get("food_name") or "")).split()) - _STATE_WORDS
+
+
+def _exact_name_match(query: str, food: Mapping[str, Any]) -> bool:
+    """The provider item NAME is the query identity, with the brand either
+    unspoken or named ("chick fil a chicken sandwich" is exactly Chick-fil-A's
+    "Chicken Sandwich", not its "Grilled Chicken Sandwich")."""
+    tokens = _query_identity_tokens(query)
+    if not tokens:
+        return False
+    name_tokens = _name_identity_tokens(food)
+    if tokens == name_tokens:
+        return True
+    brand_tokens = _canon_food_tokens(food.get("brand_name")) - _BRAND_FILLER
+    return bool(tokens & brand_tokens) and (tokens - brand_tokens) == name_tokens
+
+
 def _fatsecret_relevant(query: str, food: Mapping[str, Any]) -> bool:
-    """Search-stage gate: the candidate must cover the query identity (synonym
-    and plural tolerant). Final auto-acceptance stays with the stricter
-    `_full_query_relevant`; this gate only decides which hit to inspect."""
+    """Gate for a provider hit, applied to search hits and the fetched item alike.
+
+    One identity rule everywhere, so the hit chosen for inspection is one the
+    resolver can accept: a bare "chicken" never selects "Chicken Broth
+    Concentrate", and "protein bar" never selects "Chocolate Protein Bar".
+    """
+    return _full_query_relevant(query, food)
+
+
+def _fatsecret_option_relevant(query: str, food: Mapping[str, Any]) -> bool:
+    """Looser gate for did-you-mean options only: the hit covers most of the
+    query identity. Never used to auto-accept anything."""
     query_tokens = _canon_food_tokens(query)
     candidate_tokens = (_canon_food_tokens(food.get("food_name"))
                         | _canon_food_tokens(food.get("brand_name")))
     if not query_tokens or not candidate_tokens:
         return False
-    overlap = len(query_tokens & candidate_tokens)
-    return query_tokens <= candidate_tokens or overlap / len(query_tokens) >= 0.6
-
-
-def _relevant(query: str, food: Mapping[str, Any]) -> bool:
-    """Conservative token relevance for non-trusted OFF text search results."""
-    query_words = set(normalize_food_name(query).split()) - _UNIT_WORDS
-    candidate = normalize_food_name(" ".join(
-        str(food.get(key) or "") for key in ("food_name", "brand_name", "food_description")
-    ))
-    words = set(candidate.split())
-    meaningful = {word for word in query_words if len(word) > 1}
-    comparable = words | {word[:-1] for word in words if len(word) > 3 and word.endswith("s")}
-    return bool(meaningful and (meaningful <= comparable
-        or len(meaningful & comparable) / len(meaningful) >= 0.6))
+    return len(query_tokens & candidate_tokens) / len(query_tokens) >= 0.6
 
 
 def _full_query_relevant(query: str, food: Mapping[str, Any]) -> bool:
-    """Final auto-acceptance gate for a provider hit.
+    """Auto-acceptance gate for a provider hit.
 
-    Two ways in, both conservative:
+    Three ways in, all conservative:
     1. Identity equality (synonym/plural tolerant) -- the historical rule.
-    2. Brand-anchored coverage: the query names the candidate's brand AND the
+    2. Item-name equality: a provider's brand field is metadata, never a
+       contradiction ("crunchwrap supreme" vs Taco Bell's "Crunchwrap Supreme").
+    3. Brand-anchored coverage: the query names the candidate's brand AND the
        candidate covers every remaining query token AND the query carries at
        least two non-brand identity tokens. "panera bbq smokehouse sandwich"
        accepts the provider's "Panera Bread BBQ Smokehouse Chicken Sandwich";
@@ -317,6 +357,8 @@ def _full_query_relevant(query: str, food: Mapping[str, Any]) -> bool:
     Unbranded partials ("chicken" vs "Fried Chicken Nuggets") never auto-match.
     """
     _quantity, _unit, query_identity = _clean_component(query)
+    if _quantity is not None and not query_identity:
+        return False  # a bare amount ("6 oz") names no food
     query_words = normalize_food_name(query_identity or query).split()
     candidate_words = normalize_food_name(" ".join(
         str(food.get(key) or "") for key in ("food_name", "brand_name", "food_description")
@@ -326,23 +368,11 @@ def _full_query_relevant(query: str, food: Mapping[str, Any]) -> bool:
     candidate_ratios = {pair for pair in _LEAN_FAT_PAIRS if f"{pair[0]}/{pair[1]}" in candidate_words}
     if query_ratios and query_ratios != candidate_ratios:
         return False
-    query_tokens = {_canon_food_token(w) for w in query_words
-                    if len(w) > 1 and w not in _CONNECTIVES}
-    candidate_tokens = {_canon_food_token(w) for w in candidate_words
-                        if len(w) > 1 and w not in _CONNECTIVES}
-    # Providers often append a neutral state descriptor to a whole food.
-    # Product-making modifiers (coated, meatballs, flavored, etc.) remain
-    # identity-bearing and therefore cannot be ignored.
-    candidate_tokens -= {"raw", "fresh"}
+    query_tokens = _identity_tokens(query_words)
+    candidate_tokens = _identity_tokens(candidate_words) - _STATE_WORDS
     if query_tokens and query_tokens == candidate_tokens:
         return True
-    # A provider's brand field is metadata, never a contradiction: a query that
-    # exactly matches the item NAME auto-matches even when the brand is unspoken
-    # ("crunchwrap supreme" vs Taco Bell's "Crunchwrap Supreme").
-    name_tokens = {_canon_food_token(w)
-                   for w in normalize_food_name(str(food.get("food_name") or "")).split()
-                   if len(w) > 1 and w not in _CONNECTIVES} - {"raw", "fresh"}
-    if query_tokens and query_tokens == name_tokens:
+    if query_tokens and query_tokens == _name_identity_tokens(food):
         return True
     brand_tokens = _canon_food_tokens(food.get("brand_name")) - _BRAND_FILLER
     anchored = query_tokens & brand_tokens
@@ -352,13 +382,57 @@ def _full_query_relevant(query: str, food: Mapping[str, Any]) -> bool:
     return len(remaining) >= 2 and remaining <= (candidate_tokens | _BRAND_FILLER)
 
 
-async def search_fatsecret(query: str) -> dict[str, Any] | None:
-    search = await _fatsecret_request({"method":"foods.search", "search_expression":query, "max_results":5})
-    candidate = next((food for food in _unwrap_foods(search)
-        if isinstance(food, Mapping) and food.get("food_id") and _fatsecret_relevant(query, food)), None)
-    if candidate is None: return None
-    food_id = str(candidate["food_id"]); food = _unwrap_food(await _fatsecret_request({"method":"food.get.v4", "food_id":food_id}))
-    if food is None or not _fatsecret_relevant(query, food): return None
+def clear_search_cache() -> None:
+    _search_hits.clear()
+
+
+def _remember_search_hits(query: str, hits: list[Any]) -> None:
+    key = normalize_food_name(query)
+    if not key:
+        return
+    _search_hits[key] = (time.monotonic(), hits)
+    _search_hits.move_to_end(key)
+    while len(_search_hits) > _SEARCH_HITS_MAX:
+        _search_hits.popitem(last=False)
+
+
+def _recent_search_hits(query: str) -> list[Any] | None:
+    cached = _search_hits.get(normalize_food_name(query))
+    if cached is None:
+        return None
+    if time.monotonic() - cached[0] > _SEARCH_HITS_TTL_SECONDS:
+        _search_hits.pop(normalize_food_name(query), None)
+        return None
+    return cached[1]
+
+
+async def _fatsecret_search_hits(query: str) -> list[Any]:
+    """One live foods.search; the hits are remembered for did-you-mean reuse.
+    A failed or unconfigured request remembers nothing."""
+    body = await _fatsecret_request({"method": "foods.search", "search_expression": query,
+                                     "max_results": _SEARCH_MAX_RESULTS})
+    if body is None:
+        return []
+    hits = _unwrap_foods(body)
+    _remember_search_hits(query, hits)
+    return hits
+
+
+def _rank_hits(query: str, hits: list[Any]) -> list[Mapping[str, Any]]:
+    """Acceptable hits, best first: an exact item-name match outranks a
+    brand-anchored broader item ("Chicken Sandwich" before "Grilled Chicken
+    Sandwich"); provider order breaks ties."""
+    ranked = [
+        (0 if _exact_name_match(query, food) else 1, index, food)
+        for index, food in enumerate(hits)
+        if isinstance(food, Mapping) and food.get("food_id") and _fatsecret_relevant(query, food)
+    ]
+    ranked.sort(key=lambda item: item[:2])
+    return [food for _tier, _index, food in ranked]
+
+
+def _fatsecret_result(query: str, food_id: str, food: Mapping[str, Any],
+                      candidate: Mapping[str, Any]) -> dict[str, Any] | None:
     servings_value = food.get("servings")
     if isinstance(servings_value, Mapping): servings_value = servings_value.get("serving")
     for serving in _as_list(servings_value):
@@ -382,20 +456,37 @@ async def search_fatsecret(query: str) -> dict[str, Any] | None:
     return None
 
 
+async def search_fatsecret(query: str) -> dict[str, Any] | None:
+    """Layer 1: one search, then fetch the best-ranked acceptable hits in order
+    (at most two item fetches) until one carries usable serving macros."""
+    hits = await _fatsecret_search_hits(query)
+    for candidate in _rank_hits(query, hits)[:_SEARCH_MAX_INSPECT]:
+        food_id = str(candidate["food_id"])
+        food = _unwrap_food(await _fatsecret_request({"method":"food.get.v4", "food_id":food_id}))
+        if food is None or not _fatsecret_relevant(query, food):
+            continue
+        result = _fatsecret_result(query, food_id, food, candidate)
+        if result is not None:
+            return result
+    return None
+
+
 async def fatsecret_name_options(query: str, limit: int = 3) -> list[str]:
     """Closest provider names for a failed resolution, so the coach can ask one
     specific pick-a-variant question instead of demanding a label. Display
-    names only; the user's pick is resolved and portioned like any request."""
+    names only; the user's pick is resolved and portioned like any request.
+    Reuses the hits the failed resolution already fetched when it can."""
     if _fatsecret_provider_mode() is None:
         return []
-    try:
-        search = await _fatsecret_request({"method": "foods.search",
-                                           "search_expression": query, "max_results": 8})
-    except Exception:
-        return []
+    hits = _recent_search_hits(query)
+    if hits is None:
+        try:
+            hits = await _fatsecret_search_hits(query)
+        except Exception:
+            return []
     options: list[str] = []
-    for food in _unwrap_foods(search):
-        if not isinstance(food, Mapping) or not _fatsecret_relevant(query, food):
+    for food in hits:
+        if not isinstance(food, Mapping) or not _fatsecret_option_relevant(query, food):
             continue
         name = str(food.get("food_name") or "").strip()
         brand = str(food.get("brand_name") or "").strip()
@@ -424,38 +515,27 @@ def _result_hash(result: Mapping[str, Any]) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",",":"), default=str).encode()).hexdigest()
 
 
-def _off_result(product: Mapping[str, Any], code: str, *, exact: bool) -> dict[str, Any] | None:
+def _off_result(product: Mapping[str, Any], code: str) -> dict[str, Any] | None:
+    """A scanned barcode's product row: an exact identifier, so trusted as-is."""
     nutrients = product.get("nutriments"); name = str(product.get("product_name") or "").strip()
     if not isinstance(nutrients, Mapping) or not name: return None
     macros = _macros({key:nutrients.get(field) for field,key in _OFF_NUTRIMENTS.items()})
     if macros is None: return None
     source_url = f"https://world.openfoodfacts.org/product/{code}" if code else None
     result: dict[str, Any] = {"name":name, "macros_per_100g":macros,
-        "source":f"OpenFoodFacts{' barcode' if exact else ''}: {code}"}
+        "source":f"OpenFoodFacts barcode: {code}"}
     serving = str(product.get("serving_size") or "").strip()
     serving_macros = _macros({key:nutrients.get(field) for field,key in _OFF_SERVING.items()})
     if serving: result["serving_size"] = serving
     if serving_macros: result["macros_per_serving"] = serving_macros
     result["attribution"] = {"provider":"OpenFoodFacts", "external_id":code,
-        "identifier_type":"barcode" if exact else "text_search", "source_url":source_url,
-        "serving_grams":None, "serving_basis":"per_100g", "confidence":1.0 if exact else 0.65,
-        "cache_allowed":bool(exact and code), "license":OFF_LICENSE_NAME,
+        "identifier_type":"barcode", "source_url":source_url,
+        "serving_grams":None, "serving_basis":"per_100g", "confidence":1.0,
+        "cache_allowed":bool(code), "license":OFF_LICENSE_NAME,
         "license_url":OFF_LICENSE_URL, "attribution_text":"Data from OpenFoodFacts",
-        "verification_state":"exact_identifier" if exact else "unknown"}
+        "verification_state":"exact_identifier"}
     result["attribution"]["evidence_hash"] = _result_hash(result)
     return result
-
-
-async def search_openfoodfacts(query: str) -> dict[str, Any] | None:
-    if not str(query).strip(): return None
-    try:
-        body = await _get_json(OFF_SEARCH_URL, {"search_terms":query,"search_simple":1,"action":"process","json":1,"page_size":5})
-        for product in (body.get("products") or [])[:5]:
-            if isinstance(product, Mapping):
-                found = _off_result(product, str(product.get("code") or ""), exact=False)
-                if found and _relevant(query, {"food_name":found["name"]}): return found
-    except (httpx.HTTPError, TypeError, ValueError): pass
-    return None
 
 
 async def search_openfoodfacts_by_code(barcode: str) -> dict[str, Any] | None:
@@ -463,7 +543,7 @@ async def search_openfoodfacts_by_code(barcode: str) -> dict[str, Any] | None:
     if not code: return None
     try:
         body = await _get_json(OFF_PRODUCT_URL.format(barcode=code), {})
-        return _off_result(body["product"], code, exact=True) if body.get("status") == 1 else None
+        return _off_result(body["product"], code) if body.get("status") == 1 else None
     except (httpx.HTTPError, KeyError, TypeError, ValueError): return None
 
 
@@ -721,18 +801,14 @@ def _split_components(query: str) -> list[str]:
 
 async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,
                              allow_web: bool = True) -> dict[str, Any] | None:
-    """The single-food cascade: catalog, curated menu, then provider search
-    over normalized-query variants. Shared by the simple and composite paths."""
+    """The single-food cascade: tenant catalog, official CoFID rows, then
+    Layer 1 (FatSecret over normalized-query variants) and Layer 2 (web
+    estimate). Shared by the simple and composite paths."""
     if catalog_lookup:
         try:
             found = await catalog_lookup(query)
             if found: return found
         except Exception: pass
-    # Two retrieval layers only (spec 2026-10-09): FatSecret brand-first, then
-    # the web fallback. The curated restaurant menu is no longer consulted --
-    # its chain-alias matching cross-contaminated brands (a Panera "Chipotle
-    # Chicken Avocado Melt" selected Chipotle's menu). OFF text search is out
-    # of the chain too; the OFF barcode path is a separate feature and stays.
     cofid = await cofid_lookup.lookup(query)
     if cofid: return cofid
     fatsecret_enabled = _fatsecret_provider_mode() is not None
@@ -800,6 +876,9 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,
         try:
             return await web_nutrition_lookup.lookup(query)
         except web_nutrition_lookup.NutritionLookupError as exc:
+            # The reason stays queryable (web_nutrition_lookup.recent_failure)
+            # so the coach can say the service was unreachable instead of
+            # treating an outage as "food not found".
             logger.info("web nutrition lookup unavailable: reason=%s", exc.reason)
             return None
     finally:

@@ -1,8 +1,30 @@
 # Food Lookup v2: Two-Layer Search
 
-Date: 2026-10-09. Status: approved by owner, not yet implemented.
+Date: 2026-10-09. Status: IMPLEMENTED (server suite green, 2026-10-09).
 Owner decisions: Layer 2 uses OpenAI built-in web search (no new vendors);
 web-fallback results are one-tap confirm, never auto-logged.
+
+Implementation notes (what shipped, where it differs from the text below):
+
+- Layer 1 gate: one identity rule (`_full_query_relevant`) is used both to
+  pick which search hit to inspect and to accept it. Hits are ranked (exact
+  item name before brand-anchored broader items) and at most two are fetched.
+- Did-you-mean (`fatsecret_name_options`) reuses the hits from the failed
+  resolution's own search; no second provider round trip.
+- Outage honesty: `web_nutrition_lookup.recent_failure` exposes the fresh
+  failure reason; `server._unresolved_food_question` says the lookup service
+  was unreachable for infrastructure reasons and otherwise asks what the food
+  was (brand/dish/preparation). The canvas and voice paths never ask for a
+  nutrition label.
+- OpenFoodFacts text search is deleted (`search_openfoodfacts`, `_relevant`);
+  the barcode path (`search_openfoodfacts_by_code`) is unchanged.
+- Curated `restaurant_menu` rows are retained as a module (future cache seeds)
+  but are not consulted by the chain; the Layer 1 cache seeding itself and the
+  variant pick-list for an auto-match that also has close variants remain open.
+- Deliberately unchanged: the legacy web `/api/chat` path (`coach.py`
+  SYSTEM_PROMPT/TOOLS, `_coach_tool_handlers.lookup_food`) still lets the model
+  log a flagged "ESTIMATE" with its own macros and portion math. That is a
+  separate owner decision; only its stale provider wording was corrected.
 
 ## Problem
 

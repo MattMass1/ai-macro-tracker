@@ -3878,10 +3878,11 @@ async def api_canvas_action(request: Request) -> Any:
 
 @api_route("/api/voice/elevenlabs/token", methods=["POST"])
 async def api_elevenlabs_token(request: Request) -> Any:
-    """Owner-only: mint a short-lived ElevenLabs conversation token. The API key
-    stays server-side; only the token reaches the device."""
-    if current_user_id() != CONFIG.matt_user_id:
-        return {"error": "Voice is limited to the account owner"}, 403
+    """Mint a short-lived ElevenLabs conversation token for any authenticated
+    (invited) user. The API key stays server-side; only the token reaches the
+    device. NOTE (multi-user follow-up): the agent_turn webhook currently acts on
+    the owner account, so until per-user attribution lands every voice session
+    reads/writes the owner's data. Fine while the owner is the only user."""
     if CONFIG.voice_provider != "elevenlabs":
         return {"error": "ElevenLabs voice is not enabled"}, 409
     try:

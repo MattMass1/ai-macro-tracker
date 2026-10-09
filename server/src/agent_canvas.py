@@ -85,6 +85,73 @@ ACTIONS = frozenset({
 })
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
 _WORKOUT_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9 /&()+.'_\-]{0,79}\Z")
+_NAME_SPLIT = re.compile(r"[^a-z0-9]+")
+
+
+def _name_tokens(value: Any) -> list[str]:
+    return [t for t in _NAME_SPLIT.split(str(value).casefold()) if t]
+
+
+def _token_stem(token: str) -> str:
+    # Plural tolerance only ("flyes"/"curls" vs "flye"/"curl"); never rewrites
+    # short tokens or double-s words, so "press"/"abs" stay themselves.
+    if len(token) > 3 and token.endswith("es"):
+        return token[:-2]
+    if len(token) > 2 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def _tokens_match(a: str, b: str) -> bool:
+    return a == b or _token_stem(a) == _token_stem(b)
+
+
+def resolve_stored_name(query: Any, names: list) -> tuple[str | None, list[str]]:
+    """Match a spoken/typed name against stored names so users never need the
+    exact row. Returns (match, suggestions): exact wins, then plural/punctuation
+    normalization, then partial ("bench press" finds "Barbell Bench Press") in
+    either direction. A genuine tie returns suggestions for ONE specific
+    follow-up question instead of a dead end. Matching only ever selects among
+    stored names; it never invents one."""
+    query_tokens = _name_tokens(query)
+    if not query_tokens:
+        return None, []
+    unique = list(dict.fromkeys(n for n in names if isinstance(n, str) and n.strip()))
+    exact = [n for n in unique if n.casefold() == str(query).casefold()]
+    if len(exact) == 1:
+        return exact[0], []
+    query_stems = [_token_stem(t) for t in query_tokens]
+    fused_query = "".join(query_stems)  # "lat pull-down" == "Lat Pulldown"
+    normalized = [n for n in unique
+                  if [_token_stem(t) for t in _name_tokens(n)] == query_stems
+                  or "".join(_token_stem(t) for t in _name_tokens(n)) == fused_query]
+    if len(normalized) == 1:
+        return normalized[0], []
+    if normalized:
+        return None, normalized[:4]
+    # Partial: every query token appears in the candidate (or, failing that,
+    # every candidate token appears in the query, e.g. "pull day" -> "Pull").
+    for direction in ("forward", "reverse"):
+        found = []
+        for name in unique:
+            candidate_tokens = _name_tokens(name)
+            if not candidate_tokens:
+                continue
+            needles, haystack = ((query_tokens, candidate_tokens) if direction == "forward"
+                                 else (candidate_tokens, query_tokens))
+            if all(any(_tokens_match(n, h) for h in haystack) for n in needles):
+                found.append(name)
+        if len(found) == 1:
+            return found[0], []
+        if found:
+            return None, found[:4]
+    return None, []
+
+
+def _name_choice_question(query: Any, suggestions: list[str], scope: str) -> str:
+    if suggestions:
+        return f"By {query}, do you mean " + " or ".join(suggestions) + "?"
+    return f"I couldn't find {query} in {scope}. Which exercise do you mean?"
 
 
 def valid_id(value: Any) -> bool:
@@ -654,14 +721,15 @@ class CanvasService:
             catalog.append({"name": "request_exercise_swap", "description":
                 'Preview a minimal replacement. Does not write until the user taps Confirm. '
                 'Example: {"target":"last","replacement":"Cable Flyes"}. Use target active for this exercise. '
-                'Use an exact library name; call get_library if unclear.', "input_schema": {
+                "Pass the user's words as replacement; the server matches the library and asks if ambiguous.", "input_schema": {
                     "type": "object", "properties": {
                         "target": {"type": "string", "enum": ["active", "last"]},
                         "replacement": {"type": "string", "minLength": 1, "maxLength": 160}},
                     "required": ["target", "replacement"], "additionalProperties": False}})
             catalog.append({"name": "request_plan_edit", "description":
                 "Preview one explicit edit to one existing assigned-plan exercise. Does not write until the user taps native Confirm. "
-                "Use exact stored day and exercise names. For a suggestion or proposed new workout, do not call this tool.",
+                "Pass the user's words for day and exercise; the server resolves them against the stored plan and asks one "
+                "specific question if ambiguous. For a suggestion or proposed new workout, do not call this tool.",
                 "input_schema": {"type": "object", "properties": {
                     "day": {"type": "string", "minLength": 1, "maxLength": 80},
                     "exercise": {"type": "string", "minLength": 1, "maxLength": 160},
@@ -678,8 +746,9 @@ class CanvasService:
                     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}})
             catalog.append({"name": "propose_today_workout", "description":
                 "Preview TODAY's workout only (create, swap, shorten or remove exercises). Send the complete "
-                "proposed list for today using exact library names and a standard workout type (Push, Pull, Legs, "
-                "Abs, Cardio, Full Body) or a saved routine day. Nothing is saved until the user taps native "
+                "proposed list for today using the user's words for exercise names (the server matches your "
+                "library) and a workout type like Push, Pull, Legs, Abs, Cardio, Full Body or a saved routine "
+                "day. Nothing is saved until the user taps native "
                 "Confirm; the saved routine and other days are unchanged; nothing is logged as completed. "
                 "An empty exercises list creates an empty today plan; already logged exercises are kept. "
                 'Example: {"workout_type":"Pull","exercises":[{"name":"Lat Pulldown","sets":3,"reps":"10-12"},'
@@ -929,9 +998,11 @@ class CanvasService:
         if not workout or not workout["exercises"]:
             raise ValueError("No assigned session is available. Use the exercise library and logger.")
         rows = await self.store_factory().fetch_workout_library()
-        matches = [row for row in rows if str(row.get("name", "")).casefold() == replacement.casefold()]
-        if len(matches) != 1:
-            raise ValueError("Choose one exact exercise name from the library")
+        resolved, suggestions = resolve_stored_name(
+            replacement, [str(row.get("name", "")) for row in rows if isinstance(row, Mapping)])
+        if resolved is None:
+            raise ValueError(_name_choice_question(replacement, suggestions, "the exercise library"))
+        matches = [row for row in rows if str(row.get("name", "")) == resolved]
         index = len(workout["exercises"]) - 1 if args["target"] == "last" else next(
             i for i, ex in enumerate(workout["exercises"]) if ex["id"] == workout["activeExerciseId"])
         before = await self.store_factory().fetch_workout_plan()
@@ -972,7 +1043,7 @@ class CanvasService:
         days = before.get("days") if isinstance(before, Mapping) else None
         if not isinstance(days, Mapping):
             return {"status": "needs_clarification", "question": "You don't have an assigned workout plan to edit yet."}
-        targets = []
+        entries = []
         exact_day_key = next((name for name in days if isinstance(name, str) and day_query
                               and name.casefold() == day_query.casefold()), None)
         for day_name, day in days.items():
@@ -985,10 +1056,17 @@ class CanvasService:
                               or (exact_day_key is None and day_query.casefold() not in names)):
                 continue
             for index, exercise in enumerate(day.get("exercises") or []):
-                if isinstance(exercise, Mapping) and str(exercise.get("name", "")).casefold() == exercise_name.casefold():
-                    targets.append((day_name, index, exercise))
-        if not targets:
-            return {"status": "needs_clarification", "question": f"I couldn't find {exercise_name} in that assigned plan. Which exercise do you mean?"}
+                if isinstance(exercise, Mapping):
+                    entries.append((day_name, index, exercise))
+        # The user speaks approximately; resolve their words against the stored
+        # plan rather than demanding the exact row.
+        resolved, suggestions = resolve_stored_name(
+            exercise_name, [str(e.get("name", "")) for _d, _i, e in entries])
+        if resolved is None:
+            return {"status": "needs_clarification",
+                    "question": _name_choice_question(exercise_name, suggestions, "your assigned plan")}
+        exercise_name = resolved
+        targets = [(d, i, e) for d, i, e in entries if str(e.get("name", "")) == resolved]
         if len(targets) > 1:
             choices = ", ".join(day for day, _index, _exercise in targets)
             return {"status": "needs_clarification", "question": f"{exercise_name} appears on {choices}. Which plan day should I edit?"}
@@ -1002,11 +1080,11 @@ class CanvasService:
             if not isinstance(replacement, str) or not replacement.strip():
                 raise ValueError("Invalid replacement name")
             rows = await self.store_factory().fetch_workout_library()
-            matches = [row["name"] for row in rows if isinstance(row, Mapping)
-                       and isinstance(row.get("name"), str) and row["name"].casefold() == replacement.casefold()]
-            if len(matches) != 1:
-                return {"status": "needs_clarification", "question": f"I couldn't match {replacement} to one exact exercise in the workout library."}
-            replacement_name = matches[0]
+            replacement_name, suggestions = resolve_stored_name(
+                replacement, [row.get("name") for row in rows if isinstance(row, Mapping)])
+            if replacement_name is None:
+                return {"status": "needs_clarification",
+                        "question": _name_choice_question(replacement, suggestions, "the exercise library")}
         day_name, index, original = targets[0]
         after = deepcopy(before)
         edited = after["days"][day_name]["exercises"][index]
@@ -1064,6 +1142,8 @@ class CanvasService:
             if isinstance(day, str) and day in days]
         label = next((name for name in loggable if name.casefold() == workout_type.casefold()), None)
         if label is None:
+            label, _ = resolve_stored_name(workout_type, loggable)  # "pull day" -> "Pull"
+        if label is None:
             return {"status": "needs_clarification",
                     "question": "Which workout type is this: " + ", ".join(dict.fromkeys(loggable)) + "?"}
         workout_type = label
@@ -1082,16 +1162,14 @@ class CanvasService:
             if not isinstance(reps, str) or not 1 <= len(reps.strip()) <= 40:
                 raise ValueError("Reps must be a short non-empty value")
             proposed.append({"name": name.strip(), "sets": sets, "reps": reps.strip()})
-        library = {}
-        for row in await store.fetch_workout_library():
-            if isinstance(row, Mapping) and isinstance(row.get("name"), str):
-                library.setdefault(row["name"].casefold(), []).append(row["name"])
+        library_names = [row.get("name") for row in await store.fetch_workout_library()
+                         if isinstance(row, Mapping) and isinstance(row.get("name"), str)]
         for exercise in proposed:
-            matches = library.get(exercise["name"].casefold(), [])
-            if len(matches) != 1:
+            resolved, suggestions = resolve_stored_name(exercise["name"], library_names)
+            if resolved is None:
                 return {"status": "needs_clarification",
-                        "question": f"I couldn't match {exercise['name']} to one exact exercise in your library. Which exercise do you mean?"}
-            exercise["name"] = matches[0]
+                        "question": _name_choice_question(exercise["name"], suggestions, "your exercise library")}
+            exercise["name"] = resolved
         names = [exercise["name"].casefold() for exercise in proposed]
         if len(set(names)) != len(names):
             raise ValueError("Each exercise may appear once in today's plan")
@@ -1377,8 +1455,9 @@ today's log (view log: a receipt timeline of saved meals and sets), or dismissin
 Read via supplied tools when answering numbers. Do not imply opening a logger saved any sets.
 For today's workout, what is left, or what is next, call get_workout_outlook; say planned vs logged.
 To create, swap, shorten or remove exercises for today use propose_today_workout (today only by
-default; the saved routine is unchanged; native Confirm required; use exact exercise-library names
-and a standard workout type or saved routine day; use history only for load guidance).
+default; the saved routine is unchanged; native Confirm required; use history only for load guidance).
+Never ask the user for exact stored names: call the edit tool with their words. The server resolves
+names against the plan/library and returns one specific question only when genuinely ambiguous.
 An explicit request to change the SAVED ROUTINE itself (every future Push day, the template) uses
 request_plan_edit for one exercise. A contextual active/last
 swap may use request_exercise_swap. Never perform a whole-plan rewrite for either operation.

@@ -41,29 +41,50 @@ _fallback_turn_counters: dict[str, Any] = defaultdict(lambda: itertools.count())
 # lost on restart, after which the webhook safely rejects rather than guessing.
 _VOICE_SESSION_TTL_SECONDS = 2 * 60 * 60
 _VOICE_SESSION_MAX = 4096
-_voice_sessions: "OrderedDict[str, tuple[float, Any]]" = OrderedDict()
+_voice_sessions: "OrderedDict[str, tuple[float, Any, str | None]]" = OrderedDict()
 
 
-def record_voice_session(conversation_id: str, user_id: Any, *, now: float | None = None) -> None:
-    """Remember which user started an ElevenLabs conversation."""
+def record_voice_session(
+    conversation_id: str,
+    user_id: Any,
+    *,
+    app_session_id: str | None = None,
+    now: float | None = None,
+) -> None:
+    """Remember which user started an ElevenLabs conversation, and which canvas
+    session their app is viewing. Binding the voice turn to the app's own session
+    (not a separately derived one) is what lets the app render the components and
+    the native Confirm card the turn produces."""
     stamp = time.monotonic() if now is None else now
-    _voice_sessions[conversation_id] = (stamp, user_id)
+    _voice_sessions[conversation_id] = (stamp, user_id, app_session_id)
     _voice_sessions.move_to_end(conversation_id)
     while len(_voice_sessions) > _VOICE_SESSION_MAX:
         _voice_sessions.popitem(last=False)
 
 
-def resolve_voice_session(conversation_id: str, *, now: float | None = None) -> Any | None:
-    """The user who started this conversation, or None if unknown/expired. Never
-    falls back to an owner: unknown means the turn cannot be attributed."""
+def _live_entry(conversation_id: str, now: float | None) -> tuple[Any, str | None] | None:
     entry = _voice_sessions.get(conversation_id)
     if entry is None:
         return None
-    stamp, user_id = entry
+    stamp, user_id, app_session_id = entry
     if (time.monotonic() if now is None else now) - stamp > _VOICE_SESSION_TTL_SECONDS:
         _voice_sessions.pop(conversation_id, None)
         return None
-    return user_id
+    return user_id, app_session_id
+
+
+def resolve_voice_session(conversation_id: str, *, now: float | None = None) -> Any | None:
+    """The user who started this conversation, or None if unknown/expired. Never
+    falls back to an owner: unknown means the turn cannot be attributed."""
+    entry = _live_entry(conversation_id, now)
+    return None if entry is None else entry[0]
+
+
+def resolve_voice_app_session(conversation_id: str, *, now: float | None = None) -> str | None:
+    """The app canvas session this conversation is bound to, or None if unknown,
+    expired, or the app did not supply one (then the webhook uses a derived id)."""
+    entry = _live_entry(conversation_id, now)
+    return None if entry is None else entry[1]
 
 
 class ElevenLabsVoiceError(RuntimeError):
@@ -143,12 +164,26 @@ def _coerce_turn_index(value: Any, conversation_id: str) -> int:
 TurnFn = Callable[[str, str, str], Awaitable[Mapping[str, Any]]]
 
 
+def _valid_session_override(value: Any) -> str | None:
+    """A client-supplied canvas session id is only ever one of the caller's own
+    sessions (canvas state is keyed by (user, session_id)), so it can't cross
+    tenants -- but it must be a canonical UUID to be used as a turn-id namespace."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    try:
+        return candidate if str(UUID(candidate)) == candidate else None
+    except ValueError:
+        return None
+
+
 async def run_agent_turn(
     body: Mapping[str, Any],
     *,
     provided_secret: str | None,
     expected_secret: str,
     turn_fn: TurnFn,
+    session_id_override: str | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Validate the webhook, derive trusted ids, run the shared turn, and return
     the spoken reply. Returns (payload, status_code). On an unverifiable outcome
@@ -165,7 +200,10 @@ async def run_agent_turn(
         return {"error": "missing conversation_id"}, 400
     conversation_id = conversation_id.strip()
     turn_index = _coerce_turn_index(body.get("turn_index"), conversation_id)
-    session_id = derive_session_id(conversation_id)
+    # Prefer the app's own canvas session so the turn's components and Confirm
+    # card land in the session the app is actually viewing; fall back to a
+    # derived id when the app did not supply one.
+    session_id = _valid_session_override(session_id_override) or derive_session_id(conversation_id)
     turn_id = derive_turn_id(session_id, conversation_id, turn_index)
     try:
         result = await turn_fn(session_id, turn_id, message)

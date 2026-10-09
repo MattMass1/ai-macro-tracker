@@ -88,8 +88,14 @@ private struct AgentNativeComponent: View {
                 }
             case .profileMetrics:
                 Text(item.text ?? "Share your name with the coach and enter your measurements.").font(.subheadline)
-                AgentSetupNumberForm(fields: [("height_cm", "Height (cm)"), ("weight_kg", "Weight (kg)"), ("goal_weight_kg", "Goal weight (kg)")], busy: canvas.busy || canvas.envelope?.approval != nil) { values in
-                    act(.init(action: .submitMetrics, numbers: values))
+                AgentSetupNumberForm(fields: [("height_in", "Height (in)"), ("weight_lb", "Weight (lb)"), ("goal_weight_lb", "Goal weight (lb)")], busy: canvas.busy || canvas.envelope?.approval != nil) { values in
+                    // Collected imperial (US), stored metric: in -> cm, lb -> kg.
+                    func r(_ x: Double) -> Double { (x * 10).rounded() / 10 }
+                    var metric: [String: Double] = [:]
+                    if let h = values["height_in"] { metric["height_cm"] = r(h * 2.54) }
+                    if let w = values["weight_lb"] { metric["weight_kg"] = r(w * 0.45359237) }
+                    if let g = values["goal_weight_lb"] { metric["goal_weight_kg"] = r(g * 0.45359237) }
+                    act(.init(action: .submitMetrics, numbers: metric))
                 }
             case .targetStatus:
                 structuredRows

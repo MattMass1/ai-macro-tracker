@@ -143,12 +143,16 @@ struct ProgressDashboardView: View {
 private struct WeightTrendCard: View {
     let weight: TrendWeight
 
+    // Stored metric, shown imperial (US). Progress below is unit-agnostic.
+    private var currentLb: Double { weight.currentKg * 2.2046226218 }
+    private var goalLb: Double { weight.goalKg * 2.2046226218 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack { SectionLabel(text: "Weight"); Spacer(); Image(systemName: "scalemass.fill").foregroundStyle(Theme.accent) }
-            Text("Current \(weight.currentKg.formatted(.number.precision(.fractionLength(1)))) kg → Goal \(weight.goalKg.formatted(.number.precision(.fractionLength(1)))) kg")
+            Text("Current \(currentLb.formatted(.number.precision(.fractionLength(0)))) lb → Goal \(goalLb.formatted(.number.precision(.fractionLength(0)))) lb")
                 .font(.headline).foregroundStyle(Theme.ink)
-            Text("\(abs(weight.currentKg - weight.goalKg).formatted(.number.precision(.fractionLength(1)))) kg to goal")
+            Text("\(abs(currentLb - goalLb).formatted(.number.precision(.fractionLength(0)))) lb to goal")
                 .font(.caption).foregroundStyle(Theme.muted)
             GeometryReader { geometry in
                 ZStack(alignment: .leading) { Capsule().fill(Theme.divider); Capsule().fill(Theme.accent).frame(width: geometry.size.width * progress) }

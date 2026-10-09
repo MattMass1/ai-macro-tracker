@@ -105,12 +105,12 @@ final class ElevenLabsVoiceTests: XCTestCase {
         }
     }
 
-    func testProviderPreferenceResolvesOverrideThenCacheThenDefault() {
+    func testProviderPreferenceDefaultsToElevenLabsUnlessOverridden() {
         let suite = UserDefaults(suiteName: "el-voice-tests-\(UUID().uuidString)")!
-        XCTAssertEqual(VoiceProviderPreference.resolved(suite), "openai")
-        VoiceProviderPreference.cacheServerValue("elevenlabs", suite)
+        // ElevenLabs is the default voice now.
         XCTAssertEqual(VoiceProviderPreference.resolved(suite), "elevenlabs")
-        VoiceProviderPreference.cacheServerValue("garbage", suite)  // ignored
+        // Only an explicit, valid debug override changes it.
+        suite.set("garbage", forKey: "mmacros.voice.provider.override")
         XCTAssertEqual(VoiceProviderPreference.resolved(suite), "elevenlabs")
         suite.set("openai", forKey: "mmacros.voice.provider.override")
         XCTAssertEqual(VoiceProviderPreference.resolved(suite), "openai")  // override wins

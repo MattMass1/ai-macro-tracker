@@ -156,7 +156,9 @@ def agent_config(llm: str, voice_id: str, tool_id: str) -> dict:
                 "first_message": FIRST_MESSAGE,
                 "language": "en",
             },
-            "turn": {"turn_timeout": 7, "turn_eagerness": "normal"},
+            # "patient" = less trigger-happy on echo/noise barge-in (helps the
+            # simulator, where there's no hardware echo cancellation).
+            "turn": {"turn_timeout": 7, "turn_eagerness": "patient"},
             # Custom/cloned voices are fine-tuned for specific models; English
             # agents require a turbo or flash v2 model. flash v2 = lowest latency.
             "tts": {"voice_id": voice_id, "model_id": "eleven_flash_v2"},

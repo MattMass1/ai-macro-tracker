@@ -51,6 +51,7 @@ final class AgentSurfaceStore: ObservableObject {
     private var swapTurnIdentity = AgentTurnIdentity()
     private weak var app: AppStore?
     private var expiryTask: Task<Void, Never>?
+    private var canvasPullTask: Task<Void, Never>?
     private(set) var instanceRecoveryTask: Task<Void, Never>?
     private var instanceRecoveryID: UUID?
     var sessionId: String { state.sessionId }
@@ -66,12 +67,53 @@ final class AgentSurfaceStore: ObservableObject {
         state = AgentSurfaceState(sessionId: sessionId)
         voice = Self.makeVoice(sessionId)
         connectVoice()
+        startCanvasPull()
+    }
+
+    /// GPT voice streams canvas snapshots back over its websocket (see
+    /// `connectVoice`/`onCanvas`). The ElevenLabs SDK runs its own WebRTC link to
+    /// ElevenLabs, so a voice turn commits server-side with no push to the app.
+    private static var voiceIsPullBased: Bool {
+        #if canImport(ElevenLabs)
+        return VoiceProviderPreference.resolved() == "elevenlabs"
+        #else
+        return false
+        #endif
+    }
+
+    /// While an ElevenLabs voice session is live, pull the canvas so the turn's
+    /// components and native Confirm card appear and stay fresh -- the same result
+    /// the GPT path gets for free from pushed snapshots. One task for the store's
+    /// lifetime; it reads `voice`/`sessionId`/`generation` live, so it follows
+    /// every session recreation, and no-ops whenever voice is idle or signed out.
+    private func startCanvasPull() {
+        guard Self.voiceIsPullBased, canvasPullTask == nil else { return }
+        canvasPullTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                guard let self else { return }
+                await self.pullCanvasDuringVoice()
+            }
+        }
+    }
+
+    private func pullCanvasDuringVoice() async {
+        guard voice.state == .listening || voice.state == .speaking,
+              !busy, instanceRecoveryTask == nil, authenticated() else { return }
+        let current = generation
+        do {
+            let value = try await api.canvasSnapshot(sessionId: sessionId)
+            guard current == generation else { return }
+            if try receive(value) { await reloadData() }
+        } catch {
+            // A transient poll failure must never disrupt the live voice session.
+        }
     }
 
     private static func makeVoice(_ sessionId: String) -> LiveCoachController {
         #if canImport(ElevenLabs)
         if VoiceProviderPreference.resolved() == "elevenlabs" {
-            let coordinator = ElevenLabsCoordinator(conversation: LiveElevenLabsConversation())
+            let coordinator = ElevenLabsCoordinator(conversation: LiveElevenLabsConversation(sessionId: sessionId))
             return LiveCoachController(permission: SystemMicrophonePermission(),
                 transport: ElevenLabsVoiceTransport(coordinator: coordinator),
                 audio: ElevenLabsVoiceAudio(coordinator: coordinator))

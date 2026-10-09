@@ -3891,9 +3891,19 @@ async def api_elevenlabs_token(request: Request) -> Any:
         )
     except elevenlabs_voice.ElevenLabsVoiceError as exc:
         return {"error": str(exc)}, 502
+    try:
+        body = await _json_body(request)
+    except Exception:
+        body = {}
+    raw_session = body.get("session_id") if isinstance(body, Mapping) else None
+    app_session_id = raw_session.strip() if isinstance(raw_session, str) and raw_session.strip() else None
     conversation_id = str(result.get("conversation_id") or "")
     if conversation_id:
-        elevenlabs_voice.record_voice_session(conversation_id, current_user_id())
+        elevenlabs_voice.record_voice_session(
+            conversation_id, current_user_id(), app_session_id=app_session_id
+        )
+        logging.getLogger("mmacros.voice").info(
+            "token minted conv=%s app_session=%s", conversation_id[:12], app_session_id)
     return result
 
 
@@ -3918,9 +3928,21 @@ async def api_elevenlabs_agent_turn(request: Request) -> Any:
     if user_id is None:
         # Never fall back to the owner: unknown conversation = cannot attribute.
         return {"reply": "This voice session has expired. Start a new one to continue."}, 200
+    # Run the turn on the app's own canvas session (recorded at token issuance) so
+    # the components and native Confirm card it produces appear in the session the
+    # app is viewing -- the same behavior the typed path already gets.
+    app_session_id = elevenlabs_voice.resolve_voice_app_session(conversation_id.strip())
+    _vlog = logging.getLogger("mmacros.voice")
+    _vlog.info("webhook conv=%s user_bound=%s app_session=%s",
+               conversation_id.strip()[:12], user_id is not None, app_session_id)
 
     async def turn_fn(session_id: str, turn_id: str, message: str) -> Any:
-        return await canvas_service().turn(session_id, turn_id, message, adapter="voice")
+        result = await canvas_service().turn(session_id, turn_id, message, adapter="voice")
+        surfaces = len(result.get("surfaces") or []) if isinstance(result, Mapping) else -1
+        approval = bool(result.get("approval")) if isinstance(result, Mapping) else False
+        _vlog.info("voice turn ran session=%s surfaces=%d approval=%s",
+                   session_id, surfaces, approval)
+        return result
 
     context_token = bind_user(user_id)
     try:
@@ -3929,6 +3951,7 @@ async def api_elevenlabs_agent_turn(request: Request) -> Any:
             provided_secret=provided,
             expected_secret=CONFIG.elevenlabs_tool_secret,
             turn_fn=turn_fn,
+            session_id_override=app_session_id,
         )
     finally:
         reset_user(context_token)

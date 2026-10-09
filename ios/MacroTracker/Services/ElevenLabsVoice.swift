@@ -19,13 +19,11 @@ enum VoiceProviderPreference {
     private static let allowed: Set<String> = ["openai", "elevenlabs"]
 
     static func resolved(_ defaults: UserDefaults = .standard) -> String {
+        // ElevenLabs is THE voice. Only an explicit debug override changes it.
         if let override = defaults.string(forKey: overrideKey), allowed.contains(override) {
             return override
         }
-        if let cached = defaults.string(forKey: cacheKey), allowed.contains(cached) {
-            return cached
-        }
-        return "openai"
+        return "elevenlabs"
     }
 
     static func cacheServerValue(_ value: String?, _ defaults: UserDefaults = .standard) {
@@ -195,10 +193,14 @@ final class LiveElevenLabsConversation: ElevenLabsConversationDriving {
     private var conversation: Conversation?
     private var cancellables = Set<AnyCancellable>()
 
-    init(tokenProvider: @escaping @Sendable () async throws -> String = {
-        try await APIClient.shared.elevenLabsToken().token
-    }) {
-        self.tokenProvider = tokenProvider
+    /// `sessionId` is the app's canvas session. It is sent to our token endpoint
+    /// so the server binds this conversation to that session; voice turns then
+    /// mutate the session the app is viewing. The default provider captures it.
+    init(sessionId: String,
+         tokenProvider: (@Sendable () async throws -> String)? = nil) {
+        self.tokenProvider = tokenProvider ?? {
+            try await APIClient.shared.elevenLabsToken(sessionId: sessionId).token
+        }
     }
 
     func start() async throws {

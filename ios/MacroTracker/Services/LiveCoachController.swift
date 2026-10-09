@@ -133,7 +133,7 @@ protocol LiveCoachAudioHandling: AnyObject {
     var capturedAudio: AsyncStream<Data> { get }
     var playbackActivity: AsyncStream<Bool> { get }
     var lifecycleEvents: AsyncStream<LiveCoachAudioLifecycleEvent> { get }
-    func start() throws
+    func start() async throws
     func play(_ data: Data) throws
     func setMuted(_ muted: Bool)
     func recoverFromConfigurationChange() throws
@@ -226,7 +226,7 @@ final class LiveCoachController: ObservableObject {
             transportIsOpen = true
             let events = try await transport.connect()
             guard generation == sessionGeneration else { return }
-            try audio.start()
+            try await audio.start()
             audioIsRunning = true
             state = .listening
             launchSessionTasks(events: events, generation: generation)
@@ -552,3 +552,4 @@ final class LiveCoachController: ObservableObject {
         return String(combined.suffix(4_000))
     }
 }
+

@@ -70,10 +70,16 @@ final class APIClient {
     func brief(_ date: String? = nil) async throws -> BriefPayload { try await get("api/brief\(date.map { "?date=\(encoded($0))" } ?? "")") }
     func saveBrief(_ text: String, date: String? = nil) async throws -> BriefPayload { try await send("api/brief", body: BriefRequest(text: text, date: date)) }
     func trends(days: Int) async throws -> TrendsPayload { try await get("api/trends?days=\(days)") }
-    /// Owner-only: mint a short-lived ElevenLabs conversation token. The API key
-    /// stays server-side; only this token reaches the device.
-    func elevenLabsToken() async throws -> ElevenLabsTokenPayload {
-        try await request("api/voice/elevenlabs/token", method: "POST", body: Optional<Data>.none)
+    /// Mint a short-lived ElevenLabs conversation token for any invited user. The
+    /// API key stays server-side; only this token reaches the device. Passing the
+    /// app's canvas `sessionId` binds the conversation to that session server-side,
+    /// so voice turns render their components and Confirm card where the app can
+    /// see them (the webhook never trusts a client id for tenancy -- canvas state
+    /// is keyed per user).
+    func elevenLabsToken(sessionId: String? = nil) async throws -> ElevenLabsTokenPayload {
+        var body: Data?
+        if let sessionId { body = try JSONEncoder().encode(["session_id": sessionId]) }
+        return try await request("api/voice/elevenlabs/token", method: "POST", body: body)
     }
 
     /// Opaque high-entropy credential fingerprint, never the token itself.

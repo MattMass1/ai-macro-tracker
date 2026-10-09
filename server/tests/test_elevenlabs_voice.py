@@ -158,6 +158,41 @@ async def test_run_agent_turn_surfaces_turn_validation_as_spoken_reply():
     assert status == 200 and "message between" in payload["reply"]
 
 
+@pytest.mark.asyncio
+async def test_run_agent_turn_uses_app_session_override_when_valid():
+    seen = {}
+
+    async def turn_fn(session_id, turn_id, message):
+        seen["ids"] = (session_id, turn_id)
+        return {"reply": "ok"}
+
+    app_sid = str(uuid4())
+    body = {"message": "log a banana", "conversation_id": "conv_9", "turn_index": 2}
+    _, status = await elv.run_agent_turn(
+        body, provided_secret="s", expected_secret="s", turn_fn=turn_fn,
+        session_id_override=app_sid,
+    )
+    assert status == 200
+    # Ran on the app's own session, not the derived one; turn id namespaced to it.
+    assert seen["ids"] == (app_sid, elv.derive_turn_id(app_sid, "conv_9", 2))
+
+
+@pytest.mark.asyncio
+async def test_run_agent_turn_ignores_non_uuid_override():
+    seen = {}
+
+    async def turn_fn(session_id, turn_id, message):
+        seen["session"] = session_id
+        return {"reply": "ok"}
+
+    body = {"message": "hi", "conversation_id": "conv_9", "turn_index": 0}
+    await elv.run_agent_turn(
+        body, provided_secret="s", expected_secret="s", turn_fn=turn_fn,
+        session_id_override="not-a-uuid",
+    )
+    assert seen["session"] == elv.derive_session_id("conv_9")  # falls back to derived
+
+
 # ---- routes (auth + wiring) -------------------------------------------------
 
 class AuthStore(MemoryStore):
@@ -231,6 +266,18 @@ def test_voice_session_record_resolve_and_ttl():
     assert elv.resolve_voice_session("never-seen", now=1000.0) is None
 
 
+def test_voice_session_records_optional_app_session():
+    elv._voice_sessions.clear()
+    speaker, app_sid = uuid4(), str(uuid4())
+    elv.record_voice_session("c", speaker, app_session_id=app_sid, now=1000.0)
+    assert elv.resolve_voice_session("c", now=1000.0) == speaker
+    assert elv.resolve_voice_app_session("c", now=1000.0) == app_sid
+    # Absent app session (older/typed-only callers) and unknown ids resolve to None.
+    elv.record_voice_session("d", speaker, now=1000.0)
+    assert elv.resolve_voice_app_session("d", now=1000.0) is None
+    assert elv.resolve_voice_app_session("missing", now=1000.0) is None
+
+
 def test_agent_turn_webhook_binds_the_session_user_not_the_owner(monkeypatch):
     from auth import current_user_id
     owner, speaker = uuid4(), uuid4()
@@ -295,3 +342,50 @@ def test_agent_turn_webhook_refuses_unknown_conversation_without_touching_any_ac
         assert res.status_code == 200
         assert "expired" in res.json().get("reply", "").lower()
         assert ran == []
+
+
+def test_token_binds_app_session_and_webhook_runs_turn_on_it(monkeypatch):
+    """The app sends its canvas session id when minting a token; the webhook then
+    runs the voice turn on THAT session (so components + Confirm land where the app
+    is looking), still bound to the token-minting user."""
+    from auth import current_user_id
+    owner, speaker = uuid4(), uuid4()
+    store = AuthStore(owner, speaker)
+    monkeypatch.setattr(srv, "_client", store)
+    _configure(monkeypatch, owner=owner, voice_provider="elevenlabs",
+               elevenlabs_api_key="sk-secret", elevenlabs_agent_id="agent_1",
+               elevenlabs_tool_secret="hook-secret")
+
+    async def fake_mint(*, api_key, agent_id):
+        return {"token": "tok_live", "conversation_id": "conv_app", "agent_id": agent_id}
+
+    monkeypatch.setattr(srv.elevenlabs_voice, "mint_conversation_token", fake_mint)
+    elv._voice_sessions.clear()
+
+    calls = []
+
+    class FakeCanvas:
+        async def turn(self, session_id, turn_id, message, *, adapter):
+            calls.append((session_id, current_user_id()))
+            return {"reply": "Logged it.", "surfaces": []}
+
+    monkeypatch.setattr(srv, "_canvas_service", FakeCanvas(), raising=False)
+
+    app_sid = str(uuid4())
+    with TestClient(srv.create_app()) as client:
+        # 'other-tok' is the speaker (not the owner).
+        res = client.post("/api/voice/elevenlabs/token",
+                          headers={"Authorization": "Bearer other-tok"},
+                          json={"session_id": app_sid})
+        assert res.status_code == 200, res.text
+        assert elv.resolve_voice_app_session("conv_app") == app_sid
+        hook = client.post(
+            "/api/voice/elevenlabs/agent-turn",
+            json={"message": "log a banana", "conversation_id": "conv_app", "turn_index": 0},
+            headers={"X-Elevenlabs-Tool-Secret": "hook-secret"},
+        )
+        assert hook.status_code == 200, hook.text
+        assert len(calls) == 1
+        session_id, bound_user = calls[0]
+        assert session_id == app_sid  # ran on the app's own canvas session
+        assert bound_user == speaker  # still bound to the token-minting user

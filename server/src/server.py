@@ -4101,8 +4101,12 @@ async def api_canvas_snapshot(request: Request) -> Any:
         snapshot = await canvas_service().snapshot(request.path_params["session_id"], create=True)
     except ValueError as exc:
         raise MacroError(str(exc)) from None
-    etag = f'"{snapshot.get("instanceId", "")}:{snapshot.get("revision", 0)}"'
-    if request.headers.get("if-none-match", "").strip() == etag:
+    tag = f'{snapshot.get("instanceId", "")}:{snapshot.get("revision", 0)}'
+    etag = f'"{tag}"'
+    # The edge proxy (Render) may hand the client a weak validator (W/"...");
+    # compare the opaque tag itself, however it was quoted or weakened.
+    presented = [part.strip() for part in request.headers.get("if-none-match", "").split(",")]
+    if any(part.removeprefix("W/").strip('"') == tag for part in presented if part):
         return Response(status_code=304, headers={"ETag": etag})
     return JSONResponse(snapshot, headers={"ETag": etag})
 

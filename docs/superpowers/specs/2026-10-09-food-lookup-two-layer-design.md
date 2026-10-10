@@ -200,6 +200,30 @@ minimum one clarification question, and then I move on." Enforced in
   `log_meal` (no meal type, portion or are-you-sure), relays the server's one
   question exactly, and calls `log_meal` again with the user's answer.
 
+## Efficiency scan (2026-10-10, four read-only agents; fixes in 05f8ff6)
+
+Fixed: per-request device-token UPDATE (now a 30 s in-process cache); poll-time
+re-read of four account facts (now at most once a minute, gathered); the
+end-of-turn setup re-sync when setup is complete; a fresh TCP+TLS handshake per
+LLM round / Exa search / extraction (`http_clients.shared_client`); the local
+layer asked the catalog about the same text up to four times per log (memoized
+per tool call); did-you-mean re-searching and dropping options because it was
+keyed on the raw text; a ranking gate looser than the acceptance gate (wasted
+item fetches); unbounded web caches; stale provider hits after `save_preset`;
+snapshot ETag + 304 and an iOS poll that uses it; the iOS full six-request
+dashboard reload after every canvas action.
+
+Deferred, owner sign-off needed (schema or data): an index on
+`food_identifiers(lower(provider), external_id)` and extending
+`nutrition_entries_user_day_idx` with `created_at DESC`; a scheduled purge of
+completed `request_operations` rows older than 7 days (a replay cache, grows
+forever); explicit column lists instead of `SELECT *` on `nutrition_entries`
+(up to 16 KB JSONB per row read and discarded); merging the ~20-statement
+idempotent meal write into fewer CTEs. Also noted, not done: trimming the
+14.6 KB tool catalog and caching its construction (token cost per round);
+batching per-round usage inserts; `known_food_with_bad_portion` re-running
+the cascade on the bad-portion path.
+
 ## Related perf work (shipped separately)
 
 - Canvas snapshot reads no longer queue behind in-flight turns (lock-free

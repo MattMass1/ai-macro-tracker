@@ -115,6 +115,9 @@ async def test_snapshot_route_returns_304_for_an_unchanged_revision(monkeypatch)
     unchanged = await srv.api_canvas_snapshot(request({"if-none-match": '"inst-1:7"'}))
     assert unchanged.status_code == 304 and unchanged.headers["etag"] == '"inst-1:7"'
     assert not unchanged.body
+    # Seen in production: Render's proxy weakens the validator to W/"...".
+    weak = await srv.api_canvas_snapshot(request({"if-none-match": 'W/"inst-1:7"'}))
+    assert weak.status_code == 304
     stale = await srv.api_canvas_snapshot(request({"if-none-match": '"inst-1:6"'}))
     assert stale.status_code == 200
 

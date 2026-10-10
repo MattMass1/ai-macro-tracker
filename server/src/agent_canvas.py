@@ -32,6 +32,67 @@ SESSION_TURN_LIMIT = 64
 SESSION_REPLAY_BYTE_LIMIT = 128_000
 
 
+def _food_reply_presentation(reply: str, request: str) -> str:
+    """Render known food metadata as ordinary speech, without changing evidence.
+
+    Only whole labeled machine clauses and FatSecret's numeric record syntax
+    are formatted. Nutrition numbers and natural uncertainty/consent text are
+    not matched. A current positive diagnostic request keeps the raw reply.
+    """
+    request = request.replace("’", "'")
+    negative = re.search(r"\b(?:stop|quit|avoid|hide|without|don't|do not)\b", request, re.I)
+    field = (r"(?:diagnostic(?: metadata| details)?|internal metadata|"
+        r"verification[_ -]state|evidence[_ -]hash|resolution[_ -](?:ref|reference)|"
+        r"(?:provider|record|source)(?: record)?[_ -](?:ids?|identifiers?))\b")
+    diagnostic = re.search(
+        r"^\s*(?:please\s+)?(?:(?:can|could|would) you\s+)?"
+        r"(?:show|give|include|print|return|list|display|provide)\b[^.!?]{0,80}\b" + field,
+        request, re.I,
+    ) or re.search(r"^\s*what (?:is|are)\s+(?:(?:the|raw|internal|current)\s+)*" + field,
+                   request, re.I)
+    if diagnostic and not negative:
+        return reply
+    states = {
+        "exact_identifier": "", "official_curated": "", "internal_curated": "",
+        "official_source_exact_row": "", "provider_exact_identity": "",
+        "unverified_web_estimate": "This is a web estimate.",
+        "provider_search_match": "The food match is uncertain.",
+        "unknown": "The lookup status is unknown.",
+        "unresolved": "The food match is unresolved.",
+        "untrusted": "The nutrition source is uncertain.",
+    }
+    rendered = []
+    changed = False
+    for part in re.split(r"(?<=;)\s*|(?<=\.)\s+|\n+", reply):
+        # Interpret inline formatting only for known metadata-clause matching;
+        # the original nutrition prose and its Markdown are kept intact.
+        body = re.sub(r"\*\*|__|`", "", part.strip(" \t\r\n.;"))
+        state = re.fullmatch(r"verification[_ -]state\s*[:=]\s*`?([a-z_]+)`?", body, re.I)
+        opaque = re.fullmatch(
+            r"(?:evidence[_ -]hash|resolution[_ -](?:ref|reference))\s*[:=]\s*`?[a-f0-9]{16,128}`?",
+            body, re.I,
+        )
+        if state and state[1].casefold() in states:
+            changed = True
+            replacement = states[state[1].casefold()]
+            if replacement:
+                rendered.append(replacement)
+            continue
+        if opaque:
+            changed = True
+            continue
+        plain = (re.sub(r"\bFatSecret:\s*\d+\b", "FatSecret", part, flags=re.I)
+                 if re.fullmatch(r"Source:\s*FatSecret:\s*\d+", body, re.I) else part)
+        changed = changed or plain != part
+        rendered.append(plain)
+    if not changed:
+        return reply
+    # A removed final metadata clause must not leave a dangling semicolon.
+    if rendered and rendered[-1].endswith(";"):
+        rendered[-1] = rendered[-1][:-1] + "."
+    return " ".join(rendered).strip()
+
+
 @dataclass
 class CanvasState:
     session_id: str
@@ -838,6 +899,10 @@ class CanvasService:
             logging.getLogger("mmacros.turn").info(
                 "turn adapter=%s rounds=%d elapsed=%.1fs", adapter, llm_rounds,
                 time.monotonic() - turn_started)
+            reply = _food_reply_presentation(reply, message) or str(
+                (last_food_result or {}).get("confirmation")
+                or "I couldn't prepare a useful answer."
+            )
             await store.insert_chat_message("assistant", reply)
             # A component request must survive a provider no-tool response.
             if not presented and last_food_result is None and not session.approval and re.search(

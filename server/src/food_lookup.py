@@ -106,7 +106,7 @@ _VOLUME_UNITS = frozenset({
 _NUM_TOKEN = r"(?:\d+(?:\.\d+)?(?:/\d+)?|" + "|".join(_NUMBER_WORDS) + r")"
 _UNIT_TOKEN = "|".join(sorted(_UNIT_WORDS, key=len, reverse=True))
 _LEADING_QTY_RE = re.compile(rf"^\s*({_NUM_TOKEN})\s+({_UNIT_TOKEN})\b\s*", re.IGNORECASE)
-_TRAILING_QTY_RE = re.compile(rf"\s*({_NUM_TOKEN})\s+({_UNIT_TOKEN})\s*$", re.IGNORECASE)
+_TRAILING_QTY_RE = re.compile(rf"\s*({_NUM_TOKEN})\s+({_UNIT_TOKEN})\b\.?\s*$", re.IGNORECASE)
 _COMPONENT_SPLIT_RE = re.compile(r"(\(|\)|\band\b|,|\+)", re.IGNORECASE)
 _SINGLE_FOOD_AND_NAMES = frozenset({
     "biscuits and gravy", "fish and chips", "mac and cheese",
@@ -646,8 +646,8 @@ def _extract_quantity(text: str) -> tuple[float | None, str | None, str]:
         rf"(?:\d+\s+(?:and\s+)?\d+/\d+|\d+\s+and\s+a\s+half|"
         rf"half\s+a|a\s+half|a\s+quarter|quarter|{_NUM_TOKEN})"
     )
-    leading = re.compile(rf"^\s*({spoken_number})\s+({_UNIT_TOKEN})\b\s*(?:of\s+)?", re.IGNORECASE)
-    trailing = re.compile(rf"\s*({spoken_number})\s+({_UNIT_TOKEN})\s*$", re.IGNORECASE)
+    leading = re.compile(rf"^\s*({spoken_number})\s+({_UNIT_TOKEN})\b\.?\s*(?:of\s+)?", re.IGNORECASE)
+    trailing = re.compile(rf"\s*({spoken_number})\s+({_UNIT_TOKEN})\b\.?\s*$", re.IGNORECASE)
     match = leading.match(text)
     if match:
         return _quantity_value(match.group(1)), match.group(2).casefold(), text[match.end():].strip()

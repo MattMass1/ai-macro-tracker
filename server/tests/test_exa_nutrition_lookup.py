@@ -46,6 +46,31 @@ def evidence(source_url=QUINOA_URL, **overrides):
     return raw
 
 
+@pytest.mark.parametrize("query,candidate", [
+    ("Fairlife Core Power Elite chocolate shake", "Fairlife Core Power chocolate shake"),
+    ("Barebells Soft Caramel Choco protein bar", "Barebells Cookies Cream protein bar"),
+    ("cooked red quinoa", "cooked white quinoa"),
+    ("7 oz 93/7 beef", "93/7 turkey"),
+])
+async def test_web_evidence_cannot_relabel_a_different_product(query, candidate):
+    async def post_exa(key, payload):
+        return exa_response([exa_result()])
+    async def post_openai(token, payload):
+        return extraction(evidence(food_name=candidate, preparation="ready to eat"))
+    with pytest.raises(web.NutritionLookupError, match="identity_mismatch"):
+        await web.lookup(query, post=post_openai, post_exa=post_exa)
+
+
+async def test_exact_product_web_evidence_accepts_explicit_weight():
+    async def post_exa(key, payload): return exa_response([exa_result()])
+    async def post_openai(token, payload):
+        return extraction(evidence(food_name="Fairlife Core Power Elite chocolate shake",
+                                   preparation="ready to drink"))
+    found = await web.lookup("100 g of Fairlife Core Power Elite chocolate shake",
+                            post=post_openai, post_exa=post_exa)
+    assert found["attribution"]["provider"] == "Exa search + OpenAI extraction"
+
+
 @pytest.fixture(autouse=True)
 def exa_env(monkeypatch):
     web.clear_cache()

@@ -99,6 +99,30 @@ async def test_follow_up_that_does_not_resolve_logs_the_asked_about_food(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_meal_slot_words_in_the_description_are_not_food_identity(monkeypatch):
+    """Seen in production on the text path: 'Panera BBQ smokehouse sandwich for
+    lunch' -- 'for lunch' made the provider match fail. It is the meal slot."""
+    srv, fake = _fresh(monkeypatch)
+    _variants(monkeypatch, srv)
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+    assert srv._strip_meal_slot("fixture bakery bbq sandwich for lunch") == ("fixture bakery bbq sandwich", "Lunch")
+    assert srv._strip_meal_slot("2 eggs as a snack.") == ("2 eggs", "Snack")
+    assert srv._strip_meal_slot("chicken sandwich") == ("chicken sandwich", None)
+    token = bind_user(uuid4())
+    try:
+        handlers = srv._voice_tool_handlers()
+        first = await handlers["log_meal"]("canvas:S8:t1", {"description": "fixture bakery bbq sandwich for lunch"})
+        assert first["status"] == "needs_clarification" and len(first["options"]) == 2
+        second = await handlers["log_meal"]("canvas:S8:t2", {"description": "Whichever, just log it."})
+    finally:
+        reset_user(token)
+    assert second["status"] == "committed", second
+    assert second["logged"]["name"] == "fixture bakery bbq sandwich"
+    assert fake.last_insert_values["meal"] == "Lunch"
+    assert fake.insert_count == 1
+
+
+@pytest.mark.asyncio
 async def test_naming_the_variant_in_the_answer_needs_no_assumption(monkeypatch):
     srv, fake = _fresh(monkeypatch)
     _variants(monkeypatch, srv)

@@ -161,11 +161,32 @@ _FOLLOW_UP_FILLER = frozenset({
 })
 
 
-def _remember_meal_question(user_key: str, session_key: str, description: str) -> None:
+_MEAL_SLOT_RE = re.compile(
+    r"\b(?:for|at|as|with)\s+(?:a\s+|an\s+|my\s+|today's\s+)?"
+    r"(breakfast|brunch|lunch|dinner|supper|snack)\b\.?", re.IGNORECASE)
+_MEAL_SLOT_NAMES = {"breakfast": "Breakfast", "brunch": "Breakfast", "lunch": "Lunch",
+                    "dinner": "Dinner", "supper": "Dinner", "snack": "Snack"}
+
+
+def _strip_meal_slot(text: str) -> tuple[str, str | None]:
+    """'panera bbq sandwich for lunch' -> ('panera bbq sandwich', 'Lunch').
+
+    The model often keeps the meal slot inside the food description; it is
+    not food identity and would make a provider match fail."""
+    match = _MEAL_SLOT_RE.search(text or "")
+    if not match:
+        return text, None
+    cleaned = " ".join((text[:match.start()] + " " + text[match.end():]).split()).strip(" ,.")
+    return (cleaned or text), _MEAL_SLOT_NAMES[match.group(1).casefold()]
+
+
+def _remember_meal_question(user_key: str, session_key: str, description: str,
+                            meal: Any = None) -> None:
     _meal_questions[(user_key, session_key)] = {
         "expires": time.monotonic() + _MEAL_QUESTION_TTL_SECONDS,
         "tokens": food_lookup._canon_food_tokens(description),
         "description": description,
+        "meal": meal,
     }
     _meal_questions.move_to_end((user_key, session_key))
     while len(_meal_questions) > 256:
@@ -179,6 +200,11 @@ def _settle_meal_question(user_key: str, session_key: str) -> None:
 def _pending_meal_description(user_key: str, session_key: str) -> str:
     pending = _meal_questions.get((user_key, session_key))
     return str(pending["description"]) if pending else ""
+
+
+def _pending_meal_slot(user_key: str, session_key: str) -> Any:
+    pending = _meal_questions.get((user_key, session_key))
+    return pending.get("meal") if pending else None
 
 
 def _answering_meal_question(user_key: str, session_key: str, description: str) -> bool:
@@ -2930,6 +2956,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                            if (match := _CALORIES_ONLY.fullmatch(text.strip().rstrip(".")))]
         calorie_values = None
         texts = [text for text in described if text.strip()]
+        meal_type_arg = args.get("meal_type")
         user_key = str(current_user_id())
         session_key = _meal_session_key(call_id)
         # One question per meal: a follow-up to a question this session just
@@ -2937,7 +2964,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         finishing = _answering_meal_question(user_key, session_key, " ".join(texts))
 
         def ask(payload: dict[str, Any]) -> dict[str, Any]:
-            _remember_meal_question(user_key, session_key, " ".join(texts))
+            _remember_meal_question(user_key, session_key, " ".join(texts), meal_type_arg)
             return payload
 
         if calorie_matches and not await _calorie_only_writes_open():
@@ -2963,14 +2990,20 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             calorie_values = {"name": "Calorie-only snack", "calories": calories,
                               "protein": None, "carbs": None, "fat": None, "fiber": None,
                               "macro_source": "User supplied calories; other nutrients unknown",
-                              "meal": domain.normalize_meal(args.get("meal_type"), "Snack"),
+                              "meal": domain.normalize_meal(meal_type_arg, "Snack"),
                               "day": domain.effective_date()}
         atomic = isinstance(raw_components, list) and bool(raw_components)
         whole_found = None
         if calorie_values is not None:
             components = [{"description": texts[0]}]
         elif atomic:
-            components = [item for item in raw_components if isinstance(item, Mapping)]
+            components = []
+            for item in raw_components:
+                if not isinstance(item, Mapping):
+                    continue
+                stripped, slot = _strip_meal_slot(str(item.get("description") or ""))
+                meal_type_arg = meal_type_arg or slot
+                components.append({**item, "description": stripped})
             if len(components) != len(raw_components) or len(components) > 12:
                 return {"status": "failed", "operation_id": operation_id,
                         "confirmation": "I couldn't read every food component."}
@@ -2984,6 +3017,8 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                 r"^(?:please\s+)?log\s+", "", description,
                 count=1, flags=re.IGNORECASE,
             ).strip()
+            normalized_description, slot = _strip_meal_slot(normalized_description)
+            meal_type_arg = meal_type_arg or slot
             resolution_ref = str(args.get("resolution_ref") or "")
             if resolution_ref:
                 components = [{"description": normalized_description,
@@ -3009,6 +3044,8 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                         if args.get(key) is not None:
                             components[0][key] = args[key]
             atomic = len(components) > 1
+        if finishing and not meal_type_arg:
+            meal_type_arg = _pending_meal_slot(user_key, session_key)  # "for lunch" came with the question
 
         semaphore = asyncio.Semaphore(4)
 
@@ -3050,7 +3087,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             # The answer may not name the food ("whichever, just log it", or
             # the food plus filler). Finish with the food the question was
             # about, taking the top variant, before giving up.
-            original = _pending_meal_description(user_key, session_key)
+            original = _strip_meal_slot(_pending_meal_description(user_key, session_key))[0]
             retry = None
             if original and (food_lookup.normalize_food_name(original)
                              != food_lookup.normalize_food_name(" ".join(texts))):
@@ -3095,7 +3132,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         try:
             values = calorie_values if calorie_values is not None else _validated_meal_values(
                 name, *(totals[key] for key in domain.MACRO_KEYS), source,
-                args.get("meal_type"), None,
+                meal_type_arg, None,
                 allow_estimate=(bool(resolved_components)
                                 and any("estimate" in item["macro_source"].casefold()
                                         for item in resolved_components)

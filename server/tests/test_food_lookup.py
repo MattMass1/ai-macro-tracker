@@ -2283,3 +2283,63 @@ def test_canonical_tokens_keep_literal_anchors_stable():
         assert food_lookup._canon_food_token(word) == word, word
     assert food_lookup._canon_food_token("barebells") == "barebell"
     assert food_lookup._canon_food_token("restaurants") == "restaurant"
+
+
+@pytest.mark.parametrize(("spoken", "provider_name"), [
+    ("an orange", "Oranges"), ("the apple", "Apples"), ("an egg", "Egg"),
+])
+def test_an_article_is_not_food_identity(spoken, provider_name):
+    assert food_lookup._exact_name_match(spoken, {"food_name": provider_name})
+    assert food_lookup._fatsecret_relevant(spoken, {"food_name": provider_name})
+
+
+@pytest.mark.parametrize(("spoken", "protein", "quantity"), [
+    ("1 fairlife shake", 30, 1.0), ("a fairlife shake", 30, None),
+    ("3 fairlife shakes", 90, 3.0), ("3 Fairlife 30g shakes", 90, 3.0),
+])
+async def test_a_counted_or_article_led_preset_name_still_selects_the_preset(
+        monkeypatch, spoken, protein, quantity):
+    class PresetStore:
+        async def fetch_presets(self):
+            return [{"name": "Fairlife 30g Shake", "calories": 150, "protein": 30,
+                     "carbs": 3, "fat": 2.5, "fiber": 0}]
+
+        async def lookup_catalog(self, _query):
+            return None
+
+    async def forbidden(_query, **_kwargs):
+        raise AssertionError("external provider must not be called")
+
+    monkeypatch.setattr(srv, "_client", PresetStore())
+    monkeypatch.setattr(food_lookup, "search_fatsecret", forbidden)
+    srv._resolved_food_cache.clear()
+    token = bind_user(uuid4())
+    try:
+        result = await srv.resolve_food(spoken)
+    finally:
+        reset_user(token)
+    assert result is not None, spoken
+    assert result["name"] == "Fairlife 30g Shake"
+    assert result["macros_per_serving"]["protein"] == pytest.approx(protein)
+    assert result.get("applied_quantity") == quantity
+
+
+async def test_a_preset_whose_name_starts_with_a_number_is_matched_whole(monkeypatch):
+    class PresetStore:
+        async def fetch_presets(self):
+            return [{"name": "3 Musketeers", "calories": 240, "protein": 2,
+                     "carbs": 42, "fat": 7, "fiber": 0}]
+
+        async def lookup_catalog(self, _query):
+            return None
+
+    monkeypatch.setattr(srv, "_client", PresetStore())
+    srv._resolved_food_cache.clear()
+    token = bind_user(uuid4())
+    try:
+        result = await srv.resolve_food("3 musketeers")
+    finally:
+        reset_user(token)
+    assert result["name"] == "3 Musketeers"
+    assert result["macros_per_serving"]["calories"] == 240
+    assert result.get("applied_quantity") is None

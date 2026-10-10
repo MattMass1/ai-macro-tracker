@@ -276,17 +276,30 @@ async def resolve_food(query: str, **kwargs):
     catalog_lookup = getattr(client, "lookup_catalog", None)
     async def _local_lookup(local_query: str) -> dict[str, Any] | None:
         local_normalized = food_lookup.normalize_food_name(local_query)
-        query_tokens = set(local_normalized.split())
-        exact_presets = [item for item in presets
-                         if food_lookup.normalize_food_name(str(item.get("name") or ""))
-                         == local_normalized]
-        candidates = exact_presets or [item for item in presets
-                                      if _preset_matches(local_normalized, query_tokens, item)]
-        # A shortened name can match multiple product lines. Never resolve
-        # that ambiguity by database order; continue the normal lookup path.
-        preset = candidates[0] if len(candidates) == 1 else None
+        preset = _matching_preset(local_normalized, presets)
+        count = None
+        if preset is None:
+            # A spoken count or article before a saved preset ("3 Fairlife
+            # shakes", "a Fairlife shake") is a quantity, never part of its
+            # name. The whole phrase was tried first so a preset that starts
+            # with a number ("3 Musketeers") is still matched as itself.
+            counted = re.fullmatch(r"(\d+(?:\.\d+)?|a|an|the)\s+(.+)", local_normalized)
+            if counted:
+                preset = _matching_preset(counted.group(2), presets)
+                if counted.group(1) not in ("a", "an", "the"):
+                    count = float(counted.group(1))
         if preset is not None:
-            return _preset_food(preset)
+            food = _preset_food(preset)
+            if count is None:
+                return food
+            if not 0 < count <= 100:
+                return None
+            quantified = food_lookup._quantify(food, count, "servings")
+            if quantified is None:
+                return None
+            macros, label = quantified
+            return {**food, "macros_per_serving": macros, "serving_size": label,
+                    "applied_quantity": count, "applied_unit": "servings"}
         # An authenticated tenant's exact catalog is their highest-priority
         # reusable nutrition identity after an explicit preset.
         if catalog_lookup is not None:
@@ -347,6 +360,19 @@ async def resolve_food(query: str, **kwargs):
             while len(_resolved_food_cache) > _RESOLVED_CACHE_MAX:
                 _resolved_food_cache.popitem(last=False)
     return found
+
+
+def _matching_preset(normalized: str, presets) -> Mapping[str, Any] | None:
+    """The one saved preset this normalized phrase names, or ``None``."""
+    query_tokens = set(normalized.split())
+    exact_presets = [item for item in presets
+                     if food_lookup.normalize_food_name(str(item.get("name") or ""))
+                     == normalized]
+    candidates = exact_presets or [item for item in presets
+                                  if _preset_matches(normalized, query_tokens, item)]
+    # A shortened name can match multiple product lines. Never resolve
+    # that ambiguity by database order; continue the normal lookup path.
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _preset_matches(normalized: str, query_tokens: set[str], preset: Mapping[str, Any]) -> bool:

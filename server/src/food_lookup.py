@@ -278,7 +278,7 @@ _FOOD_SYNONYMS = {
 # food identity ("Panera Bread" vs the spoken "Panera").
 _BRAND_FILLER = frozenset({"bread", "inc", "co", "llc", "restaurant", "restaurants", "the"})
 # Connectives carry no food identity on either side of a match.
-_CONNECTIVES = frozenset({"and", "with", "plus", "of", "on", "in"})
+_CONNECTIVES = frozenset({"and", "with", "plus", "of", "on", "in", "an", "the"})
 
 
 def _number_stem(token: str) -> str:

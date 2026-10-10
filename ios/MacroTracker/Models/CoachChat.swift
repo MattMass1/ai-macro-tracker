@@ -39,6 +39,12 @@ struct CoachTurn: Decodable {
     }
 }
 
+/// A server payload failed the app's own validation (day timing, chat body size).
+enum PayloadError: LocalizedError, Equatable {
+    case invalidPayload
+    var errorDescription: String? { "This data could not be displayed. Your standard screens are still available." }
+}
+
 struct CoachIntent: Encodable {
     let action: String
     let reference: String?
@@ -57,19 +63,39 @@ struct ChatHistoryPayload: Codable { var messages: [ChatHistoryMessage] }
 
 enum MetricsFieldKind: String, Codable, Equatable {
     case number
-    case text
+    case string
 }
 
 struct MetricsField: Codable, Equatable {
     var key: String
-    var label: String?
-    var kind: MetricsFieldKind?
+    var label: String
     var unit: String?
     var placeholder: String?
-    var required: Bool?
+    var type: MetricsFieldKind?
 
-    var isNumeric: Bool { (kind ?? .number) == .number }
-    var displayLabel: String { label ?? Self.defaultLabel(for: key) }
+    var kind: MetricsFieldKind { type ?? Self.inferredKind(for: key) }
+    var isNumeric: Bool { kind == .number }
+
+    static func inferred(from key: String) -> MetricsField {
+        MetricsField(
+            key: key,
+            label: defaultLabel(for: key),
+            unit: defaultUnit(for: key),
+            placeholder: defaultPlaceholder(for: key),
+            type: inferredKind(for: key)
+        )
+    }
+
+    /// The fields the server's measurements form asks for.
+    static let standard: [MetricsField] = ["height_cm", "weight_kg", "goal_weight_kg", "age", "activity_level"]
+        .map(inferred(from:))
+
+    static func inferredKind(for key: String) -> MetricsFieldKind {
+        switch key {
+        case "height_cm", "weight_kg", "goal_weight_kg", "age": return .number
+        default: return .string
+        }
+    }
 
     static func defaultLabel(for key: String) -> String {
         switch key {
@@ -82,13 +108,24 @@ struct MetricsField: Codable, Equatable {
         }
     }
 
-    static let standard: [MetricsField] = [
-        MetricsField(key: "height_cm", label: "Height", kind: .number, unit: "cm", placeholder: "178", required: true),
-        MetricsField(key: "weight_kg", label: "Weight", kind: .number, unit: "kg", placeholder: "84", required: true),
-        MetricsField(key: "goal_weight_kg", label: "Goal weight", kind: .number, unit: "kg", placeholder: "78", required: true),
-        MetricsField(key: "age", label: "Age", kind: .number, unit: nil, placeholder: "34", required: false),
-        MetricsField(key: "activity_level", label: "Activity level", kind: .text, unit: nil, placeholder: "moderate", required: false),
-    ]
+    static func defaultUnit(for key: String) -> String? {
+        switch key {
+        case "height_cm": return "ft / in"
+        case "weight_kg", "goal_weight_kg": return "lb"
+        default: return nil
+        }
+    }
+
+    static func defaultPlaceholder(for key: String) -> String? {
+        switch key {
+        case "height_cm": return "5 ft 10 in"
+        case "weight_kg": return "175"
+        case "goal_weight_kg": return "165"
+        case "age": return "32"
+        case "activity_level": return "Moderately active"
+        default: return nil
+        }
+    }
 }
 
 struct MetricsFieldValues: Equatable {

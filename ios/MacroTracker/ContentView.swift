@@ -2,103 +2,64 @@ import SwiftUI
 import UIKit
 import Charts
 
-enum AgentRootRoute: Equatable {
-    case loading, onboarding, canvas, compatibility
-
-    static func isReady(hasTargets: Bool?, calories: Double?, hasPlan: Bool?) -> Bool {
-        hasTargets == true && (calories ?? 0) > 0 && hasPlan == true
-    }
-
-    static func initial(hasTargets: Bool?, calories: Double?, hasPlan: Bool?) -> Self {
-        // Absence is unknown, never evidence that an account needs onboarding.
-        // A local freshClaim bit cannot override the server's readiness facts.
-        if hasTargets == false || hasPlan == false { return .onboarding }
-        if isReady(hasTargets: hasTargets, calories: calories, hasPlan: hasPlan) { return .canvas }
-        return .loading
-    }
-}
-
-/// Shared by initial load, explicit retry and scene activation. Only GETs are
-/// retried; three attempts plus 5/15s backoff allow a 30-60s Render cold start
-/// (each ordinary API read also has its existing 45s network timeout).
-@MainActor
-final class AgentRootLoader: ObservableObject {
-    @Published private(set) var route = AgentRootRoute.loading
-    @Published private(set) var isLoading = false
-    @Published private(set) var errorMessage: String?
-    private var generation = UUID()
-
-    func load(readiness: () async -> AgentRootRoute,
-              retryDelays: [Double] = [5, 15],
-              sleep: (Double) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }) async {
-        let current = UUID()
-        generation = current
-        isLoading = true
-        errorMessage = nil
-        defer { if generation == current { isLoading = false } }
-        for attempt in 0...retryDelays.count {
-            guard !Task.isCancelled, generation == current else { return }
-            let result = await readiness()
-            guard !Task.isCancelled, generation == current else { return }
-            // Once real onboarding starts, do not unmount a picker or pending
-            // metrics form when readiness changes midway through that flow.
-            if route != .onboarding { route = result }
-            if route != .loading { return }
-            if attempt < retryDelays.count {
-                do { try await sleep(retryDelays[attempt]) } catch { return }
-            }
-        }
-        errorMessage = "Your account could not be loaded. Check your connection and retry."
-    }
-
-    func completeOnboarding() {
-        generation = UUID()
-        isLoading = false
-        errorMessage = nil
-        route = .canvas
-    }
-}
-
-@MainActor
+/// The classic four-tab app: Workouts, Coach (default), Today, Progress.
 struct ContentView: View {
     @EnvironmentObject private var store: AppStore
-    @EnvironmentObject private var auth: AuthService
     @Environment(\.scenePhase) private var scenePhase
-    @StateObject private var loader = AgentRootLoader()
-    @State private var reloadID = UUID()
-    // Preserve preview call sites; tabs are no longer primary navigation.
-    init(initialTab: Int = 1) {}
+    @State private var selectedTab = 1  // Coach home
+
+    init(initialTab: Int = 1) {
+        _selectedTab = State(initialValue: initialTab)
+    }
+
     var body: some View {
-        AgentCanvasView(canvas: store.canvas)
-        .safeAreaInset(edge: .top) {
-            if let error = loader.errorMessage {
-                HStack { Text(error).font(.caption); Button("Retry") { reloadID = UUID() } }.padding(8)
-            } else if store.accountRoute == .compatibility {
-                Text("This server needs an update. Standard tools remain available from the menu.")
-                    .font(.caption).padding(8)
+        ZStack(alignment: .top) {
+            TabView(selection: $selectedTab) {
+                NavigationStack { WorkoutsView() }
+                    .tabItem { Label("Workouts", systemImage: "dumbbell.fill") }
+                    .tag(0)
+                NavigationStack { CoachChatView() }
+                    .tabItem { Label("Coach", systemImage: "bubble.left.and.bubble.right.fill") }
+                    .tag(1)
+                NavigationStack { TodayView(onAskCoach: { selectedTab = 1 }) }
+                    .tabItem { Label("Today", systemImage: "chart.pie.fill") }
+                    .tag(2)
+                NavigationStack { ProgressDashboardView() }
+                    .tabItem { Label("Progress", systemImage: "chart.line.uptrend.xyaxis") }
+                    .tag(3)
+            }
+
+            if let toast = store.toast {
+                Label(toast, systemImage: "checkmark.circle.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.ink)
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(Theme.surface, in: Capsule())
+                    .shadow(color: Theme.ink.opacity(0.12), radius: 16, y: 6)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .modifier(AgentToastModifier())
-        .alert("Could not complete that", isPresented: Binding(get: { loader.route != .loading && store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
-            Button("OK", role: .cancel) { store.errorMessage = nil }
-        } message: { Text(store.errorMessage ?? "Please try again.") }
+        .animation(.spring(response: 0.35, dampingFraction: 0.78), value: store.toast)
+        .onChange(of: selectedTab) { _, _ in dismissKeyboard() }
+        .task { await store.loadAll() }
         .onChange(of: scenePhase) { _, phase in
+            // Reload when the app returns to the foreground so the day rolls
+            // over even if it was open across midnight (or slept for hours).
             if phase == .active {
-                // Cancel/re-evaluate the root GET task even after a failed load.
-                reloadID = UUID()
-                Task { await store.canvas.refresh() }
-            } else if phase == .background {
-                Task { await store.canvas.voice.end() }
+                store.selectCurrentDay()
+                Task { await store.loadAll() }
             }
         }
-        .task(id: reloadID) {
-            store.selectCurrentDay()
-            // Readiness updates the permanent strip; it never gates the Canvas.
-            await loader.load(readiness: {
-                await store.loadAll(reportErrors: loader.route != .loading)
-                return store.accountRoute
-            })
+        .alert("Couldn't complete that", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(store.errorMessage ?? "Unknown error")
         }
+    }
+
+    private func dismissKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 }
 

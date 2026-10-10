@@ -70,17 +70,6 @@ final class APIClient {
     func brief(_ date: String? = nil) async throws -> BriefPayload { try await get("api/brief\(date.map { "?date=\(encoded($0))" } ?? "")") }
     func saveBrief(_ text: String, date: String? = nil) async throws -> BriefPayload { try await send("api/brief", body: BriefRequest(text: text, date: date)) }
     func trends(days: Int) async throws -> TrendsPayload { try await get("api/trends?days=\(days)") }
-    /// Mint a short-lived ElevenLabs conversation token for any invited user. The
-    /// API key stays server-side; only this token reaches the device. Passing the
-    /// app's canvas `sessionId` binds the conversation to that session server-side,
-    /// so voice turns render their components and Confirm card where the app can
-    /// see them (the webhook never trusts a client id for tenancy -- canvas state
-    /// is keyed per user).
-    func elevenLabsToken(sessionId: String? = nil) async throws -> ElevenLabsTokenPayload {
-        var body: Data?
-        if let sessionId { body = try JSONEncoder().encode(["session_id": sessionId]) }
-        return try await request("api/voice/elevenlabs/token", method: "POST", body: body)
-    }
 
     /// Opaque high-entropy credential fingerprint, never the token itself.
     /// Include the API origin/path so test and production cannot share UI state.
@@ -90,36 +79,26 @@ final class APIClient {
             .map { String(format: "%02x", $0) }.joined()
     }
 
-    func canvasSnapshot(sessionId: String) async throws -> AgentCanvasEnvelope {
-        try await request("api/agent-canvas/\(encoded(sessionId))", method: "GET", body: nil, canvas: true)
-    }
-    /// The server's snapshot ETag is `"instanceId:revision"`, so a poll can
-    /// send what it already shows and get a bodiless 304 back when nothing
-    /// changed (the voice poll runs every 2 s; most ticks change nothing).
-    struct NotModified: Error {}
-    func canvasSnapshotIfChanged(sessionId: String, shown: AgentCanvasEnvelope?) async throws -> AgentCanvasEnvelope? {
-        let etag = shown.map { "\"\($0.instanceId):\($0.revision)\"" }
-        do {
-            return try await request("api/agent-canvas/\(encoded(sessionId))", method: "GET", body: nil,
-                                     canvas: true, ifNoneMatch: etag)
-        } catch is NotModified {
-            return nil
-        }
-    }
-    func canvasTurn(sessionId: String, turnId: String, message: String) async throws -> AgentCanvasEnvelope {
+    /// One coach turn: the agent reads the message, uses its tools, replies.
+    func canvasTurn(sessionId: String, turnId: String, message: String) async throws -> CoachTurn {
         let body = try JSONEncoder().encode(["turn_id": turnId, "message": message])
         return try await request("api/agent-canvas/\(encoded(sessionId))/turn", method: "POST", body: body, canvas: true)
     }
-    func canvasAction(sessionId: String, intent: AgentIntent) async throws -> AgentCanvasEnvelope {
+    /// Confirm or cancel a pending workout change.
+    func canvasAction(sessionId: String, intent: CoachIntent) async throws -> CoachTurn {
         try await request("api/agent-canvas/\(encoded(sessionId))/action", method: "POST",
                           body: JSONEncoder().encode(intent), canvas: true)
+    }
+    func chatHistory(limit: Int) async throws -> [ChatHistoryMessage] {
+        let payload: ChatHistoryPayload = try await get("api/chat/history?limit=\(limit)")
+        return payload.messages
     }
 
     private func get<T: Decodable>(_ path: String) async throws -> T { try await request(path, method: "GET", body: Optional<Data>.none) }
     private func delete<T: Decodable>(_ path: String) async throws -> T { try await request(path, method: "DELETE", body: Optional<Data>.none) }
     private func send<T: Decodable, Body: Encodable>(_ path: String, body: Body) async throws -> T { try await request(path, method: "POST", body: encoder.encode(body)) }
 
-    private func request<T: Decodable>(_ path: String, method: String, body: Data?, authenticated: Bool = true, canvas: Bool = false, ifNoneMatch: String? = nil) async throws -> T {
+    private func request<T: Decodable>(_ path: String, method: String, body: Data?, authenticated: Bool = true, canvas: Bool = false) async throws -> T {
         func debugPreview(_ data: Data, limit: Int = 400) -> String {
             let text = String(data: data, encoding: .utf8) ?? "<non-utf8 data, \(data.count) bytes>"
             if text.count > limit {
@@ -137,7 +116,6 @@ final class APIClient {
         request.timeoutInterval = canvas ? 120 : 45
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(Config.nutrientContract, forHTTPHeaderField: Config.nutrientContractHeader)
-        if let ifNoneMatch { request.setValue(ifNoneMatch, forHTTPHeaderField: "If-None-Match") }
         if authenticated {
             guard let token = tokenProvider(), !token.isEmpty else {
                 NotificationCenter.default.post(name: .deviceTokenRejected, object: nil)
@@ -158,7 +136,6 @@ final class APIClient {
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
         
         guard let http = response as? HTTPURLResponse else { throw APIError(status: 503, message: "The server returned an invalid response.") }
-        if ifNoneMatch != nil, http.statusCode == 304 { throw NotModified() }
 
         guard (200..<300).contains(http.statusCode) else {
             if authenticated, http.statusCode == 401 {
@@ -172,7 +149,7 @@ final class APIClient {
             throw APIError(status: http.statusCode, message: serverMessage ?? (String(data: data, encoding: .utf8) ?? "Request failed."))
         }
         do {
-            if canvas, data.count > 48_000 { throw AgentCanvasError.invalidPayload }
+            if canvas, data.count > 48_000 { throw PayloadError.invalidPayload }
             let decoded = try (canvas ? JSONDecoder() : decoder).decode(T.self, from: data)
             #if DEBUG
             print("[API] ← \(statusCode) OK for \(method) \(url.absoluteString)")

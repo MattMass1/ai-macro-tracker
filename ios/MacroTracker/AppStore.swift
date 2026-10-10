@@ -2,21 +2,14 @@ import Foundation
 
 @MainActor
 final class AppStore: ObservableObject {
-    lazy var canvas = AgentSurfaceStore(api: api)
+    lazy var chat = CoachChatStore(api: api)
     @Published var selectedDate = AppStore.effectiveCurrentDay()
     @Published private(set) var dayPolicy = LoggingDayPolicy.bootstrap
     @Published var day: DayPayload?
     @Published private(set) var accountHasTargets: Bool?
     private var accountTargetCalories: Double?
     private var hasAccountResponse = false
-    private var accountCanvasProtocol: String?
     private var hasAdoptedDayPolicy = false
-    var accountRoute: AgentRootRoute {
-        guard hasAccountResponse else { return .loading }
-        guard accountCanvasProtocol == "mmacros.canvas.v1" else { return .compatibility }
-        return AgentRootRoute.initial(hasTargets: accountHasTargets,
-            calories: accountTargetCalories, hasPlan: plan?.hasPlan)
-    }
     @Published var presets: [Preset] = []
     @Published var workouts: [WorkoutEntry] = []
     @Published var workoutHistoryEntries: [WorkoutHistoryEntry] = []
@@ -93,11 +86,11 @@ final class AppStore: ObservableObject {
             let loadedDay = try await (requestedIsToday ? api.today() : api.day(requestedDateString))
             guard !Task.isCancelled, session == sessionGeneration, selectedDate == requestedDate else { return }
             if let policy = loadedDay.dayTiming {
-                guard policy.isValid else { throw AgentCanvasError.invalidPayload }
+                guard policy.isValid else { throw PayloadError.invalidPayload }
                 // Keep the requested calendar DATE for history, not its old
                 // timezone's absolute midnight. Current reads use server date.
                 let date = requestedIsToday ? policy.date(from: policy.effectiveDate) : policy.date(from: requestedDateString)
-                guard let date else { throw AgentCanvasError.invalidPayload }
+                guard let date else { throw PayloadError.invalidPayload }
                 dayPolicy = policy
                 hasAdoptedDayPolicy = true
                 selectedDate = date
@@ -107,9 +100,6 @@ final class AppStore: ObservableObject {
             day = loadedDay
             if requestedIsToday {
                 hasAccountResponse = true
-                accountCanvasProtocol = loadedDay.canvasProtocol
-                // Cache the server's voice provider; it applies on next launch.
-                VoiceProviderPreference.cacheServerValue(loadedDay.voiceProvider)
                 accountHasTargets = loadedDay.hasTargets
                 accountTargetCalories = loadedDay.targets.calories
             }
@@ -292,11 +282,11 @@ final class AppStore: ObservableObject {
 
     /// Called on sign-out so the next user never sees the previous user's data.
     func reset() {
-        canvas.reset()
+        chat.reset()
         sessionGeneration += 1
         dayPolicy = .bootstrap
         accountHasTargets = nil; accountTargetCalories = nil
-        hasAccountResponse = false; accountCanvasProtocol = nil; hasAdoptedDayPolicy = false
+        hasAccountResponse = false; hasAdoptedDayPolicy = false
         selectCurrentDay()
         day = nil; presets = []; workouts = []; workoutHistoryEntries = []; trendsPayload = nil; exercises = []; plan = nil; stats = nil; brief = nil
         isLoadingDay = true; isLoadingWorkouts = false

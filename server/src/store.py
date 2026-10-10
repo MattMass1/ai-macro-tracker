@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 # Typed, preset, and API entries never use this window.
 DUPLICATE_MEAL_WINDOW_SECONDS = 120
 
+# Matthew explicitly opted out of the daily coach cap. Use his immutable
+# production account ID, never a display name, admin role, or legacy owner ID.
+UNLIMITED_COACH_USER_ID = UUID("be6333cc-e4c1-48f2-adb1-5e7f14dbf7c2")
+
 
 class StoreError(RuntimeError):
     pass
@@ -1047,6 +1051,8 @@ class Store:
         transaction behind a per-user advisory lock, so two concurrent turns at
         cap-1 serialize instead of both passing a stale count. Raises
         ChatQuotaExceeded — and persists nothing — once the cap is reached.
+        Matthew's explicitly exempt account still records every turn but is
+        never rejected by this daily cap, across text and voice callers.
         """
         pool = await self.connect()
         user_id = current_user_id()
@@ -1061,7 +1067,7 @@ class Store:
                 "AND created_at >= $2 AND created_at < $3",
                 user_id, start, end,
             )
-            if int(used) >= daily_cap:
+            if user_id != UNLIMITED_COACH_USER_ID and int(used) >= daily_cap:
                 raise ChatQuotaExceeded(f"daily chat cap of {daily_cap} reached")
             row = await conn.fetchrow(
                 "INSERT INTO chat_messages(user_id,role,content,tool_calls) "

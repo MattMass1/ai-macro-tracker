@@ -3987,6 +3987,15 @@ async def api_elevenlabs_agent_turn(request: Request) -> Any:
             turn_fn=turn_fn,
             session_id_override=app_session_id,
         )
+    except ChatQuotaExceeded:
+        # Expected refusal, not a transport failure. ElevenLabs speaks `reply`
+        # on successful tool responses; an HTTP error hides the quota reason
+        # behind its generic "trouble connecting" fallback.
+        return {"reply": (
+            "You've reached today's coach limit, so I couldn't process that request. "
+            "You can still use the app's standard screens, or try the coach again "
+            "after the daily reset."
+        )}, 200
     finally:
         reset_user(context_token)
     return payload, status

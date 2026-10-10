@@ -85,6 +85,16 @@ Implementation notes (what shipped, where it differs from the text below):
   the automatic fallback when Exa itself fails (timeout, auth, 429, 5xx);
   evidence failures never fall back, so "nothing found" stays fast.
   Render needs `EXA_API_KEY` for production to switch.
+- Exa in production (2026-10-09, `EXA_API_KEY` set, end-to-end canvas turns
+  incl. the OpenAI brain), hosted web_search -> Exa:
+  - 200 g cooked red quinoa: 16.7 s (budget hit) -> 6.8 s, verified at 120 kcal/100 g
+  - 150 g cooked farro: 13.2 s "couldn't verify" -> 8.5 s, found (per-serving
+    source, so the coach asks for a usable portion rather than guessing grams)
+  - zebra steak (unresolvable): 15.4 s timeout -> 8.8 s clean "couldn't verify"
+  Of the ~7-9 s, roughly 3 s is the brain's two rounds, ~2 s the Exa search and
+  the rest the extraction call. `WEB_LOOKUP_EXTRACT_MODEL` can point the
+  extraction at a smaller model to trim further; left at `COACH_MODEL` until
+  the account's smaller model names are confirmed.
   Measurement recipe: POST `/api/agent-canvas/{uuid}/turn` with
   `{"turn_id": uuid, "message": "...do not log anything..."}`, diff
   `/api/today` meals before/after.

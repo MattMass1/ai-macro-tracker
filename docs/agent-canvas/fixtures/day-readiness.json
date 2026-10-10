@@ -5,7 +5,6 @@
       "date": "2026-09-16",
       "day_label": "Today",
       "canvas_protocol": "mmacros.canvas.v1",
-      "voice_provider": "openai",
       "has_targets": false,
       "day_timing": {
         "time_zone": "America/New_York",
@@ -50,7 +49,6 @@
       "date": "2026-09-16",
       "day_label": "Today",
       "canvas_protocol": "mmacros.canvas.v1",
-      "voice_provider": "openai",
       "has_targets": false,
       "day_timing": {
         "time_zone": "America/New_York",
@@ -95,7 +93,6 @@
       "date": "2026-09-16",
       "day_label": "Today",
       "canvas_protocol": "mmacros.canvas.v1",
-      "voice_provider": "openai",
       "has_targets": true,
       "day_timing": {
         "time_zone": "America/New_York",

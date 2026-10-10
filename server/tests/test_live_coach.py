@@ -1781,41 +1781,6 @@ async def test_remaining_teardown_branches_log_superseded_and_provider_error(cap
     assert "AAABAA==" not in logs
 
 
-def test_production_asgi_app_mounts_unauthorized_live_websocket(monkeypatch):
-    class IsolatedStore:
-        async def resolve_device_for_live(self, token):
-            pytest.fail("unauthorized websocket must not query the store")
-
-        async def aclose(self):
-            pass
-
-    monkeypatch.setenv("DATABASE_URL", "postgresql://fixture.invalid/macro_tracker")
-    monkeypatch.setenv("APP_SHARED_TOKEN", "fixture-shared-token")
-    import server as srv
-
-    monkeypatch.setattr(srv, "_client", IsolatedStore())
-    with TestClient(srv.create_app()) as client:
-        with pytest.raises(WebSocketDisconnect) as exc_info:
-            with client.websocket_connect("/api/live-coach"):
-                pass
-
-    assert exc_info.value.code == 4401
-    assert exc_info.value.reason == "Missing or invalid bearer token"
-
-
-# --------------------------------------------------------------------------- #
-# Voice tool-call dispatch: the real GPT Live v3 wire contract.
-#
-# Inbound: response.event -> event.event.type == "response.output_item.done"
-# -> item.type == "function_call". response.function_call_arguments.done
-# arrives first for the same call but has neither call_id nor name, so it
-# must never drive execution. Outbound: a result is the pair
-# response.item.create + response.create, sharing the call_id, sent in that
-# order. Every actionable call gets exactly one such pair, including errors,
-# invalid arguments, unknown names, and handler exceptions.
-# --------------------------------------------------------------------------- #
-
-
 def test_extract_function_call_reads_only_the_v3_nested_shape():
     item = {
         "type": "function_call", "call_id": "call-1", "name": "log_meal",

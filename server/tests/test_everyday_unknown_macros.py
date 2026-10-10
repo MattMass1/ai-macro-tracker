@@ -29,8 +29,6 @@ def calorie_only_gate_open(monkeypatch):
 async def serialize_calorie_only_day(monkeypatch):
     import dataclasses
     srv = _import_server(monkeypatch)
-    # Pin the voice flag so the canonical fixture stays env-independent.
-    monkeypatch.setattr(srv, "CONFIG", dataclasses.replace(srv.CONFIG, voice_provider="openai"))
     fake = FakeVoiceStore()
     monkeypatch.setattr(srv, "_client", fake)
     monkeypatch.setattr(srv.domain, "effective_date", lambda: date(2026, 10, 7))

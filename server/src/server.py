@@ -49,14 +49,8 @@ from store import CalorieOnlyWriteBlocked  # noqa: E402
 from store import ChatQuotaExceeded, InviteAlreadyClaimed, InviteNotFound  # noqa: E402
 from auth import bind_user, current_user_id, reset_user  # noqa: E402
 from coach import CoachProviderError, run_agent  # noqa: E402
-from agent_canvas import PROTOCOL as CANVAS_PROTOCOL, CanvasService, canvas_live_start, canvas_tool_event  # noqa: E402
-import elevenlabs_voice  # noqa: E402
+from agent_canvas import PROTOCOL as CANVAS_PROTOCOL, CanvasService  # noqa: E402
 import food_lookup  # noqa: E402
-from live_coach import (  # noqa: E402
-    LiveCoachService,
-    LiveSessionGate,
-    connect_openai_live,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -403,7 +397,6 @@ async def lifespan(_app: Any):
 
 CONFIG = get_config()
 mcp = FastMCP("macro-tracker", lifespan=lifespan)
-_live_session_gate = LiveSessionGate()
 
 
 # --------------------------------------------------------------------------- #
@@ -968,7 +961,6 @@ async def day_payload(
         "date": day.isoformat(),
         "has_targets": has_targets,
         "canvas_protocol": CANVAS_PROTOCOL,
-        "voice_provider": CONFIG.voice_provider,
         "day_timing": {"time_zone": domain.LOCAL_TZ.key,
                        "rollover_hour": domain.DAY_ROLLOVER_HOUR,
                        "effective_date": domain.effective_date().isoformat()},
@@ -4152,138 +4144,16 @@ async def api_canvas_action(request: Request) -> Any:
         raise MacroError(str(exc)) from None
 
 
-@api_route("/api/voice/elevenlabs/token", methods=["POST"])
-async def api_elevenlabs_token(request: Request) -> Any:
-    """Mint a short-lived ElevenLabs conversation token for any authenticated
-    (invited) user. The API key stays server-side; only the token reaches the
-    device. We record which user this conversation belongs to so the agent_turn
-    webhook acts as THAT user (never the owner, never a client-supplied id)."""
-    if CONFIG.voice_provider != "elevenlabs":
-        return {"error": "ElevenLabs voice is not enabled"}, 409
-    try:
-        result = await elevenlabs_voice.mint_conversation_token(
-            api_key=CONFIG.elevenlabs_api_key,
-            agent_id=CONFIG.elevenlabs_agent_id,
-        )
-    except elevenlabs_voice.ElevenLabsVoiceError as exc:
-        return {"error": str(exc)}, 502
-    try:
-        body = await _json_body(request)
-    except Exception:
-        body = {}
-    raw_session = body.get("session_id") if isinstance(body, Mapping) else None
-    app_session_id = raw_session.strip() if isinstance(raw_session, str) and raw_session.strip() else None
-    conversation_id = str(result.get("conversation_id") or "")
-    if conversation_id:
-        elevenlabs_voice.record_voice_session(
-            conversation_id, current_user_id(), app_session_id=app_session_id
-        )
-        logging.getLogger("mmacros.voice").debug(
-            "token minted conv=%s app_session=%s", conversation_id[:12], app_session_id)
-    return result
-
-
-@api_route("/api/voice/elevenlabs/agent-turn", methods=["POST"], public=True)
-async def api_elevenlabs_agent_turn(request: Request) -> Any:
-    """Server-to-server webhook the ElevenLabs agent calls once per utterance.
-    Secret-gated (not device auth). Runs the same shared turn the GPT adapter
-    uses, bound to the user who started this conversation (recorded at token
-    issuance) -- never the owner, never a client-supplied id. An unrecognized
-    conversation is refused rather than attributed to anyone."""
-    try:
-        body = await _json_body(request)
-    except Exception:
-        body = {}
-    provided = request.headers.get("x-elevenlabs-tool-secret", "")
-    # Gate on the shared secret before any attribution work.
-    if not elevenlabs_voice.secret_ok(provided, CONFIG.elevenlabs_tool_secret):
-        return {"error": "unauthorized"}, 401
-    conversation_id = body.get("conversation_id")
-    user_id = (elevenlabs_voice.resolve_voice_session(conversation_id.strip())
-               if isinstance(conversation_id, str) and conversation_id.strip() else None)
-    if user_id is None:
-        # Never fall back to the owner: unknown conversation = cannot attribute.
-        return {"reply": "This voice session has expired. Start a new one to continue."}, 200
-    # Run the turn on the app's own canvas session (recorded at token issuance) so
-    # the components and native Confirm card it produces appear in the session the
-    # app is viewing -- the same behavior the typed path already gets.
-    app_session_id = elevenlabs_voice.resolve_voice_app_session(conversation_id.strip())
-    _vlog = logging.getLogger("mmacros.voice")
-    _vlog.debug("webhook conv=%s user_bound=%s app_session=%s",
-                conversation_id.strip()[:12], user_id is not None, app_session_id)
-
-    async def turn_fn(session_id: str, turn_id: str, message: str) -> Any:
-        result = await canvas_service().turn(session_id, turn_id, message, adapter="voice")
-        surfaces = len(result.get("surfaces") or []) if isinstance(result, Mapping) else -1
-        approval = bool(result.get("approval")) if isinstance(result, Mapping) else False
-        _vlog.debug("voice turn ran session=%s surfaces=%d approval=%s",
-                    session_id, surfaces, approval)
-        return result
-
-    context_token = bind_user(user_id)
-    try:
-        payload, status = await elevenlabs_voice.run_agent_turn(
-            body,
-            provided_secret=provided,
-            expected_secret=CONFIG.elevenlabs_tool_secret,
-            turn_fn=turn_fn,
-            session_id_override=app_session_id,
-        )
-    except ChatQuotaExceeded:
-        # Expected refusal, not a transport failure. ElevenLabs speaks `reply`
-        # on successful tool responses; an HTTP error hides the quota reason
-        # behind its generic "trouble connecting" fallback.
-        return {"reply": (
-            "You've reached today's coach limit, so I couldn't process that request. "
-            "You can still use the app's standard screens, or try the coach again "
-            "after the daily reset."
-        )}, 200
-    finally:
-        reset_user(context_token)
-    return payload, status
-
-
-def create_app(*, live_service: LiveCoachService | None = None) -> Any:
-    """Build the production ASGI app with MCP, HTTP APIs, and native Live."""
+def create_app() -> Any:
+    """Build the production ASGI app with MCP and the HTTP APIs. Voice (the
+    realtime socket and the ElevenLabs webhook) was removed 2026-10-10."""
     configure_logging()
-    service = live_service or LiveCoachService(
-        store=store_client(),
-        provider_connect=connect_openai_live,
-        api_key=CONFIG.openai_api_key,
-        gate=_live_session_gate,
-        tool_handlers=_voice_tool_handlers(),
-    )
-
-    async def live_coach_endpoint(websocket: WebSocket) -> None:
-        await service.serve(websocket)
-
-    async def canvas_live_endpoint(websocket: WebSocket) -> None:
-        session_id = websocket.path_params["session_id"]
-        try:
-            if str(UUID(session_id)) != session_id:
-                raise ValueError("Invalid session")
-        except ValueError:
-            await websocket.close(code=4400, reason="Invalid session")
-            return
-        # Same admission/auth/audio bridge, but a single domain-agent adapter.
-        # The legacy live endpoint and its model/tool policy are unchanged.
-        canvas_live = LiveCoachService(
-            store=store_client(), provider_connect=connect_openai_live,
-            api_key=CONFIG.openai_api_key, gate=_live_session_gate,
-            tool_handlers={"agent_turn": canvas_service().voice_handler(session_id)},
-            session_start_builder=canvas_live_start, tool_result_event=canvas_tool_event,
-        )
-        await canvas_live.serve(websocket)
-
     from starlette.middleware import Middleware as _Middleware
 
-    app = mcp.http_app(
+    return mcp.http_app(
         middleware=[_Middleware(MCPAuthMiddleware)],
         transport="http",
     )
-    app.routes.append(WebSocketRoute("/api/live-coach", live_coach_endpoint))
-    app.routes.append(WebSocketRoute("/api/agent-canvas/{session_id}/live", canvas_live_endpoint))
-    return app
 
 
 def main() -> None:

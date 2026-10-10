@@ -16,8 +16,6 @@ async def test_day_readiness_shared_native_fixture_matches_real_serializer(monke
     import server as srv
     import domain
     import dataclasses
-    # Pin the voice flag so the canonical fixture stays env-independent.
-    monkeypatch.setattr(srv, "CONFIG", dataclasses.replace(srv.CONFIG, voice_provider="openai"))
     cases = json.loads((Path(__file__).resolve().parents[2] / "docs/agent-canvas/fixtures/day-readiness.json").read_text())
     monkeypatch.setattr(domain, "effective_date", lambda: date(2026, 9, 16))
     monkeypatch.setattr(domain, "day_label", lambda _day: "Today")

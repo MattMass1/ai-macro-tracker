@@ -1,3 +1,5 @@
+> **Superseded 2026-10-10.** Voice (ElevenLabs and the realtime socket) and the Agent Canvas UI were removed at the owner's request; the app is the classic four-tab interface with a plain Coach chat on the agent turn endpoint. See `docs/superpowers/specs/2026-10-10-classic-chat-restore-design.md`. Kept for history.
+
 # Voice → Canvas Fix and Operator Handoff
 
 Audience: an agent (or engineer) maintaining the MMMacros / Macro Coach app. This

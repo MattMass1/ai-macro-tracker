@@ -24,7 +24,7 @@ class AuthStore(MemoryStore):
         pass
 
 
-def test_canvas_http_and_voice_routes_keep_bearer_tenancy_and_reject_extra_fields(monkeypatch):
+def test_canvas_http_routes_keep_bearer_tenancy_and_reject_extra_fields(monkeypatch):
     store = AuthStore()
     async def agent(**kwargs):
         return "Ready", []
@@ -48,7 +48,5 @@ def test_canvas_http_and_voice_routes_keep_bearer_tenancy_and_reject_extra_field
         # Same public session UUID is not an authorization token.
         other = client.get(url, headers={"Authorization": "Bearer fixture-b"}).json()
         assert other["surfaces"] == []
-        with pytest.raises(WebSocketDisconnect) as exc:
-            with client.websocket_connect(url + "/live"):
-                pass
-        assert exc.value.code == 4401
+        # The realtime voice socket was removed (2026-10-10); only HTTP routes remain.
+        assert not any(getattr(route, "path", "").endswith("/live") for route in srv.create_app().routes)

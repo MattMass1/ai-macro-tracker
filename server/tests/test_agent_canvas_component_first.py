@@ -107,16 +107,17 @@ def test_setup_rows_and_action_payloads_are_closed():
     with pytest.raises(ValueError):
         validate_surface({'surfaceId':'task','lifecycle':'task','components':[{'id':'setup','component':'OnboardingScript'}]})
 
-def test_authenticated_root_stays_canvas_and_setup_components_are_native():
+def test_authenticated_root_is_the_classic_tab_app_with_a_plain_coach_chat():
+    # Owner decision 2026-10-10: the canvas UI is gone; the Coach tab is a plain
+    # chat on the agent turn endpoint.
     from pathlib import Path
     root=Path(__file__).resolve().parents[2]
     content=(root/'ios/MacroTracker/ContentView.swift').read_text().split('struct ProgressDashboardView')[0]
-    assert 'ChatLogView' not in content
-    assert 'AgentCanvasView(canvas: store.canvas)' in content
-    assert 'switch loader.route' not in content
-    renderer=(root/'ios/MacroTracker/Views/AgentSurfaceRenderer.swift').read_text()
-    assert 'case .setupChecklist' in renderer and 'case .workoutPlanPreview' in renderer
-    assert 'submitMetrics' in renderer and 'submitTargets' in renderer
+    assert 'TabView(selection: $selectedTab)' in content
+    assert 'CoachChatView()' in content and 'AgentCanvasView' not in content
+    assert not (root/'ios/MacroTracker/Views/AgentSurfaceRenderer.swift').exists()
+    chat=(root/'ios/MacroTracker/Views/CoachChatView.swift').read_text()
+    assert 'store.chat.send(' in chat and 'ApprovalRow' in chat and 'MetricsFormCard(' in chat
 
 @pytest.mark.asyncio
 async def test_real_agent_dispatches_closed_setup_composition(setup_service, monkeypatch):

@@ -1599,6 +1599,14 @@ approve a food's source. Correct any such claim in earlier conversation history.
 explicit web-estimate confirmation above still applies.
 If nutrition is unavailable, describe the lookup failure plainly; ask only for a genuinely
 missing food identity or portion, and never ask the user to obtain external verification.
+For ordinary food questions, answer with the item, portion and requested nutrition numbers.
+Never recite internal verification-state labels, raw provider record IDs, evidence hashes or
+resolution references unless the CURRENT request explicitly asks for diagnostic metadata.
+Earlier diagnostic replies are not the style to copy. Keep provenance in the tool data;
+name a source in plain language only when asked or needed for web-estimate disclosure.
+For example, if the tool returns 400 calories and 40 g protein for two bars, say "Two bars
+have 400 calories and 40 g of protein." Use the actual returned totals, never this example's
+numbers as a fallback. Preserve the exact web-estimate consent question and unknown-save guidance.
 Report only verified tool outcomes. Reply in at most two short sentences, no emoji.
 """
 

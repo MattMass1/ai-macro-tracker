@@ -1084,10 +1084,13 @@ async def _resolve_food_text(
         })
         any_resolved = True
     if unresolved:
+        # The parts already spent the web budget; the whole-phrase retry is a
+        # Layer 1 question only ("sweet and sour chicken" as one item), never a
+        # second 12 s web search. Measured in production: 25 s -> ~13 s worst case.
         quantity, unit, remainder = _clean_component(text)
         whole = await _resolve_component(
             remainder or text, whole_item=whole_item, catalog_lookup=catalog_lookup,
-            allow_web=allow_web,
+            allow_web=False,
         )
         quantified = _quantify(whole, quantity, unit) if whole and quantity is not None else None
         if whole:

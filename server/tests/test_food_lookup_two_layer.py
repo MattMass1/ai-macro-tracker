@@ -191,6 +191,28 @@ async def _outage_post(_token, _payload):
     raise httpx.ConnectError("refused")
 
 
+async def test_composite_whole_phrase_retry_never_spends_a_second_web_search(monkeypatch):
+    """Measured in production: an unresolved compound paid the web budget per
+    part AND again for the whole phrase (25 s). The whole-phrase retry is a
+    Layer 1 question only."""
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "token")
+    monkeypatch.setattr(food_lookup, "_fatsecret_provider_mode", lambda: "oauth1")
+    monkeypatch.setattr(food_lookup.cofid_lookup, "lookup", lambda _q: asyncio.sleep(0, result=None))
+    provider_calls, web_calls = [], []
+
+    async def provider(query):
+        provider_calls.append(query); return None
+
+    async def web_lookup(query, **_kwargs):
+        web_calls.append(query); raise web.NutritionLookupError("no_results")
+
+    monkeypatch.setattr(food_lookup, "search_fatsecret", provider)
+    monkeypatch.setattr(web, "lookup", web_lookup)
+    assert await food_lookup.resolve_food("fixture alpha and fixture beta") is None
+    assert sorted(web_calls) == ["fixture alpha", "fixture beta"]
+    assert "fixture alpha and fixture beta" in provider_calls  # Layer 1 still asked whole
+
+
 async def test_variant_question_skips_the_web_fallback(monkeypatch):
     """Measured in production: a variant pick-list used to arrive only after a
     12 s web search for an unspecified variant. Ambiguity now short-circuits."""

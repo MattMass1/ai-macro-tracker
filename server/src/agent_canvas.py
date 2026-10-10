@@ -29,6 +29,9 @@ TENANT_SESSION_LIMIT = 128
 GLOBAL_SESSION_LIMIT = 512
 TENANT_ACTIVE_LIMIT = 4
 SESSION_TURN_LIMIT = 64
+# A completed setup is re-read on polls at most this often (turns and setup
+# tools re-sync immediately); keeps the 2 s voice poll off the account tables.
+SETUP_RESYNC_SECONDS = 60.0
 SESSION_REPLAY_BYTE_LIMIT = 128_000
 
 
@@ -312,6 +315,7 @@ class AgentSession:
     acknowledged_rows: set[str] = field(default_factory=set)
     approval: dict | None = None
     setup_incomplete: bool = False
+    setup_synced_at: float = 0.0
 
     def snapshot(self):
         return {**self.canvas.snapshot(), "receipt": deepcopy(self.receipt),
@@ -426,7 +430,12 @@ class CanvasService:
             # presented simply appear sooner. Setup sync runs on the locked path.
             return session.snapshot()
         async with self.lease(session):
-            await self._sync_setup(session)
+            # A poll is a read. Account facts only change through this
+            # service's own turns/actions (which re-sync), so a completed
+            # setup is re-read on a slow clock, not four queries per 2 s tick.
+            if (session.setup_incomplete
+                    or time.monotonic() - session.setup_synced_at > SETUP_RESYNC_SECONDS):
+                await self._sync_setup(session)
             return session.snapshot()
 
     async def _setup_facts(self):
@@ -435,16 +444,16 @@ class CanvasService:
         # always does; absent adapter capability is not fabricated account data.
         if not hasattr(store, "get_metrics"):
             return None
-        name = await store.get_display_name()
-        metrics = await store.get_metrics()
-        targets = await store.fetch_targets(effective_date())
-        plan = await store.fetch_workout_plan()
+        name, metrics, targets, plan = await asyncio.gather(
+            store.get_display_name(), store.get_metrics(),
+            store.fetch_targets(effective_date()), store.fetch_workout_plan())
         return {"name": name, "metrics": metrics, "targets": targets, "plan": plan}
 
     async def _sync_setup(self, session, *, force=False):
         facts = await self._setup_facts()
         if facts is None:
             return
+        session.setup_synced_at = time.monotonic()
         complete = bool(facts["name"] and facts["metrics"] and facts["targets"]
                         and facts["targets"].get("calories", 0) > 0 and facts["plan"])
         was_incomplete = session.setup_incomplete
@@ -910,7 +919,10 @@ class CanvasService:
             ):
                 await self._preview_plan(session)
                 presented = True
-            await self._sync_setup(session)
+            # Setup tools re-sync themselves (force=True); a completed setup
+            # needs no second read of the same four account facts per turn.
+            if session.setup_incomplete:
+                await self._sync_setup(session)
             if last_food_result is None and not presented:
                 session.canvas.present("message", "task", [{
                     "id": "agent-message", "component": "AgentMessage", "text": reply[:1000],

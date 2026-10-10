@@ -226,6 +226,11 @@ def _answering_meal_question(user_key: str, session_key: str, description: str) 
     return len(pending["tokens"] & tokens) / len(pending["tokens"]) > 0.5
 
 
+def _forget_resolved_food(tenant: str) -> None:
+    for key in [key for key in _resolved_food_cache if key[0] == tenant]:
+        _resolved_food_cache.pop(key, None)
+
+
 def _is_zero_macro_food(name: str) -> bool:
     """Return whether a food name is allowlisted to carry calories without macros."""
     normalized_name = name.casefold()
@@ -274,7 +279,7 @@ async def resolve_food(query: str, **kwargs):
         if shared is not None:
             shared["presets"] = presets
     catalog_lookup = getattr(client, "lookup_catalog", None)
-    async def local_lookup(local_query: str) -> dict[str, Any] | None:
+    async def _local_lookup(local_query: str) -> dict[str, Any] | None:
         local_normalized = food_lookup.normalize_food_name(local_query)
         query_tokens = set(local_normalized.split())
         exact_presets = [item for item in presets
@@ -315,6 +320,21 @@ async def resolve_food(query: str, **kwargs):
         if generic_local is not None:
             return generic_local
         return None
+
+    # The whole-phrase probe, the component pass and food_lookup's own catalog
+    # step all ask the local layer about the same texts; one catalog SQL read
+    # per distinct text per tool call (the holder is call-scoped).
+    local_memo: dict[str, dict[str, Any] | None] = (
+        shared.setdefault("local", {}) if shared is not None else {})
+
+    async def local_lookup(local_query: str) -> dict[str, Any] | None:
+        key = food_lookup.normalize_food_name(local_query)
+        if key in local_memo:
+            cached_local = local_memo[key]
+            return deepcopy(cached_local) if cached_local is not None else None
+        result = await _local_lookup(local_query)
+        local_memo[key] = deepcopy(result) if result is not None else None
+        return result
 
     found = await local_lookup(query)
     if found is None:
@@ -2109,6 +2129,8 @@ def api_route(path: str, methods: list[str], *, public: bool = False):
                 release_gates.reset_client_contract(contract_token)
                 if context_token is not None:
                     reset_user(context_token)
+            if isinstance(payload, Response):
+                return _with_cors(payload, request)  # e.g. a bodiless 304 with its ETag
             status = 200
             if isinstance(payload, tuple):
                 payload, status = payload
@@ -2483,6 +2505,10 @@ def _coach_tool_handlers(*, canvas=False) -> dict[str, Callable[[Mapping[str, An
     async def log_preset_tool(args):
         return await log_preset_servings(str(args["preset_name"]), args["servings"], str(args["meal"]))
     async def save_preset_tool(args):
+        try:
+            _forget_resolved_food(str(current_user_id()))  # a new preset outranks any cached provider hit
+        except RuntimeError:
+            pass  # legacy in-process callers predate tenant binding
         values = dict(args["values"])
         # A preset is a deferred log_meal, so it carries the same provenance
         # requirement — otherwise fabricated macros could be laundered through
@@ -2855,7 +2881,8 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         found = (dict(pre_resolved) if pre_resolved is not None else
                  cached[2] if cached is not None
                  and cached[0] == current_user_id()
-                 and food_lookup.normalize_food_name(cached[1]) == food_lookup.normalize_food_name(query)
+                 and food_lookup._clean_component(food_lookup._normalize_query_text(cached[1]))[2]
+                 == food_lookup._clean_component(food_lookup._normalize_query_text(query))[2]
                  else None)
         if resolution_ref and found is None:
             return None
@@ -4067,10 +4094,17 @@ def canvas_service() -> CanvasService:
 
 @api_route("/api/agent-canvas/{session_id}", methods=["GET"])
 async def api_canvas_snapshot(request: Request) -> Any:
+    """The canvas the app shows; polled every 2 s while voice is live. The
+    ETag is instance:revision, so a client sending If-None-Match gets a
+    bodiless 304 when nothing changed instead of the full envelope."""
     try:
-        return await canvas_service().snapshot(request.path_params["session_id"], create=True)
+        snapshot = await canvas_service().snapshot(request.path_params["session_id"], create=True)
     except ValueError as exc:
         raise MacroError(str(exc)) from None
+    etag = f'"{snapshot.get("instanceId", "")}:{snapshot.get("revision", 0)}"'
+    if request.headers.get("if-none-match", "").strip() == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return JSONResponse(snapshot, headers={"ETag": etag})
 
 
 @api_route("/api/agent-canvas/{session_id}/turn", methods=["POST"])

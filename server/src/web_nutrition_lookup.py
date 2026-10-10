@@ -15,6 +15,7 @@ is labeled an unverified estimate, and the caller confirms before any write.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
@@ -45,10 +46,20 @@ EXA_EXCLUDED_DOMAINS = ("usda.gov",)
 CACHE_TTL_SECONDS = 3600.0
 NEGATIVE_CACHE_TTL_SECONDS = 15.0
 MAX_RESPONSE_BYTES = 262_144
-_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-_NEGATIVE_CACHE: dict[str, tuple[float, str]] = {}
+CACHE_MAX_ENTRIES = 512
+_CACHE: "OrderedDict[str, tuple[float, dict[str, Any]]]" = OrderedDict()
+_NEGATIVE_CACHE: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
 _INFLIGHT: dict[str, asyncio.Task] = {}
 _LOCK = asyncio.Lock()
+
+
+def _bounded_put(cache: "OrderedDict[str, Any]", key: str, value: Any) -> None:
+    """Insert newest-last and drop the oldest entries past the cap; the caches
+    were plain dicts that grew for the life of the process."""
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > CACHE_MAX_ENTRIES:
+        cache.popitem(last=False)
 
 
 class NutritionLookupError(RuntimeError):
@@ -118,18 +129,20 @@ def clear_cache() -> None:
 
 async def post_responses(token: str, payload: dict[str, Any]) -> httpx.Response:
     """Execute exactly one request against the fixed provider API endpoint."""
-    async with httpx.AsyncClient(timeout=httpx.Timeout(TIMEOUT_SECONDS), follow_redirects=False) as client:
-        return await client.post(RESPONSES_URL, headers={
-            "authorization": f"Bearer {token}", "content-type": "application/json",
-        }, json=payload)
+    from http_clients import shared_client
+
+    return await shared_client(TIMEOUT_SECONDS).post(RESPONSES_URL, headers={
+        "authorization": f"Bearer {token}", "content-type": "application/json",
+    }, json=payload)
 
 
 async def post_exa_search(key: str, payload: dict[str, Any]) -> httpx.Response:
     """Execute exactly one Exa search."""
-    async with httpx.AsyncClient(timeout=httpx.Timeout(EXA_TIMEOUT_SECONDS), follow_redirects=False) as client:
-        return await client.post(EXA_SEARCH_URL, headers={
-            "x-api-key": key, "content-type": "application/json",
-        }, json=payload)
+    from http_clients import shared_client
+
+    return await shared_client(EXA_TIMEOUT_SECONDS).post(EXA_SEARCH_URL, headers={
+        "x-api-key": key, "content-type": "application/json",
+    }, json=payload)
 
 
 _EVIDENCE_SCHEMA = {
@@ -474,8 +487,8 @@ async def lookup(query: str, *, post: PostResponses | None = None,
     text = " ".join(str(query or "").split())
     if not token:
         if text:
-            _NEGATIVE_CACHE[_cache_key(model, text)] = (
-                time.monotonic() + NEGATIVE_CACHE_TTL_SECONDS, "not_configured")
+            _bounded_put(_NEGATIVE_CACHE, _cache_key(model, text),
+                         (time.monotonic() + NEGATIVE_CACHE_TTL_SECONDS, "not_configured"))
         raise NutritionLookupError("not_configured")
     if post is None: post = post_responses
     if post_exa is None: post_exa = post_exa_search
@@ -504,7 +517,7 @@ async def lookup(query: str, *, post: PostResponses | None = None,
             raise NutritionLookupError("shared_lookup_cancelled") from None
         raise
     except NutritionLookupError as exc:
-        _NEGATIVE_CACHE[key] = (time.monotonic() + NEGATIVE_CACHE_TTL_SECONDS, exc.reason)
+        _bounded_put(_NEGATIVE_CACHE, key, (time.monotonic() + NEGATIVE_CACHE_TTL_SECONDS, exc.reason))
         raise
-    _CACHE[key] = (time.monotonic() + CACHE_TTL_SECONDS, deepcopy(result))
+    _bounded_put(_CACHE, key, (time.monotonic() + CACHE_TTL_SECONDS, deepcopy(result)))
     return deepcopy(result)

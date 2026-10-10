@@ -2,7 +2,7 @@
 estimate. The OpenFoodFacts barcode path serves the scanner only."""
 from __future__ import annotations
 
-import asyncio, base64, hashlib, hmac, json, logging, math, os, re, secrets, time
+import asyncio, base64, functools, hashlib, hmac, json, logging, math, os, re, secrets, time
 from collections import OrderedDict
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
@@ -105,8 +105,14 @@ _VOLUME_UNITS = frozenset({
 })
 _NUM_TOKEN = r"(?:\d+(?:\.\d+)?(?:/\d+)?|" + "|".join(_NUMBER_WORDS) + r")"
 _UNIT_TOKEN = "|".join(sorted(_UNIT_WORDS, key=len, reverse=True))
-_LEADING_QTY_RE = re.compile(rf"^\s*({_NUM_TOKEN})\s+({_UNIT_TOKEN})\b\s*", re.IGNORECASE)
-_TRAILING_QTY_RE = re.compile(rf"\s*({_NUM_TOKEN})\s+({_UNIT_TOKEN})\b\.?\s*$", re.IGNORECASE)
+_SPOKEN_NUMBER = (
+    rf"(?:\d+\s+(?:and\s+)?\d+/\d+|\d+\s+and\s+a\s+half|"
+    rf"half\s+a|a\s+half|a\s+quarter|quarter|{_NUM_TOKEN})"
+)
+_LEADING_PORTION_RE = re.compile(
+    rf"^\s*({_SPOKEN_NUMBER})\s+({_UNIT_TOKEN})\b\.?\s*(?:of\s+)?", re.IGNORECASE)
+_TRAILING_PORTION_RE = re.compile(
+    rf"\s*({_SPOKEN_NUMBER})\s+({_UNIT_TOKEN})\b\.?\s*$", re.IGNORECASE)
 _COMPONENT_SPLIT_RE = re.compile(r"(\(|\)|\band\b|,|\+)", re.IGNORECASE)
 _SINGLE_FOOD_AND_NAMES = frozenset({
     "biscuits and gravy", "fish and chips", "mac and cheese",
@@ -466,10 +472,14 @@ def _rank_hits(query: str, hits: list[Any]) -> list[Mapping[str, Any]]:
     """Acceptable hits, best first: an exact item-name match outranks a
     brand-anchored broader item ("Chicken Sandwich" before "Grilled Chicken
     Sandwich"); provider order breaks ties."""
+    # Gate on name + brand only, exactly what the resolver re-checks after the
+    # fetch; a hit accepted here on description words alone would cost an
+    # item fetch and then be rejected.
     ranked = [
         (0 if _exact_name_match(query, food) else 1, index, food)
         for index, food in enumerate(hits)
-        if isinstance(food, Mapping) and food.get("food_id") and _fatsecret_relevant(query, food)
+        if isinstance(food, Mapping) and food.get("food_id") and _fatsecret_relevant(
+            query, {"food_name": food.get("food_name"), "brand_name": food.get("brand_name")})
     ]
     ranked.sort(key=lambda item: item[:2])
     return [food for _tier, _index, food in ranked]
@@ -559,6 +569,9 @@ async def fatsecret_name_options(query: str, limit: int = 3) -> list[str]:
     Reuses the hits the failed resolution already fetched when it can."""
     if _fatsecret_provider_mode() is None:
         return []
+    # The resolver searched the cleaned identity ("about 12 oz chicken" ->
+    # "chicken"); key the reuse and the option gate on the same text.
+    query = _clean_component(_normalize_query_text(query))[2] or query
     hits = _recent_search_hits(query)
     if hits is None:
         try:
@@ -685,16 +698,10 @@ def _extract_quantity(text: str) -> tuple[float | None, str | None, str]:
     `93/7 ground beef` keeps its fat ratio (no unit word follows it); `6 oz
     ground beef` and `ground beef, 200 g` both give up their quantity.
     """
-    spoken_number = (
-        rf"(?:\d+\s+(?:and\s+)?\d+/\d+|\d+\s+and\s+a\s+half|"
-        rf"half\s+a|a\s+half|a\s+quarter|quarter|{_NUM_TOKEN})"
-    )
-    leading = re.compile(rf"^\s*({spoken_number})\s+({_UNIT_TOKEN})\b\.?\s*(?:of\s+)?", re.IGNORECASE)
-    trailing = re.compile(rf"\s*({spoken_number})\s+({_UNIT_TOKEN})\b\.?\s*$", re.IGNORECASE)
-    match = leading.match(text)
+    match = _LEADING_PORTION_RE.match(text)
     if match:
         return _quantity_value(match.group(1)), match.group(2).casefold(), text[match.end():].strip()
-    match = trailing.search(text)
+    match = _TRAILING_PORTION_RE.search(text)
     if match:
         remainder = (text[:match.start()] + text[match.end():]).strip()
         return _quantity_value(match.group(1)), match.group(2).casefold(), remainder
@@ -729,9 +736,11 @@ def _normalize_query_text(text: str) -> str:
     return " ".join(words.split())
 
 
+@functools.lru_cache(maxsize=1024)
 def _clean_component(text: str) -> tuple[float | None, str | None, str]:
     """Strip parenthetical wrapping, hedging words, and stray punctuation, then
-    pull off any explicit quantity — the remainder is what gets searched."""
+    pull off any explicit quantity — the remainder is what gets searched.
+    Pure and called several times per provider hit, hence cached."""
     unwrapped = _normalize_query_text(text).replace("(", " ").replace(")", " ")
     dehedged = _HEDGE_RE.sub(" ", unwrapped)
     depunctuated = re.sub(r"[,;]+", " ", dehedged)

@@ -93,6 +93,19 @@ final class APIClient {
     func canvasSnapshot(sessionId: String) async throws -> AgentCanvasEnvelope {
         try await request("api/agent-canvas/\(encoded(sessionId))", method: "GET", body: nil, canvas: true)
     }
+    /// The server's snapshot ETag is `"instanceId:revision"`, so a poll can
+    /// send what it already shows and get a bodiless 304 back when nothing
+    /// changed (the voice poll runs every 2 s; most ticks change nothing).
+    struct NotModified: Error {}
+    func canvasSnapshotIfChanged(sessionId: String, shown: AgentCanvasEnvelope?) async throws -> AgentCanvasEnvelope? {
+        let etag = shown.map { "\"\($0.instanceId):\($0.revision)\"" }
+        do {
+            return try await request("api/agent-canvas/\(encoded(sessionId))", method: "GET", body: nil,
+                                     canvas: true, ifNoneMatch: etag)
+        } catch is NotModified {
+            return nil
+        }
+    }
     func canvasTurn(sessionId: String, turnId: String, message: String) async throws -> AgentCanvasEnvelope {
         let body = try JSONEncoder().encode(["turn_id": turnId, "message": message])
         return try await request("api/agent-canvas/\(encoded(sessionId))/turn", method: "POST", body: body, canvas: true)
@@ -106,7 +119,7 @@ final class APIClient {
     private func delete<T: Decodable>(_ path: String) async throws -> T { try await request(path, method: "DELETE", body: Optional<Data>.none) }
     private func send<T: Decodable, Body: Encodable>(_ path: String, body: Body) async throws -> T { try await request(path, method: "POST", body: encoder.encode(body)) }
 
-    private func request<T: Decodable>(_ path: String, method: String, body: Data?, authenticated: Bool = true, canvas: Bool = false) async throws -> T {
+    private func request<T: Decodable>(_ path: String, method: String, body: Data?, authenticated: Bool = true, canvas: Bool = false, ifNoneMatch: String? = nil) async throws -> T {
         func debugPreview(_ data: Data, limit: Int = 400) -> String {
             let text = String(data: data, encoding: .utf8) ?? "<non-utf8 data, \(data.count) bytes>"
             if text.count > limit {
@@ -124,6 +137,7 @@ final class APIClient {
         request.timeoutInterval = canvas ? 120 : 45
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(Config.nutrientContract, forHTTPHeaderField: Config.nutrientContractHeader)
+        if let ifNoneMatch { request.setValue(ifNoneMatch, forHTTPHeaderField: "If-None-Match") }
         if authenticated {
             guard let token = tokenProvider(), !token.isEmpty else {
                 NotificationCenter.default.post(name: .deviceTokenRejected, object: nil)
@@ -132,7 +146,9 @@ final class APIClient {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
+        #if DEBUG
         print("[API] → \(method) \(url.absoluteString)")
+        #endif
 
         let data: Data
         let response: URLResponse
@@ -142,24 +158,31 @@ final class APIClient {
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
         
         guard let http = response as? HTTPURLResponse else { throw APIError(status: 503, message: "The server returned an invalid response.") }
-        
+        if ifNoneMatch != nil, http.statusCode == 304 { throw NotModified() }
+
         guard (200..<300).contains(http.statusCode) else {
             if authenticated, http.statusCode == 401 {
                 NotificationCenter.default.post(name: .deviceTokenRejected, object: nil)
             }
             let preview = canvas ? "<canvas body withheld>" : debugPreview(data)
+            #if DEBUG
             print("[API] ← \(http.statusCode) for \(method) \(url.absoluteString)\n[API] Body: \n\(preview)")
+            #endif
             let serverMessage = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
             throw APIError(status: http.statusCode, message: serverMessage ?? (String(data: data, encoding: .utf8) ?? "Request failed."))
         }
         do {
             if canvas, data.count > 48_000 { throw AgentCanvasError.invalidPayload }
             let decoded = try (canvas ? JSONDecoder() : decoder).decode(T.self, from: data)
+            #if DEBUG
             print("[API] ← \(statusCode) OK for \(method) \(url.absoluteString)")
+            #endif
             return decoded
         } catch {
             let preview = canvas ? "<canvas body withheld>" : debugPreview(data)
+            #if DEBUG
             if !canvas { print("[API] Decode failed: \(preview)\nError: \(error)") }
+            #endif
             throw APIError(status: 500, message: "The server response could not be read: \(error.localizedDescription)")
         }
     }

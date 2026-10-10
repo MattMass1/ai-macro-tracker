@@ -102,7 +102,9 @@ final class AgentSurfaceStore: ObservableObject {
               !busy, instanceRecoveryTask == nil, authenticated() else { return }
         let current = generation
         do {
-            let value = try await api.canvasSnapshot(sessionId: sessionId)
+            // Conditional GET: a tick where nothing changed costs a bodiless 304,
+            // not a full envelope decoded and then discarded.
+            guard let value = try await api.canvasSnapshotIfChanged(sessionId: sessionId, shown: envelope) else { return }
             guard current == generation else { return }
             if try receive(value) { await reloadData() }
         } catch {
@@ -329,7 +331,12 @@ final class AgentSurfaceStore: ObservableObject {
         if envelope?.surfaces.contains(where: { $0.components.contains(where: { $0.component == .macroProgress || $0.component == .receiptTimeline }) }) == true {
             app?.selectCurrentDay()
         }
-        await app?.loadAll()
+        // A canvas turn or action changes today's log and, when a workout card
+        // is live, today's sets. The exercise library, routine and stats are
+        // not touched by the canvas, so the full six-request dashboard reload
+        // (which also followed every card dismissal) is not repeated here.
+        await app?.loadDay()
+        if envelope?.workout != nil { await app?.loadWorkoutData() }
         if envelope?.surfaces.contains(where: { $0.components.contains(where: { $0.component == .weeklyTrend }) }) == true {
             await app?.trends(days: 7)
         }

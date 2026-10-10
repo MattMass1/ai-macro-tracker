@@ -106,12 +106,13 @@ def system_prompt(onboarding: bool, display_name: str | None = None) -> str:
 
 
 async def post_openai(token: str, payload: dict[str, Any]) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        return await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"authorization": f"Bearer {token}", "content-type": "application/json"},
-            json=payload,
-        )
+    from http_clients import shared_client
+
+    return await shared_client(90.0).post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"authorization": f"Bearer {token}", "content-type": "application/json"},
+        json=payload,
+    )
 
 
 async def _call_provider(post: PostMessages, token: str, payload: dict[str, Any]) -> httpx.Response:

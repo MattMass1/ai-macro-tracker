@@ -8,6 +8,7 @@ import logging
 import math
 import re
 import secrets
+import time as _clock  # `time` below is datetime.time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -219,11 +220,21 @@ def workout(row: asyncpg.Record) -> dict[str, Any]:
             "created_time": data["created_at"]}
 
 
+# Device-token resolution ran a row UPDATE on every authenticated request,
+# including each 2 s canvas poll. A short in-process cache answers repeats;
+# each cache miss still writes last_seen, so activity stays fresh to the TTL,
+# and a token that stops resolving is dropped on the next miss (a revoked
+# token outlives revocation by at most the TTL).
+_DEVICE_CACHE_TTL_SECONDS = 30.0
+_DEVICE_CACHE_MAX = 1024
+
+
 class Store:
     def __init__(self, database_url: str):
         if not database_url: raise ValueError("DATABASE_URL is required")
         self.database_url, self.pool = database_url, None
         self._connect_lock = asyncio.Lock()
+        self._device_cache: dict[str, tuple[UUID, float]] = {}  # token_hash -> (user_id, resolved_at)
 
     async def connect(self) -> asyncpg.Pool:
         """Create the pool once and fail cleanly when migrations are incompatible."""
@@ -255,10 +266,22 @@ class Store:
 
     async def resolve_device(self, raw_token: str) -> UUID | None:
         pool = await self.connect()
-        return await pool.fetchval(
+        token_hash = hash_device_token(raw_token)
+        now = _clock.monotonic()
+        cached = self._device_cache.get(token_hash)
+        if cached is not None and now - cached[1] <= _DEVICE_CACHE_TTL_SECONDS:
+            return cached[0]
+        user_id = await pool.fetchval(
             "UPDATE devices SET last_seen=now() WHERE token_hash=$1 RETURNING user_id",
-            hash_device_token(raw_token),
+            token_hash,
         )
+        if user_id is None:
+            self._device_cache.pop(token_hash, None)
+            return None
+        if len(self._device_cache) >= _DEVICE_CACHE_MAX:
+            self._device_cache.clear()
+        self._device_cache[token_hash] = (user_id, now)
+        return user_id
 
     async def resolve_device_for_live(self, raw_token: str) -> UUID | None:
         """Resolve Live-session auth without mutating device activity state."""

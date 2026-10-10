@@ -319,8 +319,11 @@ class Store:
 
     async def fetch_meals(self, start: date, end: date | None = None):
         pool = await self.connect(); end = end or start; user_id = current_user_id()
+        # Only what meal() projects: SELECT * also dragged component_metadata
+        # (up to 16 KB of JSONB per row) through the pool on every day read.
         return [meal(r) for r in await pool.fetch(
-            "SELECT * FROM nutrition_entries WHERE user_id=$1 AND day BETWEEN $2 AND $3 "
+            "SELECT id,name,meal,calories,protein,carbs,fat,fiber,day,created_at "
+            "FROM nutrition_entries WHERE user_id=$1 AND day BETWEEN $2 AND $3 "
             "ORDER BY day, created_at DESC", user_id, start, end)]
 
     async def fetch_day_rollups(self, start: date | None = None, end: date | None = None):

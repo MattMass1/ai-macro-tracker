@@ -152,6 +152,40 @@ async def test_one_food_tool_call_queries_the_catalog_once_per_distinct_text(mon
     assert calls and len(calls) == len(set(calls)), calls  # no text asked twice
 
 
+def test_hot_path_indexes_migration_is_additive_and_ordered():
+    import migrations
+    files = dict(migrations.migration_files()) if hasattr(migrations, "migration_files") else {
+        path.name: path for path in sorted(migrations.MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql"))}
+    sql = files["004_hot_path_indexes.sql"].read_text()
+    assert sql.count("CREATE INDEX IF NOT EXISTS") == 2
+    assert "food_identifiers (lower(provider), external_id)" in sql
+    assert "nutrition_entries (user_id, day, created_at DESC)" in sql
+    assert not any(word in sql.upper() for word in ("DROP ", "DELETE ", "UPDATE ", "ALTER "))
+    assert "004_hot_path_indexes.sql" not in migrations.APPROVAL_REQUIRED
+
+
+async def test_day_reads_project_only_the_columns_the_row_mapper_uses(monkeypatch):
+    from store import Store, meal
+
+    class Pool:
+        sql = ""
+
+        async def fetch(self, sql, *_args):
+            type(self).sql = sql; return []
+
+    s = Store("postgresql://fixture.invalid/x")
+    monkeypatch.setattr(s, "connect", lambda: asyncio.sleep(0, result=Pool()))
+    scope = bind_user(uuid4())
+    try:
+        from datetime import date
+        assert await s.fetch_meals(date(2026, 10, 10)) == []
+    finally:
+        reset_user(scope)
+    assert "SELECT *" not in Pool.sql and "component_metadata" not in Pool.sql
+    for column in ("id", "name", "meal", "calories", "protein", "carbs", "fat", "fiber", "day", "created_at"):
+        assert column in Pool.sql.split(" FROM ")[0]
+
+
 def test_web_caches_are_bounded():
     web.clear_cache()
     for index in range(web.CACHE_MAX_ENTRIES + 50):

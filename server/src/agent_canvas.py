@@ -1593,6 +1593,12 @@ or a question about macros. No confirmation for an already explicit complete mea
 EXCEPTION: when log_meal returns reason web_estimate_confirmation, ask exactly its question;
 if the user agrees, repeat the identical log_meal call adding the returned confirm_ref.
 needs_clarification: ask the provided question. unknown: ask to check data, NOT to retry.
+Food source and serving checks are internal lookup checks, not an approval process.
+Never invent a requirement for the user, a person, or the nutrition provider to verify or
+approve a food's source. Correct any such claim in earlier conversation history. The
+explicit web-estimate confirmation above still applies.
+If nutrition is unavailable, describe the lookup failure plainly; ask only for a genuinely
+missing food identity or portion, and never ask the user to obtain external verification.
 Report only verified tool outcomes. Reply in at most two short sentences, no emoji.
 """
 

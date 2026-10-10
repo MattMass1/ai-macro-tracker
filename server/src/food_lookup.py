@@ -327,15 +327,17 @@ def _exact_name_match(query: str, food: Mapping[str, Any]) -> bool:
     count = re.match(r"^(\d+)\s+(.+)$", identity)
     if count and count[1] not in name_tokens | brand_tokens:
         tokens.discard(count[1])
-    # Barebells may include the neutral category "protein bar" in either the
+    # Barebells may include the neutral category "bar" or "protein bar" in either the
     # request or provider name. Never drop flavor or line modifiers such as
     # Soft, Caramel or a numbered variant, and never apply this to other brands.
     if "barebell" in brand_tokens and "barebell" in tokens:
         category = {"protein", "bar"}
-        if category <= tokens:
+        if "bar" in tokens:
             tokens -= category
-        if category <= name_tokens:
+        if "bar" in name_tokens:
             name_tokens -= category
+        if not tokens - brand_tokens or not name_tokens - brand_tokens:
+            return False
     if tokens == name_tokens:
         return True
     return bool(tokens & brand_tokens) and (tokens - brand_tokens) == name_tokens
@@ -447,6 +449,7 @@ async def _fatsecret_search_hits(query: str) -> list[Any]:
     the same text was searched moments ago (the whole-phrase probe and the
     component pass ask the same question). A failed or unconfigured request
     remembers nothing."""
+    query = _normalize_query_text(query)
     remembered = _recent_search_hits(query)
     if remembered is not None:
         return remembered
@@ -690,6 +693,11 @@ def _extract_quantity(text: str) -> tuple[float | None, str | None, str]:
 def _normalize_query_text(text: str) -> str:
     """Canonicalize spoken numbers and common meat lean/fat ratios."""
     words = re.sub(r"(?<=[A-Za-z])-(?=[A-Za-z])", " ", text)
+    # Explicit speech spellings of this brand, not fuzzy product matching.
+    # Whole-token boundaries retain distinct names such as BearBellsFit, while
+    # every flavor, product-line and portion token remains in the query.
+    words = re.sub(r"\b(?:bearbells|bear\s+bells|bare\s+bells)\b",
+                   "Barebells", words, flags=re.IGNORECASE)
     protected: dict[str, str] = {}
     for index, phrase in enumerate(("half a", "a half", "a quarter")):
         marker = f"__fraction_{index}__"

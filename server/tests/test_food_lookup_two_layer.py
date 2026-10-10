@@ -244,7 +244,7 @@ async def test_variant_question_skips_the_web_fallback(monkeypatch):
                     "Try again in a moment."),
     (_outage_post, "The nutrition lookup service was unreachable for fixture zebra steak. "
                    "Try again in a moment."),
-    (_no_evidence_post, "I couldn't verify fixture zebra steak. What was it exactly: "
+    (_no_evidence_post, "I couldn't find nutrition for fixture zebra steak. What was it exactly: "
                         "the brand, the dish, or how it was prepared?"),
 ])
 async def test_unverified_food_names_an_outage_and_never_asks_for_a_label(monkeypatch, post, expected):

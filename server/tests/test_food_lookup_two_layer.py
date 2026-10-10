@@ -107,6 +107,29 @@ async def test_same_text_is_searched_once_across_probe_and_component_pass(monkey
     assert searches == ["zebra steak"]
 
 
+async def test_one_food_tool_call_reads_presets_once_for_all_components(monkeypatch):
+    class CountingStore(FakeVoiceStore):
+        preset_reads = 0
+
+        async def fetch_presets(self, *args, **kwargs):
+            type(self).preset_reads += 1
+            return await super().fetch_presets(*args, **kwargs)
+
+    fake = CountingStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    srv._resolved_food_cache.clear()
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_provider_mode", lambda: None)
+    token = bind_user(uuid4())
+    try:
+        result = await srv._voice_tool_handlers()["log_meal"]("presets-once", {
+            "description": "2 eggs and 2 slices of bacon", "meal_type": "Breakfast"})
+    finally:
+        reset_user(token)
+    assert result["status"] == "committed"
+    assert CountingStore.preset_reads == 1
+    assert srv._turn_presets.get() is None  # the shared read ends with the call
+
+
 async def test_close_variants_without_an_exact_match_ask_instead_of_guessing(monkeypatch):
     _enable_fatsecret(monkeypatch)
     fetched = []

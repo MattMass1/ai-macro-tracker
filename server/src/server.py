@@ -18,6 +18,7 @@ import asyncio
 import re
 import time
 from collections import OrderedDict, defaultdict, deque
+from contextvars import ContextVar
 from copy import deepcopy
 from contextlib import asynccontextmanager
 from datetime import date as _date, timedelta
@@ -134,6 +135,9 @@ _RESOLVED_CACHE_TTL_SECONDS = 90.0
 _resolved_food_cache: OrderedDict[
     tuple[str, str, bool, bool], tuple[float, dict[str, Any]]
 ] = OrderedDict()
+# One food tool call resolves several components; they share one presets read.
+# The holder lives only for that call, so nothing can go stale across calls.
+_turn_presets: ContextVar[dict[str, Any] | None] = ContextVar("mmacros_turn_presets", default=None)
 
 
 def _is_zero_macro_food(name: str) -> bool:
@@ -171,11 +175,17 @@ async def resolve_food(query: str, **kwargs):
         del _resolved_food_cache[cache_key]
 
     client = store_client()
-    try:
-        presets = await client.fetch_presets()
-    except Exception:
-        logger.exception("Preset lookup failed; continuing local resolution")
-        presets = []
+    shared = _turn_presets.get()
+    if shared is not None and "presets" in shared:
+        presets = shared["presets"]
+    else:
+        try:
+            presets = await client.fetch_presets()
+        except Exception:
+            logger.exception("Preset lookup failed; continuing local resolution")
+            presets = []
+        if shared is not None:
+            shared["presets"] = presets
     catalog_lookup = getattr(client, "lookup_catalog", None)
     async def local_lookup(local_query: str) -> dict[str, Any] | None:
         local_normalized = food_lookup.normalize_food_name(local_query)
@@ -2877,6 +2887,13 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         return result
 
     async def voice_log_meal_tool(call_id: str, args: Mapping[str, Any]) -> Any:
+        scope = _turn_presets.set({})
+        try:
+            return await _voice_log_meal(call_id, args)
+        finally:
+            _turn_presets.reset(scope)
+
+    async def _voice_log_meal(call_id: str, args: Mapping[str, Any]) -> Any:
         operation_id = "voice-" + hashlib.sha256(
             f"{current_user_id()}:{call_id}".encode()
         ).hexdigest()[:24]
@@ -3177,7 +3194,14 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
     async def voice_get_today_tool(_call_id: str, args: Mapping[str, Any]) -> Any:
         return await base["get_today"](args)
 
-    async def voice_lookup_food_tool(_call_id: str, args: Mapping[str, Any]) -> Any:
+    async def voice_lookup_food_tool(call_id: str, args: Mapping[str, Any]) -> Any:
+        scope = _turn_presets.set({})
+        try:
+            return await _voice_lookup_food(call_id, args)
+        finally:
+            _turn_presets.reset(scope)
+
+    async def _voice_lookup_food(_call_id: str, args: Mapping[str, Any]) -> Any:
         current_user_id()
         found = await resolve_food(str(args.get("query") or ""))
         query = str(args.get("query") or "")

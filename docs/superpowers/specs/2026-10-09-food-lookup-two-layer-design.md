@@ -40,10 +40,15 @@ Implementation notes (what shipped, where it differs from the text below):
   when nothing resolves (`coach.py` SYSTEM_PROMPT/TOOLS,
   `_coach_tool_handlers.lookup_food`); only its stale provider wording was
   corrected. The canvas and voice paths never estimate.
-- Not changed: `coach.py max_rounds=8` is a safety cap, not a per-turn cost;
-  cut it only against `mmacros.turn` telemetry. The per-call `fetch_presets`
-  (one DB read per resolved component) is left as is -- caching it risks a
-  stale miss right after save_preset for a few milliseconds of gain.
+- Presets are read once per food tool call and shared by every component it
+  resolves (`server._turn_presets`, a call-scoped holder), instead of one DB
+  read per component. No cross-call caching, so nothing can go stale after
+  save_preset.
+- Not changed: `coach.py max_rounds=8` is a safety cap, not a per-turn cost
+  (a food log is one tool round plus the reply); cut it only against
+  `mmacros.turn` telemetry. No live provider credentials exist off Render, so
+  real-provider latency was not measured locally; the call counts above are
+  from a stubbed provider.
 
 ## Problem
 

@@ -153,10 +153,19 @@ def _meal_session_key(call_id: str) -> str:
     return ":".join(parts[:2]) if len(parts) >= 3 and parts[0] == "canvas" else str(call_id or "")
 
 
+# Words a spoken answer to the one question is made of, not food identity.
+_FOLLOW_UP_FILLER = frozenset({
+    "whichever", "whatever", "either", "any", "yes", "yeah", "yep", "ok", "okay", "sure",
+    "fine", "please", "just", "log", "it", "that", "this", "one", "the", "go", "ahead",
+    "same", "thing", "first", "option", "default", "correct", "right", "dont", "care",
+})
+
+
 def _remember_meal_question(user_key: str, session_key: str, description: str) -> None:
     _meal_questions[(user_key, session_key)] = {
         "expires": time.monotonic() + _MEAL_QUESTION_TTL_SECONDS,
         "tokens": food_lookup._canon_food_tokens(description),
+        "description": description,
     }
     _meal_questions.move_to_end((user_key, session_key))
     while len(_meal_questions) > 256:
@@ -165,6 +174,11 @@ def _remember_meal_question(user_key: str, session_key: str, description: str) -
 
 def _settle_meal_question(user_key: str, session_key: str) -> None:
     _meal_questions.pop((user_key, session_key), None)
+
+
+def _pending_meal_description(user_key: str, session_key: str) -> str:
+    pending = _meal_questions.get((user_key, session_key))
+    return str(pending["description"]) if pending else ""
 
 
 def _answering_meal_question(user_key: str, session_key: str, description: str) -> bool:
@@ -177,9 +191,9 @@ def _answering_meal_question(user_key: str, session_key: str, description: str) 
     pending = _meal_questions.get((user_key, session_key))
     if pending is None:
         return False
-    tokens = food_lookup._canon_food_tokens(description)
+    tokens = food_lookup._canon_food_tokens(description) - _FOLLOW_UP_FILLER
     if not pending["tokens"] or not tokens:
-        return True
+        return True  # "whichever, just log it" names no food: it answers the question
     # Same food if most of the asked-about identity is back ("half bbq sandwich"
     # answers "bbq sandwich"); one shared word ("chicken salad" after a
     # "chicken sandwich" question) is a new request.
@@ -3032,6 +3046,22 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         bad_portions = [str(component.get("description") or "food")
                         for component, result in zip(components, resolved)
                         if result is not None and result.get("portion_error")]
+        if (bad_portions or unresolved) and finishing:
+            # The answer may not name the food ("whichever, just log it", or
+            # the food plus filler). Finish with the food the question was
+            # about, taking the top variant, before giving up.
+            original = _pending_meal_description(user_key, session_key)
+            retry = None
+            if original and (food_lookup.normalize_food_name(original)
+                             != food_lookup.normalize_food_name(" ".join(texts))):
+                try:
+                    retry = await resolve_component({"description": original}, atomic=False,
+                                                    assume_variant=True)
+                except Exception:
+                    retry = None
+            if retry is not None and not retry.get("portion_error"):
+                resolved = [retry]
+                unresolved, bad_portions = [], []
         if bad_portions or unresolved:
             if finishing:
                 # Budget spent: say plainly what did not work; never a second question.

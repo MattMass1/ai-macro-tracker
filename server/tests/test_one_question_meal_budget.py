@@ -72,6 +72,33 @@ async def test_variant_question_then_the_follow_up_logs_the_top_variant(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [
+    "Whichever, just log it.",                      # filler only (what the voice model sent)
+    "Panera-style fixture bakery bbq sandwich, whichever one",  # food plus filler
+])
+async def test_follow_up_that_does_not_resolve_logs_the_asked_about_food(monkeypatch, answer):
+    """Seen in production on the voice path: the model relayed the user's answer
+    words as the description and the follow-up failed. The server finishes with
+    the food the question was about."""
+    srv, fake = _fresh(monkeypatch)
+    _variants(monkeypatch, srv)
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+    token = bind_user(uuid4())
+    try:
+        handlers = srv._voice_tool_handlers()
+        first = await handlers["log_meal"]("canvas:S7:t1", {"description": "fixture bakery bbq sandwich"})
+        assert first["status"] == "needs_clarification"
+        second = await handlers["log_meal"]("canvas:S7:t2", {"description": answer, "meal_type": "Lunch"})
+    finally:
+        reset_user(token)
+    assert second["status"] == "committed", second
+    assert second["logged"]["name"] == "fixture bakery bbq sandwich"
+    assert second["logged"]["calories"] == 640
+    assert "I assumed the BBQ Sandwich Whole variant." in second["confirmation"]
+    assert fake.insert_count == 1 and srv._meal_questions == {}
+
+
+@pytest.mark.asyncio
 async def test_naming_the_variant_in_the_answer_needs_no_assumption(monkeypatch):
     srv, fake = _fresh(monkeypatch)
     _variants(monkeypatch, srv)

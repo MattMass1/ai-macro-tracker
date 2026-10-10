@@ -11,4 +11,4 @@
 - Prompt inventory: add one tomorrow-only proposal tool and explicit routing instructions. Existing today-only, routine-edit, food, model and search behavior remain unchanged.
 - Review: independent correctness/tenancy review (Codex fallback while Fable is capped), plus independent release verification. Rollback by reverting application commits; additive response fields can be ignored and saved day rows are preserved.
 - Verification: test copied prescription, tomorrow date, confirmation/cancellation, tenant isolation, stale context, rollover under lock, uncertain replay, activation next day, current-day/rotation invariants, full backend tests, Swift fixture/build, and read-only production preview/cancel canary.
-- Status: implementation pending.
+- Status: implemented and automated-verified. Full backend suite: 977 passed, 4 skipped. Independent reviewer found no blockers and reran 47 targeted cases. Xcode simulator test build passed; both shared-fixture and legacy-response decoding tests passed. Production preview/cancel and physical-device verification remain release gates.

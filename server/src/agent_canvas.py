@@ -1172,7 +1172,8 @@ class CanvasService:
         name, suggestions = resolve_stored_name(requested.strip(), names)
         if name is None:
             return {"status": "needs_clarification",
-                    "question": _name_choice_question(requested, suggestions, "your saved routine")}
+                    "question": "Which saved workout day do you mean: "
+                                + ", ".join(suggestions or names) + "?"}
         exercises = deepcopy(days[name].get("exercises", []))
         existing = await store.fetch_day_workout_plan(tomorrow)
         if effective_date() != today or await store.fetch_workout_plan_context(tomorrow) != context:

@@ -42,6 +42,7 @@
 		B0020000000000000000000D /* plan-edit.json in Resources */ = {isa = PBXBuildFile; fileRef = F0020000000000000000000A /* plan-edit.json */; };
 		B0020000000000000000000E /* day-plan.json in Resources */ = {isa = PBXBuildFile; fileRef = F0020000000000000000000B /* day-plan.json */; };
 		B0020000000000000000000F /* calorie-only-day.json in Resources */ = {isa = PBXBuildFile; fileRef = F0020000000000000000000C /* calorie-only-day.json */; };
+		B00200000000000000000010 /* tomorrow-workout.json in Resources */ = {isa = PBXBuildFile; fileRef = F0020000000000000000000D /* tomorrow-workout.json */; };
 		B00200000000000000000020 /* ElevenLabsVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000020 /* ElevenLabsVoice.swift */; };
 		B00200000000000000000021 /* ElevenLabsVoiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00200000000000000000021 /* ElevenLabsVoiceTests.swift */; };
 		B00200000000000000000031 /* ElevenLabs in Frameworks */ = {isa = PBXBuildFile; productRef = A30000000000000000000004 /* ElevenLabs */; };
@@ -99,6 +100,7 @@
 		F0020000000000000000000A /* plan-edit.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "plan-edit.json"; path = "../docs/agent-canvas/fixtures/plan-edit.json"; sourceTree = SOURCE_ROOT; };
 		F0020000000000000000000B /* day-plan.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "day-plan.json"; path = "../docs/agent-canvas/fixtures/day-plan.json"; sourceTree = SOURCE_ROOT; };
 		F0020000000000000000000C /* calorie-only-day.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "calorie-only-day.json"; path = "../docs/agent-canvas/fixtures/calorie-only-day.json"; sourceTree = SOURCE_ROOT; };
+		F0020000000000000000000D /* tomorrow-workout.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "tomorrow-workout.json"; path = "../docs/agent-canvas/fixtures/tomorrow-workout.json"; sourceTree = SOURCE_ROOT; };
 		F00200000000000000000020 /* ElevenLabsVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ElevenLabsVoice.swift; sourceTree = "<group>"; };
 		F00200000000000000000021 /* ElevenLabsVoiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ElevenLabsVoiceTests.swift; sourceTree = "<group>"; };
 		F00300000000000000000001 /* ManualFoodView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualFoodView.swift; sourceTree = "<group>"; };
@@ -226,6 +228,7 @@
 				F0020000000000000000000A /* plan-edit.json */,
 				F0020000000000000000000B /* day-plan.json */,
 				F0020000000000000000000C /* calorie-only-day.json */,
+				F0020000000000000000000D /* tomorrow-workout.json */,
 			);
 			path = MacroTrackerTests;
 			sourceTree = "<group>";
@@ -357,6 +360,7 @@
 				B0020000000000000000000D /* plan-edit.json in Resources */,
 				B0020000000000000000000E /* day-plan.json in Resources */,
 				B0020000000000000000000F /* calorie-only-day.json in Resources */,
+				B00200000000000000000010 /* tomorrow-workout.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

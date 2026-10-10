@@ -20,6 +20,9 @@ struct WorkoutsView: View {
                         )
                         .id(session.type)
                     }
+                    if store.isToday, let tomorrow = store.plan?.tomorrow {
+                        TomorrowWorkoutCard(day: tomorrow)
+                    }
                     if store.isLoadingWorkouts && store.stats == nil { workoutSkeleton }
                     if let stats = store.stats { WorkoutDashboard(stats: stats) }
                     if let plan = store.plan, (plan.hasPlan != true || !store.isToday) {
@@ -60,6 +63,30 @@ struct WorkoutsView: View {
         }
     }
     private var workoutSkeleton: some View { VStack(spacing: 10) { HStack { RoundedRectangle(cornerRadius: 20).frame(height: 130); RoundedRectangle(cornerRadius: 20).frame(height: 130) }; RoundedRectangle(cornerRadius: 20).frame(height: 160) }.foregroundStyle(Theme.surface).redacted(reason: .placeholder).shimmering() }
+}
+
+struct TomorrowWorkoutCard: View {
+    let day: WorkoutPlanPayload.ScheduledDay
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                SectionLabel(text: "Tomorrow")
+                Spacer()
+                Text(day.date).font(.caption).foregroundStyle(Theme.muted)
+            }
+            Text(day.type).font(.title3.weight(.bold)).foregroundStyle(Theme.ink)
+            if day.exercises.isEmpty {
+                Text("No exercises scheduled.")
+                    .font(.subheadline).foregroundStyle(Theme.muted)
+            } else {
+                Text(day.exercises.map(\.name).joined(separator: " · "))
+                    .font(.subheadline).foregroundStyle(Theme.muted)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .appCard()
+    }
 }
 
 struct WorkoutLoggerSelection: Identifiable {

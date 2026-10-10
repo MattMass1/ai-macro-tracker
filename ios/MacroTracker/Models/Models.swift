@@ -228,12 +228,14 @@ struct DeletedPayload: Codable { var deleted: String }
 struct WorkoutPlanPayload: Codable {
     struct Exercise: Codable, Identifiable { var id: String { name }; var name: String }
     struct PlannedDay: Codable, Identifiable { var id: String { type }; var type: String; var exercises: [Exercise] }
+    struct ScheduledDay: Codable { var date: String; var type: String; var exercises: [Exercise] }
     var rotation: [String]
     var lastWorkout: String?
     var upcoming: [PlannedDay]
     var core: [Exercise]
     // Optional keeps decoding compatible with servers deployed before `has_plan`.
     var hasPlan: Bool?
+    var tomorrow: ScheduledDay? = nil
 }
 
 struct LibraryExercise: Codable, Identifiable, Hashable {

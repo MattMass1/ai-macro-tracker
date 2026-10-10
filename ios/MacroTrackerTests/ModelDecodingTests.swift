@@ -72,6 +72,26 @@ final class WorkoutPlanRefreshTests: XCTestCase {
 }
 
 final class ModelDecodingTests: XCTestCase {
+    func testTomorrowWorkoutUsesCanonicalServerFixture() throws {
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "tomorrow-workout", withExtension: "json"))
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let plan = try decoder.decode(WorkoutPlanPayload.self, from: Data(contentsOf: url))
+        let tomorrow = try XCTUnwrap(plan.tomorrow)
+        XCTAssertEqual(tomorrow.date, "2026-10-10")
+        XCTAssertEqual(tomorrow.type, "Legs")
+        XCTAssertEqual(tomorrow.exercises.map(\.name), ["Squat"])
+        XCTAssertEqual(plan.upcoming.first?.type, "Push")
+        XCTAssertEqual(plan.rotation, ["Push", "Pull", "Legs"])
+    }
+
+    func testWorkoutPlanWithoutTomorrowRemainsCompatible() throws {
+        let json = #"{"rotation":[],"last_workout":null,"upcoming":[],"core":[],"has_plan":false}"#
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let plan = try decoder.decode(WorkoutPlanPayload.self, from: Data(json.utf8))
+        XCTAssertNil(plan.tomorrow)
+        XCTAssertEqual(plan.hasPlan, false)
+    }
+
     func testCalorieOnlyDayUsesCanonicalServerFixtureWithoutInventedMacros() throws {
         let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "calorie-only-day", withExtension: "json"))
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase

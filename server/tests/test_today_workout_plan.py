@@ -27,7 +27,10 @@ class DayPlanMixin:
         return deepcopy(row) if row else None
 
     async def compare_and_swap_day_workout_plan(self, day, expected_revision, workout_type,
-                                                exercises, operation_id, *, expected_context=None):
+                                                exercises, operation_id, *, expected_context=None,
+                                                expected_today=None):
+        if expected_today is not None and expected_today != domain.effective_date():
+            return None
         if expected_context is not None and await self.fetch_workout_plan_context(day) != expected_context:
             return None
         key = (current_user_id(), day)

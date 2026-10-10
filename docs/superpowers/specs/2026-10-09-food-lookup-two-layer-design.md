@@ -59,6 +59,14 @@ Implementation notes (what shipped, where it differs from the text below):
   - unresolvable food (zebra steak): ~15 s, reported as "took too long"
   Layer 2's cost is the OpenAI web_search call itself; it only runs when
   Layer 1 has nothing, and it is never spent on a variant question.
+- Voice path (ElevenLabs webhook `/api/voice/elevenlabs/agent-turn`, i.e. the
+  `adapter="voice"` turn on the server, speech legs excluded), same questions:
+  - staples: 25.7 s -> 2.9 s. The slow run was an unresolved compound paying
+    the web budget per part and again for the whole phrase; the whole-phrase
+    retry is now Layer 1 only, so the worst case is one web budget.
+  - Chick-fil-A chicken sandwich: 2.8 s; Panera variant question: 3.7-4.5 s.
+  Voice and text share this server path; the voice numbers differ from text
+  only by model variance.
   Measurement recipe: POST `/api/agent-canvas/{uuid}/turn` with
   `{"turn_id": uuid, "message": "...do not log anything..."}`, diff
   `/api/today` meals before/after.

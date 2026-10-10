@@ -646,7 +646,10 @@ private struct AggregateWorkoutHistory: View {
 }
 
 enum WorkoutLoggerType {
-    static func isValid(_ label: String) -> Bool { CanvasValidation.validWorkoutLabel(label) }
+    static func isValid(_ label: String) -> Bool {
+        // Same bounded display-label grammar as the server, not a split enum.
+        label.range(of: #"\A[A-Za-z0-9][A-Za-z0-9 /&()+.'_\-]{0,79}\z"#, options: .regularExpression) != nil
+    }
     static func value(for label: String) -> String {
         guard isValid(label) else { return "" }
         return CanonicalWorkoutType.all.first { $0.caseInsensitiveCompare(label) == .orderedSame } ?? label

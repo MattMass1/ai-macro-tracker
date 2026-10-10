@@ -60,7 +60,8 @@ async def test_executes_responses_web_search_with_bounded_food_only_payload(monk
     assert len(seen) == 1
     token, payload = seen[0]
     assert token == "synthetic-key" and payload["model"] == "fixture-model"
-    assert payload["tools"] == [{"type": "web_search"}]
+    assert payload["tools"] == [{"type": "web_search", "search_context_size": "low"}]
+    assert payload["reasoning"] == {"effort": "low"}  # latency lever, env-tunable
     assert payload["include"] == ["web_search_call.action.sources"]
     serialized = json.dumps(payload)
     assert "200 g cooked red quinoa" in serialized

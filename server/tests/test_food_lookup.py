@@ -2186,3 +2186,65 @@ async def test_blocker_conflicting_brand_cannot_reach_real_voice_write(monkeypat
     assert fake.insert_count == 0
     assert fake.claims == {}
     assert "ESTIMATE" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(("query", "name", "grams"), [
+    ("green apple", "apple", 182), ("2 green apples", "apple", 364),
+    ("red apple", "apple", 182), ("a ripe banana", "banana", 118),
+    ("organic bananas", "banana", 118), ("2 fresh green apples", "apple", 364),
+    ("brown eggs", "chicken egg", 52.7),
+])
+def test_variety_descriptors_do_not_hide_a_generic_whole_food(query, name, grams):
+    # A green apple is an apple: colour, ripeness and farming words describe a
+    # whole food, they never name a different one. Spoken whole foods resolve
+    # locally and immediately, never through a branded pick-list.
+    found = food_lookup.resolve_generic_whole_food(query)
+    assert found is not None, query
+    assert found["name"] == name
+    assert found["serving_size"].endswith(f" — {grams:g} g")
+
+
+@pytest.mark.parametrize("query", [
+    "green beans", "sweet apple", "white beans", "green apple pie", "apple juice",
+    "egg whites", "2 egg whites", "green",
+])
+def test_descriptor_stripping_never_invents_a_different_food(query):
+    assert food_lookup.resolve_generic_whole_food(query) is None
+
+
+def test_descriptor_words_are_only_dropped_when_no_curated_identity_matches():
+    # "sweet potato" and "white rice" are curated identities in their own
+    # right; their first word is never treated as a removable descriptor.
+    assert food_lookup.resolve_generic_whole_food("sweet potato")["name"] == "sweet potato"
+    assert food_lookup.resolve_generic_whole_food("white rice")["name"] != "sweet potato"
+
+
+async def test_saved_preset_matches_a_plural_spoken_name(monkeypatch):
+    class PresetStore:
+        async def fetch_presets(self):
+            return [{"name": "Fairlife 30g Shake", "calories": 150, "protein": 30,
+                     "carbs": 3, "fat": 2.5, "fiber": 0}]
+
+        async def lookup_catalog(self, _query):
+            return None
+
+    async def forbidden(_query, **_kwargs):
+        raise AssertionError("external provider must not be called")
+
+    monkeypatch.setattr(srv, "_client", PresetStore())
+    monkeypatch.setattr(food_lookup, "search_fatsecret", forbidden)
+    srv._resolved_food_cache.clear()
+    token = bind_user(uuid4())
+    try:
+        result = await srv.resolve_food("fairlife shakes")
+    finally:
+        reset_user(token)
+    assert result["name"] == "Fairlife 30g Shake"
+    assert result["macros_per_serving"]["protein"] == 30
+
+
+def test_preset_token_match_is_plural_tolerant_but_still_needs_two_tokens():
+    preset = {"name": "Fairlife 30g Shake"}
+    assert srv._preset_matches("fairlife shakes", {"fairlife", "shakes"}, preset)
+    assert not srv._preset_matches("shakes", {"shakes"}, preset)
+    assert not srv._preset_matches("fairlife bars", {"fairlife", "bars"}, preset)

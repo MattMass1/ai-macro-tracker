@@ -353,9 +353,12 @@ def _preset_matches(normalized: str, query_tokens: set[str], preset: Mapping[str
     if normalized == preset_name:
         return True
     # Voice often omits a serving marker embedded in a saved preset name
-    # ("Fairlife shake" vs "Fairlife 30g Shake"). Require at least two exact
-    # identity tokens so a generic one-word query cannot select a preset.
-    return len(query_tokens) >= 2 and query_tokens <= set(preset_name.split())
+    # ("Fairlife shake" vs "Fairlife 30g Shake") or pluralises it ("Fairlife
+    # shakes"). Compare plural-canonical tokens, and require at least two of
+    # them so a generic one-word query cannot select a preset.
+    canonical_query = set(food_lookup._singularize(" ".join(query_tokens)).split())
+    preset_tokens = set(food_lookup._singularize(preset_name).split())
+    return len(canonical_query) >= 2 and canonical_query <= preset_tokens
 
 
 def _preset_food(preset: Mapping[str, Any]) -> dict[str, Any]:

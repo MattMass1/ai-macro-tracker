@@ -806,6 +806,25 @@ def _lookup_generic(normalized: str) -> dict[str, Any] | None:
     return GENERIC_WHOLE_FOODS.get(key) if key else None
 
 
+# Variety, ripeness and farming words describe a curated whole food; they
+# never name a different one ("green apple" is an apple). They are dropped
+# only after every exact identity lookup has failed, so curated compounds
+# such as "sweet potato" or "white rice" always win as themselves.
+_WHOLE_FOOD_DESCRIPTORS = frozenset({
+    "green", "red", "yellow", "golden", "pink", "purple", "brown", "white",
+    "ripe", "organic", "fresh", "plain",
+})
+
+
+def _without_descriptors(normalized: str) -> str | None:
+    """The phrase minus descriptor words, or ``None`` when nothing changed."""
+    words = normalized.split()
+    kept = [word for word in words if word not in _WHOLE_FOOD_DESCRIPTORS]
+    if not kept or len(kept) == len(words):
+        return None
+    return " ".join(kept)
+
+
 def _generic_whole_food(query: str) -> dict[str, Any] | None:
     """Resolve an exact generic whole-food identity without network access."""
     normalized = normalize_food_name(query)
@@ -825,6 +844,10 @@ def _generic_whole_food(query: str) -> dict[str, Any] | None:
                  else float(counted.group(1)))
         normalized = counted.group(2)
         entry = _lookup_generic(normalized)
+    if entry is None:
+        stripped = _without_descriptors(normalized)
+        if stripped:
+            entry = _lookup_generic(stripped)
     if entry and entry.get("alias_of"):
         entry = GENERIC_WHOLE_FOODS[str(entry["alias_of"])]
     if not entry:

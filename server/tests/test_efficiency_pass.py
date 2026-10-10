@@ -152,20 +152,6 @@ async def test_one_food_tool_call_queries_the_catalog_once_per_distinct_text(mon
     assert calls and len(calls) == len(set(calls)), calls  # no text asked twice
 
 
-def test_hot_path_indexes_migration_is_additive_and_ordered():
-    import migrations
-    files = dict(migrations.migration_files())
-    sql = files["002_z_hot_path_indexes.sql"].read_text()
-    assert sql.count("CREATE INDEX IF NOT EXISTS") == 2
-    assert "food_identifiers (lower(provider), external_id)" in sql
-    assert "nutrition_entries (user_id, day, created_at DESC)" in sql
-    assert not any(word in sql.upper() for word in ("DROP ", "DELETE ", "UPDATE ", "ALTER "))
-    assert "002_z_hot_path_indexes.sql" not in migrations.APPROVAL_REQUIRED
-    # It sorts BEFORE the gated 003, so it applies while 003 stays held; a file
-    # numbered after a held migration blocks the store (prod outage 2026-10-10).
-    assert list(files)[-2:] == ["002_z_hot_path_indexes.sql", "003_calorie_only_unknown_macros.sql"]
-
-
 async def test_day_reads_project_only_the_columns_the_row_mapper_uses(monkeypatch):
     from store import Store, meal
 

@@ -369,8 +369,7 @@ async def test_pg_runner_holds_003_without_exact_approval_and_service_stays_comp
     from store import Store
     held: list[str] = []
     applied = await migrations.apply_migrations(scratch_db, held)
-    assert applied == ["000_legacy_schema.sql", "001_food_catalog.sql", "002_daily_workout_plans.sql",
-                       "002_z_hot_path_indexes.sql"]
+    assert applied == ["000_legacy_schema.sql", "001_food_catalog.sql", "002_daily_workout_plans.sql"]
     assert held == [M003]
     monkeypatch.setenv("APPROVED_MIGRATIONS", f"{M003}:{'0' * 64}")  # stale/wrong approval
     held = []

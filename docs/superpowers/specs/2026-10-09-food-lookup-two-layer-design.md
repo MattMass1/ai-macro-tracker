@@ -46,9 +46,22 @@ Implementation notes (what shipped, where it differs from the text below):
   save_preset.
 - Not changed: `coach.py max_rounds=8` is a safety cap, not a per-turn cost
   (a food log is one tool round plus the reply); cut it only against
-  `mmacros.turn` telemetry. No live provider credentials exist off Render, so
-  real-provider latency was not measured locally; the call counts above are
-  from a stubbed provider.
+  `mmacros.turn` telemetry.
+- Production measurements (2026-10-09, end-to-end canvas text turns incl. the
+  OpenAI brain, read-only macro questions, no writes), before -> after the
+  variant short-circuit commit:
+  - local staples ("2 eggs and 2 slices of bacon"): 5.4 s -> 3.8 s
+  - Layer 1 branded hit (Chick-fil-A chicken sandwich, 420 kcal): 3.6 s -> 2.8 s
+  - Layer 1 variant question (Panera BBQ smokehouse: whole/half/duet): 16.3 s -> 4.4 s
+  - Layer 2 web estimate (200 g cooked red quinoa): 13.0 s verified on one run,
+    "couldn't verify" after ~15 s on another -- the web layer is bounded by
+    its 12 s search budget and is nondeterministic by design
+  - unresolvable food (zebra steak): ~15 s, reported as "took too long"
+  Layer 2's cost is the OpenAI web_search call itself; it only runs when
+  Layer 1 has nothing, and it is never spent on a variant question.
+  Measurement recipe: POST `/api/agent-canvas/{uuid}/turn` with
+  `{"turn_id": uuid, "message": "...do not log anything..."}`, diff
+  `/api/today` meals before/after.
 
 ## Problem
 

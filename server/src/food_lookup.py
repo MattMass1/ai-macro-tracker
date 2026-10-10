@@ -520,16 +520,21 @@ def _ambiguous_variants(query: str, ranked: list[Mapping[str, Any]]) -> bool:
     return len({frozenset(_name_identity_tokens(food)) for food in ranked}) > 1
 
 
-async def search_fatsecret(query: str) -> dict[str, Any] | None:
+async def search_fatsecret(query: str, *, assume_variant: bool = False) -> dict[str, Any] | None:
     """Layer 1: one search, then fetch the best-ranked acceptable hits in order
     (at most two item fetches) until one carries usable serving macros. Close
     variants with no exact match resolve to nothing so the coach asks which
-    (`fatsecret_name_options` lists them from the same search)."""
+    (`fatsecret_name_options` lists them from the same search) -- unless the
+    caller has already spent its one question, in which case the top-ranked
+    variant is taken and the result says so."""
     hits = await _fatsecret_search_hits(query)
     ranked = _rank_hits(query, hits)
+    assumed: Mapping[str, Any] | None = None
     if _ambiguous_variants(query, ranked):
-        _remember_ambiguous(query)
-        return None
+        if not assume_variant:
+            _remember_ambiguous(query)
+            return None
+        assumed = ranked[0]
     for candidate in ranked[:_SEARCH_MAX_INSPECT]:
         food_id = str(candidate["food_id"])
         food = _unwrap_food(await _fatsecret_request({"method":"food.get.v4", "food_id":food_id}))
@@ -537,6 +542,12 @@ async def search_fatsecret(query: str) -> dict[str, Any] | None:
             continue
         result = _fatsecret_result(query, food_id, food, candidate)
         if result is not None:
+            if assumed is not None:
+                # Only reachable after the caller spent its one question; the
+                # provenance is the real provider record, labeled as assumed.
+                result["assumption"] = f"assumed the {result['name']} variant"
+                result["attribution"]["verification_state"] = "provider_assumed_variant"
+                result["attribution"]["evidence_hash"] = _result_hash(result)
             return result
     return None
 
@@ -884,7 +895,8 @@ def _split_components(query: str) -> list[str]:
 
 
 async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,
-                             allow_web: bool = True) -> dict[str, Any] | None:
+                             allow_web: bool = True,
+                             assume_variant: bool = False) -> dict[str, Any] | None:
     """The single-food cascade: tenant catalog, official CoFID rows, then
     Layer 1 (FatSecret over normalized-query variants) and Layer 2 (web
     estimate). Shared by the simple and composite paths."""
@@ -896,7 +908,11 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,
     cofid = await cofid_lookup.lookup(query)
     if cofid: return cofid
     fatsecret_enabled = _fatsecret_provider_mode() is not None
-    providers = [search_fatsecret] if fatsecret_enabled else []
+    # The plain callable keeps single-argument test doubles working; the
+    # assume_variant form is only bound when the caller asked for it.
+    provider = ((lambda text: search_fatsecret(text, assume_variant=True))
+                if assume_variant else search_fatsecret)
+    providers = [provider] if fatsecret_enabled else []
     searches = [
         (variant_index, provider_index, provider(variant))
         for variant_index, variant in enumerate(_query_variants(query))
@@ -1034,6 +1050,7 @@ def _quantify(
 async def resolve_food(
     query: str, classify: bool = True, *, whole_item: bool = False,
     atomic: bool = False, catalog_lookup=None, allow_web: bool = True,
+    assume_variant: bool = False,
 ) -> dict[str, Any] | None:
     """Resolve one query or `and`/`,`/`+`-joined composite to real macro data.
 
@@ -1049,6 +1066,7 @@ async def resolve_food(
             _resolve_food_text(
                 text, whole_item=whole_item, atomic=atomic,
                 catalog_lookup=catalog_lookup, allow_web=allow_web,
+                assume_variant=assume_variant,
             ),
             timeout=RESOLUTION_DEADLINE_SECONDS,
         ) if text else None
@@ -1065,7 +1083,7 @@ async def resolve_food(
 
 async def _resolve_food_text(
     text: str, *, whole_item: bool, atomic: bool, catalog_lookup,
-    allow_web: bool = True,
+    allow_web: bool = True, assume_variant: bool = False,
 ) -> dict[str, Any] | None:
     text = _normalize_query_text(text)
     raw_parts = [text] if atomic else _split_components(text)
@@ -1074,7 +1092,8 @@ async def _resolve_food_text(
     if len(raw_parts) <= 1:
         quantity, unit, remainder = _clean_component(raw_parts[0] if raw_parts else text)
         found = await _resolve_component(remainder or text, whole_item=whole_item,
-                                         catalog_lookup=catalog_lookup, allow_web=allow_web)
+                                         catalog_lookup=catalog_lookup, allow_web=allow_web,
+                                         assume_variant=assume_variant)
         if (found and quantity is None
                 and isinstance(found.get("attribution"), Mapping)
                 and found["attribution"].get("verification_state") == "provider_exact_identity"):
@@ -1106,7 +1125,8 @@ async def _resolve_food_text(
         if not remainder:
             return part, None, None
         found = await _resolve_component(remainder, whole_item=False,
-                                         catalog_lookup=catalog_lookup, allow_web=allow_web)
+                                         catalog_lookup=catalog_lookup, allow_web=allow_web,
+                                         assume_variant=assume_variant)
         quantified = _quantify(found, quantity, unit) if found else None
         return part, found, quantified
 
@@ -1150,7 +1170,7 @@ async def _resolve_food_text(
         quantity, unit, remainder = _clean_component(text)
         whole = await _resolve_component(
             remainder or text, whole_item=whole_item, catalog_lookup=catalog_lookup,
-            allow_web=False,
+            allow_web=False, assume_variant=assume_variant,
         )
         quantified = _quantify(whole, quantity, unit) if whole and quantity is not None else None
         if whole:

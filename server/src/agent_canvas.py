@@ -1655,6 +1655,11 @@ Explicit food consumption/logging: call log_meal once with ALL components and st
 The server alone resolves foods, calculates macros, validates sources, writes atomically and
 verifies readback. Never invent nutrition numbers, sources or success. Do not log planned food
 or a question about macros. No confirmation for an already explicit complete meal request.
+FOOD IS ONE QUESTION AT MOST. Never ask your own question before calling log_meal (no meal
+type, no portion, no are-you-sure): call log_meal at once with the user's words; the server uses
+a standard serving when none is stated. If log_meal returns needs_clarification, ask exactly its
+question and nothing else. When the user answers, call log_meal again with their updated words;
+the server then finishes the log without further questions and states any assumption it made.
 EXCEPTION: when log_meal returns reason web_estimate_confirmation, ask exactly its question;
 if the user agrees, repeat the identical log_meal call adding the returned confirm_ref.
 needs_clarification: ask the provided question. unknown: ask to check data, NOT to retry.

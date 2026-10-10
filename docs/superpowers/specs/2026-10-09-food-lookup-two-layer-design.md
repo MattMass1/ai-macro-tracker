@@ -179,6 +179,27 @@ Two retrieval layers, nothing else.
 - Keep `_singularize`/generic whole-foods behavior for plain foods intact or
   fold into the Layer 1 cache; do not regress the sweet-potato fix.
 
+## One question per meal (owner rule, 2026-10-10)
+
+Matt: "I say the food I want. If it needs a clarification question, at
+minimum one clarification question, and then I move on." Enforced in
+`server._voice_log_meal` (shared by canvas text and ElevenLabs voice):
+
+- Every question `log_meal` asks is remembered per (user, canvas session)
+  for 5 minutes (`_meal_questions`). The follow-up about the same food (most
+  of the asked-about identity tokens present) is *finished*, never questioned
+  again: close variants take the top-ranked one (`assume_variant`, labeled
+  `provider_assumed_variant` with the real provider record), a web estimate
+  is logged as the labeled estimate without a second confirm, an unusable
+  stated portion falls back to a standard serving, and the confirmation says
+  what was assumed ("I assumed the BBQ Sandwich Whole variant."). If the food
+  is still unknown, the reply says so plainly with no question.
+- A different food (little token overlap) or a different session starts a
+  fresh budget.
+- `CANVAS_INSTRUCTIONS`: the model never asks its own question before calling
+  `log_meal` (no meal type, portion or are-you-sure), relays the server's one
+  question exactly, and calls `log_meal` again with the user's answer.
+
 ## Related perf work (shipped separately)
 
 - Canvas snapshot reads no longer queue behind in-flight turns (lock-free

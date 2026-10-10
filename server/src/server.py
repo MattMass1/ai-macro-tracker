@@ -138,6 +138,52 @@ _resolved_food_cache: OrderedDict[
 # One food tool call resolves several components; they share one presets read.
 # The holder lives only for that call, so nothing can go stale across calls.
 _turn_presets: ContextVar[dict[str, Any] | None] = ContextVar("mmacros_turn_presets", default=None)
+# One question per meal (Matt, 2026-10-10: "say the food; at most one
+# clarification; move on"). When log_meal has to ask, the question is
+# remembered per (user, canvas session). The follow-up that answers it is
+# finished without asking again: top variant assumed, web estimate logged as
+# labeled, standard serving used -- each stated in the confirmation.
+_MEAL_QUESTION_TTL_SECONDS = 300.0
+_meal_questions: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
+
+
+def _meal_session_key(call_id: str) -> str:
+    """The canvas session a food tool call belongs to (`canvas:{session}:{turn}`)."""
+    parts = str(call_id or "").split(":")
+    return ":".join(parts[:2]) if len(parts) >= 3 and parts[0] == "canvas" else str(call_id or "")
+
+
+def _remember_meal_question(user_key: str, session_key: str, description: str) -> None:
+    _meal_questions[(user_key, session_key)] = {
+        "expires": time.monotonic() + _MEAL_QUESTION_TTL_SECONDS,
+        "tokens": food_lookup._canon_food_tokens(description),
+    }
+    _meal_questions.move_to_end((user_key, session_key))
+    while len(_meal_questions) > 256:
+        _meal_questions.popitem(last=False)
+
+
+def _settle_meal_question(user_key: str, session_key: str) -> None:
+    _meal_questions.pop((user_key, session_key), None)
+
+
+def _answering_meal_question(user_key: str, session_key: str, description: str) -> bool:
+    """Whether this log_meal call is the follow-up to a question this session
+    just asked about the same food (a different food starts a fresh budget)."""
+    now = time.monotonic()
+    for key, pending in list(_meal_questions.items()):
+        if pending["expires"] <= now:
+            _meal_questions.pop(key, None)
+    pending = _meal_questions.get((user_key, session_key))
+    if pending is None:
+        return False
+    tokens = food_lookup._canon_food_tokens(description)
+    if not pending["tokens"] or not tokens:
+        return True
+    # Same food if most of the asked-about identity is back ("half bbq sandwich"
+    # answers "bbq sandwich"); one shared word ("chicken salad" after a
+    # "chicken sandwich" question) is a new request.
+    return len(pending["tokens"] & tokens) / len(pending["tokens"]) > 0.5
 
 
 def _is_zero_macro_food(name: str) -> bool:
@@ -165,6 +211,7 @@ async def resolve_food(query: str, **kwargs):
     cache_key = (
         tenant, normalized, bool(kwargs.get("whole_item", False)),
         bool(kwargs.get("atomic", False)), bool(kwargs.get("allow_web", True)),
+        bool(kwargs.get("assume_variant", False)),
     )
     cached = _resolved_food_cache.get(cache_key) if tenant else None
     now = time.monotonic()
@@ -2714,9 +2761,13 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         allowed_states = {"exact_identifier", "official_curated", "internal_curated",
                           "official_source_exact_row"}
 
+        # provider_assumed_variant exists only on a follow-up after the one
+        # allowed question (food_lookup sets it solely when asked to assume).
+        provider_states = {"provider_exact_identity", "provider_assumed_variant"}
+
         def provider_identity(attribution: Mapping[str, Any], source=None) -> bool:
             external_id = str(attribution.get("external_id") or "")
-            return (attribution.get("verification_state") == "provider_exact_identity"
+            return (attribution.get("verification_state") in provider_states
                     and attribution.get("provider") == "FatSecret"
                     and bool(external_id)
                     and (source is None or source == f"FatSecret: {external_id}"))
@@ -2726,7 +2777,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             if state == "unverified_web_estimate":
                 if found.get("estimate_provenance") != "server_web_estimate":
                     return False
-            elif state == "provider_exact_identity":
+            elif state in provider_states:
                 if not provider_identity(attribution, found.get("source")):
                     return False
             elif state not in allowed_states:
@@ -2752,6 +2803,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
     async def resolve_component(
         component: Mapping[str, Any], *, atomic: bool,
         pre_resolved: Mapping[str, Any] | None = None,
+        assume_variant: bool = False,
     ) -> dict[str, Any] | None:
         description = domain.validate_name(str(component.get("description") or ""))
         portion = " ".join(str(component.get("portion") or "").split())
@@ -2768,7 +2820,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         if resolution_ref and found is None:
             return None
         if found is None:
-            found = await resolve_food(query, atomic=atomic)
+            found = await resolve_food(query, atomic=atomic, assume_variant=assume_variant)
         if not voice_verified(found):
             if found is None and await known_food_with_bad_portion(query, atomic=atomic):
                 return {"portion_error": True, "name": query}
@@ -2864,6 +2916,16 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                            if (match := _CALORIES_ONLY.fullmatch(text.strip().rstrip(".")))]
         calorie_values = None
         texts = [text for text in described if text.strip()]
+        user_key = str(current_user_id())
+        session_key = _meal_session_key(call_id)
+        # One question per meal: a follow-up to a question this session just
+        # asked about the same food is finished, not questioned again.
+        finishing = _answering_meal_question(user_key, session_key, " ".join(texts))
+
+        def ask(payload: dict[str, Any]) -> dict[str, Any]:
+            _remember_meal_question(user_key, session_key, " ".join(texts))
+            return payload
+
         if calorie_matches and not await _calorie_only_writes_open():
             # Release gate (fail closed): a NULL-nutrient row breaks native
             # builds that predate the nullable FoodEntry contract. Until the
@@ -2873,16 +2935,16 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             question = ("I can't log calories alone yet without guessing protein, carbs and fat, "
                         "and I won't record them as zero. What was it, or what were its "
                         "protein, carbs and fat?")
-            return {"status": "needs_clarification", "reason": "calories_only",
-                    "operation_id": operation_id, "question": question,
-                    "confirmation": question}
+            return ask({"status": "needs_clarification", "reason": "calories_only",
+                        "operation_id": operation_id, "question": question,
+                        "confirmation": question})
         if calorie_matches:
             # Never silently drop another named food or invent a split of one
             # stated energy amount over several foods.
             if len(texts) != 1:
-                return {"status": "needs_clarification", "operation_id": operation_id,
-                        "question": "Is that calorie amount for the whole meal or only one component?",
-                        "confirmation": "Is that calorie amount for the whole meal or only one component?"}
+                return ask({"status": "needs_clarification", "operation_id": operation_id,
+                            "question": "Is that calorie amount for the whole meal or only one component?",
+                            "confirmation": "Is that calorie amount for the whole meal or only one component?"})
             calories = domain.validate_macros(calorie_matches[0]["calories"], 0, 0, 0)["calories"]
             calorie_values = {"name": "Calorie-only snack", "calories": calories,
                               "protein": None, "carbs": None, "fat": None, "fiber": None,
@@ -2941,10 +3003,22 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                 return {key: value for key, value in calorie_values.items() if key not in {"day", "meal"}}
             async with semaphore:
                 try:
-                    return await resolve_component(
+                    result = await resolve_component(
                         component, atomic=atomic,
                         pre_resolved=(whole_found if len(components) == 1 else None),
+                        assume_variant=finishing,
                     )
+                    if finishing and result is not None and result.get("portion_error"):
+                        # The one question is spent: log a standard serving of
+                        # the food rather than asking about the portion again.
+                        plain = {key: value for key, value in component.items()
+                                 if key not in {"grams", "portion", "quantity"}}
+                        if plain != dict(component):
+                            retry = await resolve_component(plain, atomic=atomic, assume_variant=True)
+                            if retry is not None and not retry.get("portion_error"):
+                                retry["assumption"] = "assumed a standard serving"
+                                return retry
+                    return result
                 except Exception as exc:
                     logger.warning(
                         "Voice food resolution failed: operation_id=%s error_type=%s",
@@ -2958,18 +3032,29 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         bad_portions = [str(component.get("description") or "food")
                         for component, result in zip(components, resolved)
                         if result is not None and result.get("portion_error")]
+        if bad_portions or unresolved:
+            if finishing:
+                # Budget spent: say plainly what did not work; never a second question.
+                _settle_meal_question(user_key, session_key)
+                item = (bad_portions or unresolved)[0]
+                text = (f"I still couldn't use that portion for {item}, so I didn't log it."
+                        if bad_portions else
+                        f"I still couldn't find nutrition for {item}, so I didn't log it. "
+                        "Try a different name, or tell me its calories and macros.")
+                return {"status": "failed", "operation_id": operation_id,
+                        "unresolved": unresolved, "confirmation": text}
         if bad_portions:
             question = f"I couldn't use that portion for {bad_portions[0]}. What amount should I use?"
-            return {"status": "needs_clarification", "reason": "invalid_portion",
-                    "unresolved": unresolved,
-                    "operation_id": operation_id, "question": question,
-                    "confirmation": question}
+            return ask({"status": "needs_clarification", "reason": "invalid_portion",
+                        "unresolved": unresolved,
+                        "operation_id": operation_id, "question": question,
+                        "confirmation": question})
         if unresolved:
             options = await _closest_food_options(unresolved[0])
             question = _unresolved_food_question(unresolved[0], options)
-            return {"status": "needs_clarification", "operation_id": operation_id,
-                    "unresolved": unresolved, "options": options,
-                    "question": question, "confirmation": question}
+            return ask({"status": "needs_clarification", "operation_id": operation_id,
+                        "unresolved": unresolved, "options": options,
+                        "question": question, "confirmation": question})
         resolved_components = [item for item in resolved if item is not None]
         name = " + ".join(item["name"] for item in resolved_components)
         totals = {key: (None if any(item[key] is None for item in resolved_components)
@@ -3045,8 +3130,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                         and meta.get("estimate_provenance") == "server_web_estimate"
                         for meta in item["component_metadata"]))
             for item in resolved_components)
-        if has_web_estimate:
-            user_key = str(current_user_id())
+        if has_web_estimate and not finishing:
             ticket_now = time.monotonic()
             for key, ticket in list(_web_estimate_confirmations.items()):
                 if ticket["expires"] <= ticket_now:
@@ -3072,9 +3156,9 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                             f"{round(float(calories)) if calories is not None else 'unknown'} calories"
                             + (f" (web estimate, {host})" if host else " (web estimate)")
                             + ". Should I log it?")
-                return {"status": "needs_clarification", "reason": "web_estimate_confirmation",
-                        "operation_id": operation_id, "confirm_ref": ref,
-                        "question": question, "confirmation": question}
+                return ask({"status": "needs_clarification", "reason": "web_estimate_confirmation",
+                            "operation_id": operation_id, "confirm_ref": ref,
+                            "question": question, "confirmation": question})
             _web_estimate_confirmations.pop((user_key, confirm_ref), None)
         try:
             stored = await store_client().insert_meal_idempotent(
@@ -3140,13 +3224,20 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                 "confirmation": "The save outcome is not verified yet. Check Today before trying again.",
             }
         _voice_uncertain_meals.pop(uncertainty_key, None)
+        _settle_meal_question(user_key, session_key)
+        confirmation = _voice_confirmation_sentence(logged_with_source, day_total)
+        assumptions = list(dict.fromkeys(
+            str(item["assumption"]) for item in resolved_components
+            if str(item.get("assumption") or "").startswith("assumed")))
+        if assumptions:
+            confirmation += " I " + " and ".join(assumptions) + "."
         return {
             "status": "replayed" if replayed else "committed",
             "operation_id": operation_id,
             "logged": logged_with_source,
             "components": resolved_components,
             "day_total": day_total,
-            "confirmation": _voice_confirmation_sentence(logged_with_source, day_total),
+            "confirmation": confirmation,
         }
 
     async def voice_get_today_tool(_call_id: str, args: Mapping[str, Any]) -> Any:

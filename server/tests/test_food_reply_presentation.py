@@ -52,6 +52,12 @@ async def canvas_reply(reply, message, adapter="voice", food_result=None):
     ("How many calories in two Taco Bell Creamy Chipotle Crispy Chicken Crunchwrap Sliders?",
      "Two Taco Bell Creamy Chipotle Crispy Chicken Crunchwrap Sliders have 640 calories. Source: FatSecret: 12345678; verification state: provider_exact_identity.",
      "640 calories"),
+    ("How many calories are in two BearBells Creamy Crisp bars?",
+     "Two Barebells Creamy Crisp bars contain **400 calories**. Source: **FatSecret: 65497603**; verification state: **provider_exact_identity**.",
+     "**400 calories**"),
+    ("How many calories are in two Taco Bell Creamy Chipotle Crispy Chicken Crunchwrap Sliders?",
+     "Two Taco Bell Creamy Chipotle Crispy Chicken Crunchwrap Sliders contain **640 calories**. Source: **FatSecret: 124374739**; verification state: **provider_exact_identity**.",
+     "**640 calories**"),
 ])
 async def test_live_reply_metadata_is_formatted_before_history_native_and_replay(adapter, message, reply, nutrition):
     result, calls = await canvas_reply(reply, message, adapter)
@@ -59,7 +65,7 @@ async def test_live_reply_metadata_is_formatted_before_history_native_and_replay
     assert "FatSecret" in result["reply"]
     assert "provider_exact_identity" not in result["reply"]
     assert "verification state" not in result["reply"]
-    assert "65497603" not in result["reply"] and "12345678" not in result["reply"]
+    assert all(record_id not in result["reply"] for record_id in ("65497603", "12345678", "124374739"))
     assert calls == []
 
 
@@ -68,6 +74,9 @@ async def test_live_reply_metadata_is_formatted_before_history_native_and_replay
     "Stop saying verification_state",
     "Why are you telling me provider_exact_identity?",
     "Give me calories without verification state details",
+    "Don’t show verification_state",
+    "Why did you show verification_state?",
+    "What is the reason you display verification_state?",
 ])
 async def test_complaints_about_metadata_do_not_request_diagnostic_output(message):
     result, _ = await canvas_reply(
@@ -92,6 +101,8 @@ async def test_explicit_current_diagnostic_request_preserves_provenance_reply(me
     "A prior save has an unknown outcome. Refresh Today to check it before logging this again.",
     "For those sliders, did you mean Creamy Chipotle or Jalapeno Honey Mustard?",
     "100 g has 86 calories; 115 g has 98.9 calories. This is an unverified web estimate.",
+    "FatSecret: 400 calories and 40 g protein.",
+    "Source: FatSecret: 400 calories and 40 g protein.",
 ])
 async def test_nutrition_uncertainty_and_confirmation_words_are_not_censored(reply):
     result, _ = await canvas_reply(reply, "Tell me about that food")
@@ -164,3 +175,13 @@ async def test_machine_state_that_is_the_only_caution_retains_human_warning(adap
     assert "400 calories" in result["reply"]
     assert warning in result["reply"].lower()
     assert "verification state" not in result["reply"]
+
+
+@pytest.mark.parametrize("adapter", ["text", "voice"])
+async def test_bold_machine_caution_keeps_warning_and_nutrition_formatting(adapter):
+    result, _ = await canvas_reply(
+        "It has **400 calories**. **verification state**: **unverified_web_estimate**.",
+        "How many calories?", adapter)
+    assert "**400 calories**" in result["reply"]
+    assert "web estimate" in result["reply"].lower()
+    assert "unverified_web_estimate" not in result["reply"]

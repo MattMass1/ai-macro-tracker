@@ -39,14 +39,17 @@ def _food_reply_presentation(reply: str, request: str) -> str:
     are formatted. Nutrition numbers and natural uncertainty/consent text are
     not matched. A current positive diagnostic request keeps the raw reply.
     """
+    request = request.replace("’", "'")
     negative = re.search(r"\b(?:stop|quit|avoid|hide|without|don't|do not)\b", request, re.I)
-    diagnostic = re.search(
-        r"\b(?:show|give|include|print|return|list|display|provide|what is|what are)\b"
-        r"[^.!?]{0,80}\b(?:diagnostic(?: metadata| details)?|internal metadata|"
+    field = (r"(?:diagnostic(?: metadata| details)?|internal metadata|"
         r"verification[_ -]state|evidence[_ -]hash|resolution[_ -](?:ref|reference)|"
-        r"(?:provider|record|source)(?: record)?[_ -](?:ids?|identifiers?))\b",
+        r"(?:provider|record|source)(?: record)?[_ -](?:ids?|identifiers?))\b")
+    diagnostic = re.search(
+        r"^\s*(?:please\s+)?(?:(?:can|could|would) you\s+)?"
+        r"(?:show|give|include|print|return|list|display|provide)\b[^.!?]{0,80}\b" + field,
         request, re.I,
-    )
+    ) or re.search(r"^\s*what (?:is|are)\s+(?:(?:the|raw|internal|current)\s+)*" + field,
+                   request, re.I)
     if diagnostic and not negative:
         return reply
     states = {
@@ -61,7 +64,9 @@ def _food_reply_presentation(reply: str, request: str) -> str:
     rendered = []
     changed = False
     for part in re.split(r"(?<=;)\s*|(?<=\.)\s+|\n+", reply):
-        body = part.strip(" \t\r\n.;`")
+        # Interpret inline formatting only for known metadata-clause matching;
+        # the original nutrition prose and its Markdown are kept intact.
+        body = re.sub(r"\*\*|__|`", "", part.strip(" \t\r\n.;"))
         state = re.fullmatch(r"verification[_ -]state\s*[:=]\s*`?([a-z_]+)`?", body, re.I)
         opaque = re.fullmatch(
             r"(?:evidence[_ -]hash|resolution[_ -](?:ref|reference))\s*[:=]\s*`?[a-f0-9]{16,128}`?",
@@ -76,7 +81,8 @@ def _food_reply_presentation(reply: str, request: str) -> str:
         if opaque:
             changed = True
             continue
-        plain = re.sub(r"\bFatSecret:\s*\d+\b(?!\.\d)", "FatSecret", part, flags=re.I)
+        plain = (re.sub(r"\bFatSecret:\s*\d+\b", "FatSecret", part, flags=re.I)
+                 if re.fullmatch(r"Source:\s*FatSecret:\s*\d+", body, re.I) else part)
         changed = changed or plain != part
         rendered.append(plain)
     if not changed:

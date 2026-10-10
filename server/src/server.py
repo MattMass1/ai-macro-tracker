@@ -672,10 +672,12 @@ async def workout_plan_payload() -> dict[str, Any]:
     order. Accounts without a routine have no invented upcoming schedule.
     """
     today_date = domain.effective_date()
-    stored_plan, day_plan, last = await asyncio.gather(
+    tomorrow_date = today_date + timedelta(days=1)
+    stored_plan, day_plan, last, tomorrow_plan = await asyncio.gather(
         store_client().fetch_workout_plan(),
         fetch_day_plan(today_date),
         last_workout_type(),
+        fetch_day_plan(tomorrow_date),
     )
     days = _routine_days(stored_plan)
     rotation = _routine_rotation(stored_plan, days)
@@ -691,10 +693,15 @@ async def workout_plan_payload() -> dict[str, Any]:
             upcoming.append({"type": type_, "exercises": [
                 {"name": ex["name"]} for ex in days[type_].get("exercises", [])
                 if isinstance(ex, dict) and ex.get("name")]})
-    return {"rotation": rotation, "last_workout": last, "upcoming": upcoming,
+    payload = {"rotation": rotation, "last_workout": last, "upcoming": upcoming,
             "core": [{"name": ex["name"]} for ex in days.get("Abs", {}).get("exercises", [])
                      if isinstance(ex, dict) and ex.get("name")],
             "has_plan": bool(rotation) or day_plan is not None}
+    if tomorrow_plan is not None:
+        payload["tomorrow"] = {"date": tomorrow_date.isoformat(), "type": tomorrow_plan["type"],
+                               "exercises": [{"name": ex["name"]} for ex in tomorrow_plan["exercises"]
+                                             if isinstance(ex, dict) and ex.get("name")]}
+    return payload
 
 
 async def workout_stats_payload() -> dict[str, Any]:
@@ -2455,9 +2462,11 @@ def _coach_tool_handlers(*, canvas=False) -> dict[str, Callable[[Mapping[str, An
             "upcoming": [{"type": item.get("type"),
                           "exercises": [ex.get("name") for ex in item.get("exercises") or []][:8]}
                          for item in (payload.get("upcoming") or [])[1:4]],
+            "tomorrow": payload.get("tomorrow"),
             "note": ("Planned exercises are proposals, not completed training. Only "
                      "'completed' counts logged sets. Upcoming slots follow your saved routine, "
-                     "not calendar dates. Today's override does not change future slots."),
+                     "not calendar dates. 'tomorrow' is an explicitly saved dated override, when present. "
+                     "Daily overrides do not change the recurring routine."),
         }
     async def complete_today_session_tool(_args):
         index, today_type, exercises, already_done = await _resolve_today_session()

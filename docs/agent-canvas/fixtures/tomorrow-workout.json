@@ -1,0 +1,18 @@
+{
+  "rotation": ["Push", "Pull", "Legs"],
+  "last_workout": null,
+  "upcoming": [
+    {"type": "Push", "exercises": [{"name": "Bench Press"}], "done": false},
+    {"type": "Pull", "exercises": [{"name": "Lat Pulldown"}]},
+    {"type": "Legs", "exercises": [{"name": "Squat"}]},
+    {"type": "Push", "exercises": [{"name": "Bench Press"}]},
+    {"type": "Pull", "exercises": [{"name": "Lat Pulldown"}]}
+  ],
+  "core": [],
+  "has_plan": true,
+  "tomorrow": {
+    "date": "2026-10-10",
+    "type": "Legs",
+    "exercises": [{"name": "Squat"}]
+  }
+}

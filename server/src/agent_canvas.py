@@ -20,7 +20,7 @@ from auth import current_user_id
 from coach import run_agent
 from domain import WORKOUT_TYPES, effective_day_window, effective_date, validate_workout_plan
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from copy import deepcopy
 from uuid import UUID, uuid4, uuid5
 
@@ -620,6 +620,12 @@ class CanvasService:
                 presented = result.get("status") == "awaiting_confirmation"
                 return result
 
+            async def propose_tomorrow_workout(args):
+                nonlocal presented
+                result = await self._propose_tomorrow_workout(session, args)
+                presented = result.get("status") == "awaiting_confirmation"
+                return result
+
             # Completed sets save immediately (like meals); plan changes above
             # still require a native Confirm tap. Each write is verified by
             # readback before the session credits it. One turn, one write per
@@ -655,7 +661,8 @@ class CanvasService:
             handlers = {"log_meal": log_meal, "lookup_food": lookup_food,
                         "present_surface": present_surface, "request_exercise_swap": request_swap,
                         "request_plan_edit": request_plan_edit,
-                        "propose_today_workout": propose_today_workout}
+                        "propose_today_workout": propose_today_workout,
+                        "propose_tomorrow_workout": propose_tomorrow_workout}
             base = self.coach_factory()
             if "log_workout" in base:
                 handlers["log_workout"] = log_workout
@@ -772,6 +779,15 @@ class CanvasService:
                             "reps": {"type": "string", "minLength": 1, "maxLength": 40}},
                         "required": ["name", "sets", "reps"], "additionalProperties": False}}},
                     "required": ["workout_type", "exercises"], "additionalProperties": False}})
+            catalog.append({"name": "propose_tomorrow_workout", "description":
+                "Change TOMORROW ONLY to an existing saved routine day. Pass the user's words "
+                "for workout_type, such as leg day. The server resolves the name, computes tomorrow's "
+                "date and copies the saved exercises, sets, reps and rest. Shows a dated preview; "
+                "nothing saves until native Confirm. Does not change today or the recurring routine. "
+                "Cannot schedule other dates or invent a workout.",
+                "input_schema": {"type": "object", "properties": {
+                    "workout_type": {"type": "string", "minLength": 1, "maxLength": 80}},
+                    "required": ["workout_type"], "additionalProperties": False}})
             # Chat Completions rejects top-level combinators (HTTP 400 for the whole turn).
             # Handlers already enforce these either/or requirements server-side.
             catalog = [{**tool, "input_schema": {key: value for key, value in tool["input_schema"].items()
@@ -1129,6 +1145,67 @@ class CanvasService:
                                                    {"action": "cancel", "reference": draft_id}]}])
         return {"status": "awaiting_confirmation", "detail": session.approval["detail"]}
 
+    async def _propose_tomorrow_workout(self, session, args):
+        """Copy one saved routine day into tomorrow, pending native confirmation."""
+        if not isinstance(args, Mapping) or set(args) != {"workout_type"}:
+            raise ValueError("Provide workout_type only")
+        if session.approval:
+            raise ValueError("Confirm or cancel the current preview first")
+        requested = args["workout_type"]
+        if not isinstance(requested, str) or not _WORKOUT_LABEL.fullmatch(requested.strip()):
+            raise ValueError("Invalid workout label: use 1-80 safe display characters")
+        store = self.store_factory()
+        today = effective_date()
+        tomorrow = today + timedelta(days=1)
+        context = await store.fetch_workout_plan_context(tomorrow)
+        routine = await store.fetch_workout_plan()
+        raw_days = (routine or {}).get("days")
+        days = ({key: value for key, value in raw_days.items() if isinstance(value, dict)}
+                if isinstance(raw_days, dict) else
+                {str(item["type"]): item for item in raw_days or []
+                 if isinstance(item, dict) and item.get("type")})
+        names = [name for name in ((routine or {}).get("rotation") or list(days))
+                 if isinstance(name, str) and name in days]
+        if not names:
+            return {"status": "needs_clarification",
+                    "question": "Save a workout routine first so I can choose a day for tomorrow."}
+        name, suggestions = resolve_stored_name(requested.strip(), names)
+        if name is None:
+            return {"status": "needs_clarification",
+                    "question": _name_choice_question(requested, suggestions, "your saved routine")}
+        exercises = deepcopy(days[name].get("exercises", []))
+        existing = await store.fetch_day_workout_plan(tomorrow)
+        if effective_date() != today or await store.fetch_workout_plan_context(tomorrow) != context:
+            raise ValueError("Your workout changed while preparing this preview. Request a fresh preview.")
+        draft_id = str(uuid4())
+        detail = (f"Tomorrow only ({tomorrow.isoformat()}): {name}, {len(exercises)} exercises. "
+                  "Copies this day from your saved routine. Today's workout and your saved routine "
+                  "are unchanged. Planned sets are not logged until you log them.")
+        session.approval = {
+            "id": draft_id, "kind": "day_plan", "title": "Save tomorrow's workout?",
+            "detail": detail, "status": "pending", "date": today.isoformat(),
+            "target_date": tomorrow.isoformat(),
+            "expected_revision": existing["revision"] if existing else None,
+            "expected_context": context, "operation_id": f"dayplan:{draft_id}",
+            "dropped": [str(ex.get("name", "")).casefold()
+                        for ex in (existing or {}).get("exercises", [])],
+            "after": {"type": name, "exercises": exercises},
+        }
+        session.canvas.present("approval", "approval", [
+            {"id": "day-plan-preview", "component": "WorkoutPlanPreview",
+             "title": f"Tomorrow · {tomorrow.isoformat()}",
+             "rows": self._day_plan_rows(session.approval["after"])},
+            {"id": "confirm", "component": "ConfirmationCard", "reference": draft_id,
+             "actions": [{"action": "confirm", "reference": draft_id}, {"action": "cancel", "reference": draft_id}]},
+        ])
+        return {"status": "awaiting_confirmation", "detail": detail}
+
+    @staticmethod
+    def _day_plan_rows(plan):
+        return [{"label": f"{plan['type']}: {ex['name']}",
+                 "detail": f"{ex.get('sets', '?')} sets × {ex.get('reps', '?')}"}
+                for ex in plan["exercises"]]
+
     async def _propose_today_workout(self, session, args):
         """Stage a today-only workout plan. Nothing is written until native Confirm.
 
@@ -1369,26 +1446,23 @@ class CanvasService:
 
     async def _reconcile_day_plan(self, session, draft):
         """Read-only: finish an uncertain confirm only if this exact operation is stored."""
-        day = date.fromisoformat(draft["date"])
+        day = date.fromisoformat(draft.get("target_date", draft["date"]))
         stored = await self.store_factory().fetch_day_workout_plan(day)
         after = draft["after"]
         if (not stored or stored.get("operation_id") != draft["operation_id"]
                 or stored.get("type") != after["type"] or stored.get("exercises") != after["exercises"]):
             return False
-        session.approval = None
-        session.canvas.dismiss("approval", cancel_approval=True)
-        await self._load_workout(session)
-        self._show_workout(session)
+        await self._finish_day_plan(session, draft)
         return True
 
     async def _confirm_day_plan(self, session, draft):
         store = self.store_factory()
-        day = date.fromisoformat(draft["date"])
+        day = date.fromisoformat(draft.get("target_date", draft["date"]))
         after = draft["after"]
         current = await store.fetch_day_workout_plan(day)
         replayed = bool(current) and current.get("operation_id") == draft["operation_id"]
         if not replayed and (current["revision"] if current else None) != draft["expected_revision"]:
-            raise ValueError("Today's plan changed. Cancel and request a fresh preview.")
+            raise ValueError("That day's plan changed. Cancel and request a fresh preview.")
         if not replayed and await store.fetch_workout_plan_context(day) != draft["expected_context"]:
             raise ValueError("Your routine or logged workout changed. Cancel and request a fresh preview.")
         planned = {str(ex.get("name", "")).casefold() for ex in after["exercises"]}
@@ -1403,20 +1477,31 @@ class CanvasService:
             session.canvas.revision += 1
             stored = await store.compare_and_swap_day_workout_plan(
                 day, draft["expected_revision"], after["type"], after["exercises"], draft["operation_id"],
-                expected_context=draft["expected_context"])
+                expected_context=draft["expected_context"],
+                **({"expected_today": date.fromisoformat(draft["date"])} if "target_date" in draft else {}))
             if stored is None:
                 current = await store.fetch_day_workout_plan(day)
                 if not current or current.get("operation_id") != draft["operation_id"]:
                     draft["status"] = "pending"
-                    raise ValueError("Today's plan changed. Cancel and request a fresh preview.")
+                    raise ValueError("That day's plan changed. Cancel and request a fresh preview.")
         verified = await store.fetch_day_workout_plan(day)
         if (not verified or verified.get("operation_id") != draft["operation_id"]
                 or verified.get("type") != after["type"] or verified.get("exercises") != after["exercises"]):
-            raise ValueError("Today's plan readback was not verified. Check your workout plan.")
+            raise ValueError("The plan readback was not verified. Check your workout plan.")
+        await self._finish_day_plan(session, draft)
+
+    async def _finish_day_plan(self, session, draft):
         session.approval = None
         session.canvas.dismiss("approval", cancel_approval=True)
-        await self._load_workout(session)
-        self._show_workout(session)
+        if "target_date" in draft and date.fromisoformat(draft["target_date"]) > effective_date():
+            session.canvas.present("task", "task", [{
+                "id": "saved-tomorrow", "component": "WorkoutPlanPreview",
+                "title": f"Saved for {draft['target_date']}",
+                "rows": self._day_plan_rows(draft["after"]),
+            }])
+        else:
+            await self._load_workout(session)
+            self._show_workout(session)
 
     async def _load_workout(self, session):
         data = await self.coach_factory()["get_today_session"]({})
@@ -1476,6 +1561,11 @@ Read via supplied tools when answering numbers. Do not imply opening a logger sa
 For today's workout, what is left, or what is next, call get_workout_outlook; say planned vs logged.
 To create, swap, shorten or remove exercises for today use propose_today_workout (today only by
 default; the saved routine is unchanged; native Confirm required; use history only for load guidance).
+For 'change tomorrow to Pull/Legs/XYZ day', call propose_tomorrow_workout with the user's day name.
+It copies a saved routine day to tomorrow only and requires native Confirm. Never use today's tool
+or rewrite the routine for tomorrow. Other future dates and delayed routine changes are unsupported;
+explain that only tomorrow can be scheduled. Never claim a preview was saved before confirmation.
+Use get_workout_outlook to read an explicit tomorrow override; upcoming rotation slots are not dates.
 Never ask the user for exact stored names: call the edit tool with their words. The server resolves
 names against the plan/library and returns one specific question only when genuinely ambiguous.
 An explicit request to change the SAVED ROUTINE itself (every future Push day, the template) uses

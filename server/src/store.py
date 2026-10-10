@@ -445,22 +445,23 @@ class Store:
     async def compare_and_swap_day_workout_plan(
         self, day: date, expected_revision: int | None, workout_type: str,
         exercises: list[dict[str, Any]], operation_id: str, *, expected_context=None,
-        connection=None,
+        expected_today: date | None = None, connection=None,
     ) -> dict[str, Any] | None:
         """Save one day's plan only if its revision is unchanged (None: absent)."""
         if connection is None:
             async with self._workout_write() as conn:
                 return await self.compare_and_swap_day_workout_plan(
                     day, expected_revision, workout_type, exercises, operation_id,
-                    expected_context=expected_context, connection=conn)
+                    expected_context=expected_context, expected_today=expected_today, connection=conn)
         await connection.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended('workout:' || $1, 0))",
             str(current_user_id()),
         )
         if expected_context is not None:
             # Waiting for another workout writer can cross the 4am boundary.
-            # This API's guarded path is a TODAY preview, never a historical edit.
-            if day != effective_date():
+            # Tomorrow previews expire with their preparation day too.
+            today = effective_date()
+            if today != (expected_today or day) or (day - today).days not in (0, 1):
                 return None
             context = await self.fetch_workout_plan_context(day, connection=connection)
             if context != expected_context:

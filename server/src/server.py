@@ -2744,6 +2744,9 @@ def _unresolved_food_question(description: str, options: list[str]) -> str:
         return f"I couldn't verify {description}. Did you mean {options[0]}?"
     _quantity, _unit, identity = food_lookup._clean_component(description)
     reason = food_lookup.web_nutrition_lookup.recent_failure(identity or description)
+    if reason == "timeout":
+        return (f"The nutrition lookup for {description} took too long. "
+                "Try again in a moment.")
     if reason in food_lookup.web_nutrition_lookup.INFRASTRUCTURE_REASONS:
         return (f"The nutrition lookup service was unreachable for {description}. "
                 "Try again in a moment.")

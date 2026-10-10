@@ -124,6 +124,9 @@ _SEARCH_HITS_MAX = 128
 _SEARCH_MAX_RESULTS = 8
 _SEARCH_MAX_INSPECT = 2
 _search_hits: OrderedDict[str, tuple[float, list[Any]]] = OrderedDict()
+# Queries whose Layer 1 hits were close variants: the answer is a question, so
+# the web fallback (up to 12 s) is skipped for them while the search is fresh.
+_ambiguous_queries: OrderedDict[str, float] = OrderedDict()
 
 
 def _rfc3986(value: Any) -> str:
@@ -384,6 +387,22 @@ def _full_query_relevant(query: str, food: Mapping[str, Any]) -> bool:
 
 def clear_search_cache() -> None:
     _search_hits.clear()
+    _ambiguous_queries.clear()
+
+
+def _remember_ambiguous(query: str) -> None:
+    key = normalize_food_name(query)
+    if key:
+        _ambiguous_queries[key] = time.monotonic()
+        _ambiguous_queries.move_to_end(key)
+        while len(_ambiguous_queries) > _SEARCH_HITS_MAX:
+            _ambiguous_queries.popitem(last=False)
+
+
+def recently_ambiguous(query: str) -> bool:
+    """Whether a fresh Layer 1 search for this text ended in a variant question."""
+    stamp = _ambiguous_queries.get(normalize_food_name(query))
+    return stamp is not None and time.monotonic() - stamp <= _SEARCH_HITS_TTL_SECONDS
 
 
 def _remember_search_hits(query: str, hits: list[Any]) -> None:
@@ -477,6 +496,7 @@ async def search_fatsecret(query: str) -> dict[str, Any] | None:
     hits = await _fatsecret_search_hits(query)
     ranked = _rank_hits(query, hits)
     if _ambiguous_variants(query, ranked):
+        _remember_ambiguous(query)
         return None
     for candidate in ranked[:_SEARCH_MAX_INSPECT]:
         food_id = str(candidate["food_id"])
@@ -899,6 +919,10 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,
         if provider_result is not None:
             return provider_result
         if not allow_web:
+            return None
+        if any(recently_ambiguous(variant) for variant in _query_variants(query)):
+            # Layer 1 found the item in several close variants. The right reply
+            # is "which one?", not a web estimate of an unspecified variant.
             return None
         try:
             return await web_nutrition_lookup.lookup(query)

@@ -187,10 +187,41 @@ async def _timeout_post(_token, _payload):
     raise httpx.ReadTimeout("slow")
 
 
+async def _outage_post(_token, _payload):
+    raise httpx.ConnectError("refused")
+
+
+async def test_variant_question_skips_the_web_fallback(monkeypatch):
+    """Measured in production: a variant pick-list used to arrive only after a
+    12 s web search for an unspecified variant. Ambiguity now short-circuits."""
+    _enable_fatsecret(monkeypatch)
+    monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "token")
+    web_calls = []
+
+    async def request(data):
+        return {"foods": {"food": [
+            {"food_id": "w", "food_name": "BBQ Smokehouse Chicken Sandwich Whole", "brand_name": "Fixture Bakery"},
+            {"food_id": "h", "food_name": "BBQ Smokehouse Chicken Sandwich Half", "brand_name": "Fixture Bakery"},
+        ]}}
+
+    async def web_lookup(query, **_kwargs):
+        web_calls.append(query)
+        raise web.NutritionLookupError("no_results")
+
+    monkeypatch.setattr(food_lookup, "_fatsecret_request", request)
+    monkeypatch.setattr(web, "lookup", web_lookup)
+    assert await food_lookup.resolve_food("fixture bakery bbq smokehouse sandwich") is None
+    assert web_calls == []
+    assert food_lookup.recently_ambiguous("fixture bakery bbq smokehouse sandwich")
+    assert len(await food_lookup.fatsecret_name_options("fixture bakery bbq smokehouse sandwich")) == 2
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("post", "expected"), [
-    (_timeout_post, "The nutrition lookup service was unreachable for fixture zebra steak. "
+    (_timeout_post, "The nutrition lookup for fixture zebra steak took too long. "
                     "Try again in a moment."),
+    (_outage_post, "The nutrition lookup service was unreachable for fixture zebra steak. "
+                   "Try again in a moment."),
     (_no_evidence_post, "I couldn't verify fixture zebra steak. What was it exactly: "
                         "the brand, the dish, or how it was prepared?"),
 ])

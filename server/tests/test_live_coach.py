@@ -2760,6 +2760,8 @@ async def test_voice_curated_multi_item_order_stays_whole_with_web_forbidden(mon
     async def provider(query):
         return {"name": "Chick-fil-A Grilled Club + Grilled Nuggets 8ct",
                 "brand_name": "Chick-fil-A", "source": "FatSecret: fixture-order",
+                "attribution": {"provider": "FatSecret", "external_id": "fixture-order",
+                                "verification_state": "provider_exact_identity"},
                 "macros_per_serving": {"calories": 800, "protein": 75,
                                        "carbs": 60, "fat": 25, "fiber": 4}}
     monkeypatch.setattr(srv.food_lookup, "search_fatsecret", provider)

@@ -2674,6 +2674,10 @@ def _unresolved_food_question(description: str, options: list[str]) -> str:
     """One specific question for food neither layer could verify. It never asks
     the user to supply a label and never invents numbers; a lookup outage is
     named as an outage, not disguised as "not found"."""
+    if any(food_lookup._exact_name_match(description, {"food_name": option})
+           for option in options):
+        return (f"I found the item you named, but couldn't verify its nutrition: "
+                f"{description}. Please try the nutrition lookup again in a moment.")
     if len(options) >= 2:
         return f"For {description}, did you mean " + " or ".join(options) + "?"
     if len(options) == 1:
@@ -2700,16 +2704,30 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
     resolution_cache: dict[str, tuple[Any, str, dict[str, Any]]] = {}
 
     def voice_verified(found: Mapping[str, Any] | None) -> bool:
-        """Voice writes require evidence stronger than provider text search."""
+        """Voice writes require a validated identity and usable provenance."""
         if not found or "UNRESOLVED:" in str(found.get("source") or ""):
             return False
         attribution = found.get("attribution")
+        if (str(found.get("source") or "").startswith("FatSecret:")
+                and not isinstance(attribution, Mapping)):
+            return False
         allowed_states = {"exact_identifier", "official_curated", "internal_curated",
                           "official_source_exact_row"}
+
+        def provider_identity(attribution: Mapping[str, Any], source=None) -> bool:
+            external_id = str(attribution.get("external_id") or "")
+            return (attribution.get("verification_state") == "provider_exact_identity"
+                    and attribution.get("provider") == "FatSecret"
+                    and bool(external_id)
+                    and (source is None or source == f"FatSecret: {external_id}"))
+
         if isinstance(attribution, Mapping):
             state = attribution.get("verification_state")
             if state == "unverified_web_estimate":
                 if found.get("estimate_provenance") != "server_web_estimate":
+                    return False
+            elif state == "provider_exact_identity":
+                if not provider_identity(attribution, found.get("source")):
                     return False
             elif state not in allowed_states:
                 return False
@@ -2719,6 +2737,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             and any(
                 isinstance(item, Mapping)
                 and item.get("verification_state") not in allowed_states | {"unverified_web_estimate"}
+                and not provider_identity(item)
                 for item in component_attributions
             )
         )

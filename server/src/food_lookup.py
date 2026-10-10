@@ -297,7 +297,8 @@ _STATE_WORDS = frozenset({"raw", "fresh"})
 
 
 def _identity_tokens(words) -> set[str]:
-    return {_canon_food_token(w) for w in words if len(w) > 1 and w not in _CONNECTIVES}
+    return {_canon_food_token(w) for w in words
+            if (len(w) > 1 or w.isdigit()) and w not in _CONNECTIVES}
 
 
 def _query_identity_tokens(query: str) -> set[str]:
@@ -318,9 +319,25 @@ def _exact_name_match(query: str, food: Mapping[str, Any]) -> bool:
     if not tokens:
         return False
     name_tokens = _name_identity_tokens(food)
+    brand_tokens = _identity_tokens(normalize_food_name(
+        str(food.get("brand_name") or "")).split()) - _BRAND_FILLER
+    # An explicit leading item count is not a product variant. Retain numbers
+    # present in the provider identity (3 Musketeers, Flavor 2, etc.).
+    _quantity, _unit, identity = _clean_component(query)
+    count = re.match(r"^(\d+)\s+(.+)$", identity)
+    if count and count[1] not in name_tokens | brand_tokens:
+        tokens.discard(count[1])
+    # Barebells may include the neutral category "protein bar" in either the
+    # request or provider name. Never drop flavor or line modifiers such as
+    # Soft, Caramel or a numbered variant, and never apply this to other brands.
+    if "barebell" in brand_tokens and "barebell" in tokens:
+        category = {"protein", "bar"}
+        if category <= tokens:
+            tokens -= category
+        if category <= name_tokens:
+            name_tokens -= category
     if tokens == name_tokens:
         return True
-    brand_tokens = _canon_food_tokens(food.get("brand_name")) - _BRAND_FILLER
     return bool(tokens & brand_tokens) and (tokens - brand_tokens) == name_tokens
 
 
@@ -331,7 +348,7 @@ def _fatsecret_relevant(query: str, food: Mapping[str, Any]) -> bool:
     resolver can accept: a bare "chicken" never selects "Chicken Broth
     Concentrate", and "protein bar" never selects "Chocolate Protein Bar".
     """
-    return _full_query_relevant(query, food)
+    return _exact_name_match(query, food) or _full_query_relevant(query, food)
 
 
 def _fatsecret_option_relevant(query: str, food: Mapping[str, Any]) -> bool:
@@ -457,6 +474,16 @@ def _rank_hits(query: str, hits: list[Any]) -> list[Mapping[str, Any]]:
 
 def _fatsecret_result(query: str, food_id: str, food: Mapping[str, Any],
                       candidate: Mapping[str, Any]) -> dict[str, Any] | None:
+    # A search hit alone is not nutrition evidence. Only an exact identity
+    # carried through the requested detail record earns the provider state;
+    # this deliberately does not claim official-menu or barcode verification.
+    exact_identity = (
+        _exact_name_match(query, candidate)
+        and _exact_name_match(query, food)
+        and (_canon_food_tokens(candidate.get("brand_name")) - _BRAND_FILLER
+             == _canon_food_tokens(food.get("brand_name")) - _BRAND_FILLER)
+        and (not food.get("food_id") or str(food["food_id"]) == food_id)
+    )
     servings_value = food.get("servings")
     if isinstance(servings_value, Mapping): servings_value = servings_value.get("serving")
     for serving in _as_list(servings_value):
@@ -470,6 +497,8 @@ def _fatsecret_result(query: str, food_id: str, food: Mapping[str, Any],
             "brand_name":str(food.get("brand_name") or candidate.get("brand_name") or ""),
             "macros_per_serving":macros, "serving_size":description, "source":f"FatSecret: {food_id}",
             "attribution":{"provider":"FatSecret", "external_id":food_id,
+                "verification_state": ("provider_exact_identity" if exact_identity
+                                       else "provider_search_match"),
                 "source_url":str(food.get("food_url") or candidate.get("food_url") or "") or None,
                 "serving_grams":grams, "serving_basis":"per_serving", "confidence":0.9,
                 "cache_allowed":os.environ.get("FATSECRET_CACHE_ALLOWED", "false").casefold()=="true",
@@ -871,8 +900,16 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,
         found = await awaitable
         candidate = {"food_name": found.get("name", ""),
                      "brand_name": found.get("brand_name", "")} if found else {}
-        if (found and _full_query_relevant(query, candidate)
+        if (found and (_exact_name_match(query, candidate) or _full_query_relevant(query, candidate))
                 and (not whole_item or _macros(found.get("macros_per_serving", {})))):
+            attribution = found.get("attribution")
+            if (isinstance(attribution, Mapping)
+                    and attribution.get("verification_state") == "provider_exact_identity"
+                    and not _exact_name_match(query, candidate)):
+                # A shortened search may be exact for that fragment, but it
+                # cannot promote a broader match for the original request.
+                found = {**found, "attribution": {
+                    **attribution, "verification_state": "provider_search_match"}}
             return (variant_index, provider_index), found
         return (variant_index, provider_index), None
 
@@ -1030,6 +1067,21 @@ async def _resolve_food_text(
         quantity, unit, remainder = _clean_component(raw_parts[0] if raw_parts else text)
         found = await _resolve_component(remainder or text, whole_item=whole_item,
                                          catalog_lookup=catalog_lookup, allow_web=allow_web)
+        if (found and quantity is None
+                and isinstance(found.get("attribution"), Mapping)
+                and found["attribution"].get("verification_state") == "provider_exact_identity"):
+            # A spoken item count need not include "servings". Preserve it
+            # only after an exact provider identity was established, and never
+            # interpret the number in a product name (such as 3 Musketeers) as
+            # a count. applied_quantity below prevents a structured quantity
+            # from multiplying the same count a second time.
+            count = re.match(r"^(\d+)\s+(.+)$", remainder or text)
+            identity = {"food_name": found.get("name"),
+                        "brand_name": found.get("brand_name")}
+            if count and _exact_name_match(count[2], identity):
+                quantity, unit = float(count[1]), "servings"
+                if not 0 < quantity <= 100:
+                    return None
         if not found or quantity is None:
             return found
         quantified = _quantify(found, quantity, unit)

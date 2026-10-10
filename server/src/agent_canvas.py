@@ -552,6 +552,10 @@ class CanvasService:
                 last_food_result = await foods["log_meal"](f"canvas:{session_id}:{turn_id}", args)
                 result = last_food_result
                 if result.get("status") in {"committed", "replayed"}:
+                    task = session.canvas.surfaces.get("task")
+                    if task and all(item["component"] == "FoodClarification"
+                                    for item in task["components"]):
+                        session.canvas.dismiss("task")
                     logged = result.get("logged") or {}
                     session.receipt = {"operationId": result["operation_id"],
                                        "recordId": str(logged.get("id", "")),

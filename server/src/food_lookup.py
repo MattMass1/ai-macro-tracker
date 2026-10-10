@@ -281,13 +281,33 @@ _BRAND_FILLER = frozenset({"bread", "inc", "co", "llc", "restaurant", "restauran
 _CONNECTIVES = frozenset({"and", "with", "plus", "of", "on", "in"})
 
 
+def _number_stem(token: str) -> str:
+    """One stem for the singular and plural spellings of a food word.
+
+    The suffix rules alone split some pairs (cookie/cookies -> cookie/cooky,
+    cheese/cheeses -> cheese/chees), so trailing e/y are folded as well. The
+    stem is a reconciliation key compared only against other stems, never
+    shown or searched. Amounts and ratios (30g, 93/7, 2) are left alone.
+    """
+    if any(ch.isdigit() for ch in token):
+        return token
+    if len(token) > 4 and token.endswith("ies"):
+        token = token[:-3] + "y"
+    elif len(token) > 4 and token.endswith(("oes", "ses", "xes", "zes", "ches", "shes")):
+        token = token[:-2]
+    elif len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        token = token[:-1]
+    if len(token) > 3 and token.endswith("e"):
+        token = token[:-1]
+    if len(token) > 3 and token.endswith("y"):
+        token = token[:-1] + "i"
+    return token
+
+
 def _canon_food_token(token: str) -> str:
     token = _FOOD_SYNONYMS.get(token, token)
-    if len(token) > 3 and token.endswith("es"):
-        return _FOOD_SYNONYMS.get(token[:-2], token[:-2])
-    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
-        return _FOOD_SYNONYMS.get(token[:-1], token[:-1])
-    return token
+    stem = _number_stem(token)
+    return _FOOD_SYNONYMS.get(stem, stem)
 
 
 def _canon_food_tokens(text: Any) -> set[str]:

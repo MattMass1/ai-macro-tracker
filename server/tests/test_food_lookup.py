@@ -2248,3 +2248,38 @@ def test_preset_token_match_is_plural_tolerant_but_still_needs_two_tokens():
     assert srv._preset_matches("fairlife shakes", {"fairlife", "shakes"}, preset)
     assert not srv._preset_matches("shakes", {"shakes"}, preset)
     assert not srv._preset_matches("fairlife bars", {"fairlife", "bars"}, preset)
+
+
+@pytest.mark.parametrize(("spoken", "provider_name"), [
+    ("apple", "Apples"), ("orange", "Oranges"), ("grape", "Grapes"),
+    ("cookie", "Cookies"), ("pancake", "Pancakes"), ("shake", "Shakes"),
+    ("cheese", "Cheeses"), ("tomato", "Tomatoes"), ("pear", "Pears"),
+    ("strawberry", "Strawberries"), ("french fries", "French Fry"),
+    ("apples", "Apple"), ("potatoes", "Potato"),
+])
+def test_singular_and_plural_spellings_are_one_identity(spoken, provider_name):
+    # Providers list whole foods in the plural ("Apples"); people say either
+    # form. Number is never identity, in either direction.
+    food = {"food_name": provider_name}
+    assert food_lookup._exact_name_match(spoken, food), (spoken, provider_name)
+    assert food_lookup._full_query_relevant(spoken, food), (spoken, provider_name)
+
+
+@pytest.mark.parametrize(("spoken", "provider_name"), [
+    ("apple", "Apple Pie"), ("egg whites", "Eggs"), ("cheese", "Cheesecake"),
+    ("orange", "Orange Juice"), ("grape", "Grapefruit"),
+])
+def test_number_tolerance_never_merges_different_foods(spoken, provider_name):
+    food = {"food_name": provider_name}
+    assert not food_lookup._exact_name_match(spoken, food), (spoken, provider_name)
+    assert not food_lookup._full_query_relevant(spoken, food), (spoken, provider_name)
+
+
+def test_canonical_tokens_keep_literal_anchors_stable():
+    # Code compares canonical tokens against these literals; the stem must
+    # leave them (and numbers, ratios and unit-bearing amounts) untouched.
+    for word in ("barebell", "bar", "protein", "raw", "fresh", "bread", "the",
+                 "restaurant", "30g", "93/7", "2"):
+        assert food_lookup._canon_food_token(word) == word, word
+    assert food_lookup._canon_food_token("barebells") == "barebell"
+    assert food_lookup._canon_food_token("restaurants") == "restaurant"

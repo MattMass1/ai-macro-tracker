@@ -148,7 +148,8 @@ def _meal_session_key(call_id: str) -> str:
 
 
 # Words a spoken answer to the one question is made of, not food identity.
-_FOLLOW_UP_FILLER = frozenset({
+# Compared against canonical food tokens, so the words are stemmed the same way.
+_FOLLOW_UP_FILLER = frozenset(food_lookup._canon_food_token(word) for word in {
     "whichever", "whatever", "either", "any", "yes", "yeah", "yep", "ok", "okay", "sure",
     "fine", "please", "just", "log", "it", "that", "this", "one", "the", "go", "ahead",
     "same", "thing", "first", "option", "default", "correct", "right", "dont", "care",

@@ -127,8 +127,3 @@ struct MetricsField: Codable, Equatable {
         }
     }
 }
-
-struct MetricsFieldValues: Equatable {
-    var numbers: [String: Double] = [:]
-    var texts: [String: String] = [:]
-}

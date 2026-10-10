@@ -344,6 +344,53 @@ def test_agent_turn_webhook_refuses_unknown_conversation_without_touching_any_ac
         assert ran == []
 
 
+def test_voice_quota_denial_is_spoken_without_running_agent_or_domain_tools(monkeypatch):
+    from agent_canvas import CanvasService
+    from auth import current_user_id
+    from store import ChatQuotaExceeded
+
+    owner, speaker = uuid4(), uuid4()
+    checked_users = []
+
+    class QuotaStore(AuthStore):
+        async def insert_user_chat_message(self, text, *, daily_cap):
+            checked_users.append(current_user_id())
+            raise ChatQuotaExceeded(f"daily chat cap of {daily_cap} reached")
+
+    store = QuotaStore(owner, speaker)
+    monkeypatch.setattr(srv, "_client", store)
+    _configure(monkeypatch, owner=owner, voice_provider="elevenlabs",
+               elevenlabs_tool_secret="hook-secret")
+
+    def forbidden_tools():
+        pytest.fail("Quota denial must happen before domain tools are created")
+
+    async def forbidden_agent(**kwargs):
+        pytest.fail("Quota denial must not spend model or search credits")
+
+    canvas = CanvasService(store_factory=lambda: store, food_factory=forbidden_tools,
+                           coach_factory=lambda: {}, agent=forbidden_agent)
+    monkeypatch.setattr(srv, "_canvas_service", canvas)
+    conversation_id = f"conv_quota_{uuid4()}"
+    elv.record_voice_session(conversation_id, speaker)
+    body = {"message": "log a green apple", "conversation_id": conversation_id, "turn_index": 0}
+
+    with TestClient(srv.create_app()) as client:
+        path = "/api/voice/elevenlabs/agent-turn"
+        assert client.post(path, json=body).status_code == 401
+        assert checked_users == []
+        # Repeated delivery stays a refusal and never bypasses the quota.
+        for _ in range(2):
+            res = client.post(path, json=body,
+                              headers={"X-Elevenlabs-Tool-Secret": "hook-secret"})
+            assert res.status_code == 200, res.text
+            assert set(res.json()) == {"reply"}
+            assert "today's coach limit" in res.json()["reply"]
+            assert "couldn't process" in res.json()["reply"]
+    assert checked_users == [speaker, speaker]
+    assert store.history == []
+
+
 def test_token_binds_app_session_and_webhook_runs_turn_on_it(monkeypatch):
     """The app sends its canvas session id when minting a token; the webhook then
     runs the voice turn on THAT session (so components + Confirm land where the app

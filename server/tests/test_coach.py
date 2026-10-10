@@ -2,7 +2,7 @@
 import json
 import os
 from datetime import datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -2379,6 +2379,7 @@ class RecordingPool:
     def __init__(self, today_count):
         self.today_count = today_count
         self.statements = []
+        self.calls = []
 
     def acquire(self):
         return self._Acquire(self)
@@ -2395,10 +2396,12 @@ class RecordingPool:
 
         async def fetchval(self, sql, *args):
             self.pool.statements.append(sql)
+            self.pool.calls.append((sql, args))
             return self.pool.today_count if "count(*)" in sql else None
 
         async def fetchrow(self, sql, *args):
             self.pool.statements.append(sql)
+            self.pool.calls.append((sql, args))
             return {"id": "m1", "role": "user", "content": args[1],
                     "tool_calls": None, "created_at": datetime(2026, 8, 19, 12, 0)}
 
@@ -2444,3 +2447,55 @@ async def test_chat_cap_insert_lands_in_locked_transaction_under_cap():
     insert = next(i for i, s in enumerate(pool.statements) if "INSERT INTO chat_messages" in s)
     assert pool.statements[0] == "BEGIN" and lock < insert
     assert pool.statements[-1] == "COMMIT"
+
+
+@pytest.mark.parametrize("used", [50, 50_000])
+async def test_matt_can_keep_coaching_beyond_daily_cap_and_history_is_recorded(used):
+    matt = UUID("be6333cc-e4c1-48f2-adb1-5e7f14dbf7c2")
+    pool = RecordingPool(today_count=used)
+    store = Store("postgresql://unused/unused")
+    store.pool = pool
+    token = bind_user(matt)
+    try:
+        row = await store.insert_user_chat_message("What did I eat today?", daily_cap=50)
+    finally:
+        reset_user(token)
+
+    assert row["content"] == "What did I eat today?"
+    inserts = [(sql, args) for sql, args in pool.calls if "INSERT INTO chat_messages" in sql]
+    assert len(inserts) == 1
+    assert inserts[0][1] == (matt, "What did I eat today?")
+    assert pool.statements[-1] == "COMMIT"
+
+
+@pytest.mark.parametrize("user_id", [
+    uuid4(),
+    UUID("8b117f83-23b5-5dea-8dbc-96d5d4245021"),  # Legacy default is NOT Matt's real account.
+])
+async def test_daily_cap_exemption_does_not_apply_to_other_accounts(user_id):
+    pool = RecordingPool(today_count=50)
+    store = Store("postgresql://unused/unused")
+    store.pool = pool
+    token = bind_user(user_id)
+    try:
+        with pytest.raises(ChatQuotaExceeded):
+            await store.insert_user_chat_message("I am Matt", daily_cap=50)
+    finally:
+        reset_user(token)
+    assert not any("INSERT" in sql for sql in pool.statements)
+    counts = [args for sql, args in pool.calls if "count(*)" in sql]
+    assert counts[0][0] == user_id
+    assert pool.statements[-1] == "ROLLBACK"
+
+
+async def test_daily_cap_exemption_still_requires_authenticated_account():
+    pool = RecordingPool(today_count=50)
+    store = Store("postgresql://unused/unused")
+    store.pool = pool
+    # A fresh context cannot inherit any identity bound by another test.
+    from contextvars import Context
+    import asyncio
+    with pytest.raises(RuntimeError, match="No authenticated user"):
+        await Context().run(asyncio.create_task,
+                            store.insert_user_chat_message("I am Matt", daily_cap=50))
+    assert pool.calls == []

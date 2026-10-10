@@ -264,6 +264,25 @@ class Store:
     async def aclose(self) -> None:
         if self.pool is not None: await self.pool.close(); self.pool = None
 
+    async def purge_request_operations(self, *, older_than_days: int = 7) -> int:
+        """Drop finished idempotency replay records older than the window.
+
+        `request_operations` stores a full day payload per idempotent write and
+        nothing ever deleted it. Clients retry within seconds, so a week is
+        generous. In-progress rows and nutrition data are never touched; this is
+        the one maintenance query that is intentionally not tenant-scoped.
+        """
+        pool = await self.connect()
+        result = await pool.execute(
+            "DELETE FROM request_operations WHERE status IN ('completed','failed') "
+            "AND coalesce(completed_at, created_at) < now() - make_interval(days => $1)",
+            int(older_than_days),
+        )
+        try:
+            return int(str(result).rsplit(" ", 1)[-1])
+        except ValueError:
+            return 0
+
     async def resolve_device(self, raw_token: str) -> UUID | None:
         pool = await self.connect()
         token_hash = hash_device_token(raw_token)

@@ -374,11 +374,29 @@ def _preset_food(preset: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+_MAINTENANCE_INTERVAL_SECONDS = 24 * 3600
+
+
+async def _maintenance_loop() -> None:
+    """Daily housekeeping: purge finished idempotency replay records (they grew
+    for the life of the database). Failures are logged, never raised: the app
+    must come up even when the database is briefly unavailable."""
+    while True:
+        try:
+            removed = await store_client().purge_request_operations(older_than_days=7)
+            logger.info("maintenance: purged %d finished request_operations rows", removed)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("maintenance: request_operations purge skipped: %s", type(exc).__name__)
+        await asyncio.sleep(_MAINTENANCE_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(_app: Any):
+    maintenance = asyncio.create_task(_maintenance_loop())
     try:
         yield
     finally:
+        maintenance.cancel()
         if _client is not None:
             await _client.aclose()
 

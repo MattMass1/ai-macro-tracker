@@ -72,8 +72,19 @@ Implementation notes (what shipped, where it differs from the text below):
   11.7 s, quinoa hit the 12 s budget, zebra steak "couldn't verify" at 11.5 s.
   The time is the hosted web_search tool itself (9-12 s), so the levers are
   left off by default (env `WEB_LOOKUP_REASONING_EFFORT` /
-  `WEB_LOOKUP_SEARCH_CONTEXT` enable them). Making Layer 2 faster means a
-  different model or vendor, which is an owner decision outside this spec.
+  `WEB_LOOKUP_SEARCH_CONTEXT` enable them).
+- Owner decision 2026-10-09 (supersedes "no new vendors" for Layer 2): **Exa**.
+  `web_nutrition_lookup` now has two providers behind one contract. `exa`
+  (default when `EXA_API_KEY` is set; `WEB_LOOKUP_PROVIDER` overrides): one
+  Exa search (`type: auto`, 5 results, USDA excluded, page text + highlights,
+  live-measured 1.8-2.2 s) then one no-tools OpenAI Responses extraction over
+  those pages only (`WEB_LOOKUP_EXTRACT_MODEL`, default `COACH_MODEL`;
+  reasoning effort low via `WEB_LOOKUP_EXTRACT_REASONING_EFFORT`). The cited
+  URL must be one Exa returned; the result is still an unverified web estimate
+  with one-tap confirm. `openai` is the original hosted web_search request and
+  the automatic fallback when Exa itself fails (timeout, auth, 429, 5xx);
+  evidence failures never fall back, so "nothing found" stays fast.
+  Render needs `EXA_API_KEY` for production to switch.
   Measurement recipe: POST `/api/agent-canvas/{uuid}/turn` with
   `{"turn_id": uuid, "message": "...do not log anything..."}`, diff
   `/api/today` meals before/after.

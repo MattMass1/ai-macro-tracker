@@ -852,7 +852,8 @@ async def test_food_path_derives_sources_from_exact_real_data_matches(monkeypatc
 
     response = await srv.api_chat(chat_request({"message": "a Barebells and a banana"}))
     assert response.status_code == 200
-    assert lookup_queries == []  # existing known-food data now wins before providers
+    # A weighted brand-only preset cannot borrow a generic bar's macros.
+    assert lookup_queries == [("bareBELLS", False)]
     assert len(seen) == 1
     source, calories, protein, carbs, fat, fiber = seen[0]
     assert source.startswith("Composite: ESTIMATE; Known food: Banana")
@@ -1864,7 +1865,7 @@ async def test_cofid_failure_falls_back_transparently_without_fake_verified_url(
     }
 
 
-@pytest.mark.parametrize("source", ["known", "catalog"])
+@pytest.mark.parametrize("source", ["generic", "catalog"])
 async def test_other_local_food_sources_short_circuit_providers(monkeypatch, source):
     catalog_hit = {"name": "local oats", "macros_per_serving": {
         "calories": 100, "protein": 4, "carbs": 18, "fat": 2, "fiber": 3,
@@ -1883,7 +1884,7 @@ async def test_other_local_food_sources_short_circuit_providers(monkeypatch, sou
     srv._resolved_food_cache.clear()
     token = bind_user(uuid4())
     try:
-        result = await srv.resolve_food("Barebells" if source == "known" else "local oats")
+        result = await srv.resolve_food("banana" if source == "generic" else "local oats")
     finally:
         reset_user(token)
     assert result is not None

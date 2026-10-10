@@ -190,10 +190,14 @@ async def resolve_food(query: str, **kwargs):
     async def local_lookup(local_query: str) -> dict[str, Any] | None:
         local_normalized = food_lookup.normalize_food_name(local_query)
         query_tokens = set(local_normalized.split())
-        preset = next(
-            (item for item in presets if _preset_matches(local_normalized, query_tokens, item)),
-            None,
-        )
+        exact_presets = [item for item in presets
+                         if food_lookup.normalize_food_name(str(item.get("name") or ""))
+                         == local_normalized]
+        candidates = exact_presets or [item for item in presets
+                                      if _preset_matches(local_normalized, query_tokens, item)]
+        # A shortened name can match multiple product lines. Never resolve
+        # that ambiguity by database order; continue the normal lookup path.
+        preset = candidates[0] if len(candidates) == 1 else None
         if preset is not None:
             return _preset_food(preset)
         # An authenticated tenant's exact catalog is their highest-priority
@@ -223,9 +227,6 @@ async def resolve_food(query: str, **kwargs):
         generic_local = food_lookup.resolve_generic_whole_food(local_query)
         if generic_local is not None:
             return generic_local
-        known = _short_circuit_known_food(local_query)
-        if known is not None:
-            return _known_food_result(known)
         return None
 
     found = await local_lookup(query)
@@ -263,16 +264,6 @@ def _preset_food(preset: Mapping[str, Any]) -> dict[str, Any]:
             key: float(preset.get(key, 0) or 0) for key in domain.MACRO_KEYS
         },
         "source": f"Meal Preset: {preset['name']}",
-    }
-
-
-def _known_food_result(item: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "name": str(item["name"]),
-        "macros_per_serving": {
-            key: float(item.get(key, 0) or 0) for key in domain.MACRO_KEYS
-        },
-        "source": str(item["note"]),
     }
 
 
@@ -1030,7 +1021,6 @@ async def _voice_meal_response(conn, user_id, row) -> dict[str, Any]:
 
 KNOWN_CHAT_FOODS = """Moe's cookie 170 kcal, 2g protein, 23g carbs, 8g fat
 Fairlife 30g shake 150/30/3/2.5
-Barebells 200/20/21/7
 Banana 105/1/27/0
 Rice Krispies Treat 90/1/16/3
 TJ olive oil butter 80/0/0/9
@@ -1047,7 +1037,6 @@ CFA 8ct grilled nuggets + grilled club + sauce 710/62/61/25"""
 KNOWN_CHAT_FOOD_NAMES = (
     "Moe's cookie",
     "Fairlife 30g shake",
-    "Barebells",
     "Banana",
     "Rice Krispies Treat",
     "TJ olive oil butter",
@@ -1073,46 +1062,6 @@ APPROVED_KNOWN_FOOD_MACROS = {
 def _normalized_food_name(name: str) -> str:
     """Normalize only case and whitespace for exact food-name matching."""
     return " ".join(name.split()).casefold()
-
-
-# BRANDED ITEMS — short-circuit only when it's a single food (no 'and').
-_BRAND_ITEMS: dict[str, dict[str, float]] = {
-    "barebells": {"calories": 200, "protein": 20, "carbs": 21, "fat": 7},
-    "fairlife": {"calories": 150, "protein": 30, "carbs": 3, "fat": 2.5},
-}
-
-
-def _short_circuit_known_food(message: str) -> dict[str, Any] | None:
-    """Deterministically match a known brand to its base macros.
-
-    Branded items match only for single-food messages, so the parser handles
-    mixed meals like ``a Barebells and a banana``. Restaurant items resolve
-    through the two-layer lookup (FatSecret brand-first, then web estimate).
-    """
-    lowered = " ".join(message.split()).casefold()
-
-    def _item(name: str, macros: dict[str, float]) -> dict[str, Any]:
-        return {
-            "name": name,
-            "calories": macros["calories"],
-            "protein": macros["protein"],
-            "carbs": macros["carbs"],
-            "fat": macros["fat"],
-            "fiber": 0,
-            "quantity": 1,
-            "grams": None,
-            "basis": "per_serving",
-            "sourced_from": "known",
-            "meal": "Snack",
-            "note": f"Known food: {name}",
-        }
-
-    has_multi = re.search(r"\b(?:and|plus)\b", lowered) is not None
-    if not has_multi:
-        for phrase, macros in _BRAND_ITEMS.items():
-            if phrase in lowered:
-                return _item(phrase, macros)
-    return None
 
 
 def _extract_chat_items(content: str) -> tuple[list[Any], str | None]:
@@ -1164,27 +1113,6 @@ async def _post_openai_chat(token: str, payload: dict[str, Any]) -> httpx.Respon
                 raise
             await asyncio.sleep(retry_delay)
     raise RuntimeError("unreachable")
-
-
-# Known brand names that map to a base known-food entry. Any flavor/descriptor
-# words after the brand collapse to the bare brand so the parser matches it.
-_KNOWN_BRANDS = (
-    "barebells",
-    "fairlife",
-    "moe's",
-)
-
-
-def _normalize_brand_flavor(message: str) -> str:
-    """Collapse 'brand + flavor words' to just the brand for known brands,
-    so 'Barebells creamy crisp' matches the known 'Barebells' entry. Stops at
-    'and', a comma, or a quantity so multi-food messages stay intact."""
-    lowered = message.casefold()
-    for brand in _KNOWN_BRANDS:
-        if brand in lowered:
-            pattern = rf"\b{re.escape(brand)}\b(?:\s+(?!and\b|with\b|plus\b|,)[a-z][a-z'&.-]*)*"
-            return re.sub(pattern, brand, message, flags=re.IGNORECASE)
-    return message
 
 
 # Messages that are conversation, not food: greetings/acknowledgements and
@@ -1268,7 +1196,6 @@ async def _forced_food_item(
 async def parse_chat_message(
     message: str,
 ) -> tuple[list[Any], str | None, list[dict[str, Any]]]:
-    message = _normalize_brand_flavor(message)
     day = domain.effective_date()
     meals, targets, presets = await asyncio.gather(
         fetch_meals(day), fetch_targets(day), fetch_presets()
@@ -1290,7 +1217,7 @@ User: "chipotle bowl with double chicken and guac"
 You: [{{"name":"Chipotle bowl","calories":625,"protein":75,"carbs":38,"fat":22,"fiber":0,"quantity":1,"basis":"per_serving","sourced_from":"known","meal":"Lunch","note":"Known food: Chipotle bowl"}}]
 
 User: "Barebells creamy crisp"
-You: [{{"name":"Barebells","calories":200,"protein":20,"carbs":21,"fat":7,"fiber":0,"quantity":1,"basis":"per_serving","sourced_from":"known","meal":"Snack","note":"Known food: Barebells"}}]
+Call lookup_food with "Barebells creamy crisp". Preserve the full product name and use only that product's returned macros. A brand alone does not identify a product; never substitute another flavor or product line.
 
 User: "salmon sashimi and 2 tuna sushi"
 You call lookup_food, get no good result → log anyway:
@@ -3452,21 +3379,13 @@ async def api_chat(request: Request) -> Any:
     if structured_metrics is not None or onboarding:
         raw_items = []
     else:
-        # ── Deterministic restaurant-order short-circuit (before the LLM) ──
-        # The parser model kept refusing complex orders (Chipotle) because it
-        # can't "verify" restaurant macros. Match the known base entry in code.
-        short_circuit = _short_circuit_known_food(text)
-        if short_circuit is not None:
-            raw_items = [short_circuit]
-            presets = []
-        else:
-            try:
-                parsed_food = await parse_chat_message(text)
-                raw_items, _ = parsed_food[:2]
-                presets = parsed_food[2] if len(parsed_food) > 2 else await fetch_presets()
-            except Exception:
-                logger.exception("Food parser failed; falling back to coach")
-                raw_items = []
+        try:
+            parsed_food = await parse_chat_message(text)
+            raw_items, _ = parsed_food[:2]
+            presets = parsed_food[2] if len(parsed_food) > 2 else await fetch_presets()
+        except Exception:
+            logger.exception("Food parser failed; falling back to coach")
+            raw_items = []
     if raw_items:
         try:
             requested_day = body.get("date")

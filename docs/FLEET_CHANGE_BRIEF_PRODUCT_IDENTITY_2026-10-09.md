@@ -1,0 +1,12 @@
+# Product identity and weighted portion correction
+
+- Goal: preserve exact product identities through food lookup and parser delivery; accept punctuated weight units. Matthew requested the correction after read-only live tests substituted a generic Barebells bar for Soft Caramel Choco and Fairlife 30 g for Core Power Elite.
+- Owner: current Codex builder. Matthew explicitly handed continuation from the capped Fable session to GPT in this conversation; this brief records the task-scoped ownership handoff.
+- Scope: server/src/server.py, server/src/food_lookup.py, server/src/web_nutrition_lookup.py, regression tests, this brief. No iOS, schema, credentials, provider/model/environment changes or meal data changes.
+- Design: remove substring brand shortcuts and flavor-erasing preprocessing. Remove the generic Barebells parser hint and example that instructed substitution. Preserve explicit presets, existing provider resolution and server portion scaling. Parse oz. as oz while retaining lean/fat ratios. Exact presets outrank partial matches; partial matches must be unique. Web extraction evidence must cover all requested identity tokens after stripping leading mass, so another product line, flavor, or meat cannot be relabeled.
+- Contract/data impact: unchanged API; no production writes or migrations. Existing logged meals remain unchanged.
+- Prompt inventory: before, the legacy parser stripped Barebells/Fairlife/Moe's descriptors and included a 200-calorie generic Barebells example; after, original user text is delivered and the example requires exact product lookup. No scheduled jobs are changed.
+- Review: independent read-only correctness/data-safety review of this diff, plus independent deployment verification if released.
+- Verification: regression tests initially 9 failed / 3 passed, then 12 passed. Two preset ambiguity cases and four web identity mismatch cases also failed before their fixes. Final full backend suite: 956 passed, 4 skipped; 17 product/portion regressions include actual voice persistence and replay for all three owner-requested weighted cases, using synthetic stores. Earlier live read-only baseline showed 122 meals across 21 days unchanged; live coach testing subsequently hit the account's daily rate limit.
+- Rollback: revert only this change's commit; no data rollback required.
+- Status: automated-verified; independent review in progress. Production verification is pending.

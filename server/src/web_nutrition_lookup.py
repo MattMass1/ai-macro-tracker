@@ -310,8 +310,15 @@ def _result_from_evidence(raw: Mapping[str, Any], query: str, *,
         raise NutritionLookupError("unverified_evidence")
     host = _source_host(url)
     identity_tokens = _tokens(raw["food_name"] + " " + raw["preparation"])
-    query_tokens = _tokens(query)
-    if not identity_tokens or len(identity_tokens & query_tokens) < min(2, len(identity_tokens), len(query_tokens)):
+    # Quantity is not product identity, but every remaining identity token
+    # matters: matching the brand and category cannot erase a product line,
+    # flavor, preparation, or meat type and relabel the evidence as the query.
+    identity_query = re.sub(
+        r"^\s*\d+(?:\.\d+)?\s*(?:grams?|g|ounces?|oz|pounds?|lbs?|kilograms?|kg)\b\.?\s*(?:of\s+)?",
+        "", query, flags=re.IGNORECASE,
+    )
+    query_tokens = _tokens(identity_query)
+    if not query_tokens or not query_tokens <= identity_tokens:
         raise NutritionLookupError("identity_mismatch")
     for preparation in ("raw", "cooked", "grilled", "fried", "baked"):
         if preparation in query_tokens and preparation not in identity_tokens:

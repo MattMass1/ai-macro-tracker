@@ -67,6 +67,13 @@ Implementation notes (what shipped, where it differs from the text below):
   - Chick-fil-A chicken sandwich: 2.8 s; Panera variant question: 3.7-4.5 s.
   Voice and text share this server path; the voice numbers differ from text
   only by model variance.
+- Layer 2 floor: with reasoning.effort=low and search_context_size=low on the
+  web_search request (f064f16) the numbers were unchanged -- farro verified in
+  11.7 s, quinoa hit the 12 s budget, zebra steak "couldn't verify" at 11.5 s.
+  The time is the hosted web_search tool itself (9-12 s), so the levers are
+  left off by default (env `WEB_LOOKUP_REASONING_EFFORT` /
+  `WEB_LOOKUP_SEARCH_CONTEXT` enable them). Making Layer 2 faster means a
+  different model or vendor, which is an owner decision outside this spec.
   Measurement recipe: POST `/api/agent-canvas/{uuid}/turn` with
   `{"turn_id": uuid, "message": "...do not log anything..."}`, diff
   `/api/today` meals before/after.

@@ -3923,12 +3923,14 @@ async def api_delete_workout(request: Request) -> Any:
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request) -> Response:
-    """Unauthenticated liveness probe for Render."""
+    """Unauthenticated liveness probe for Render; names the deployed commit so a
+    release can be verified from outside without log access."""
     day = domain.effective_date()
     return JSONResponse(
         {
             "status": "ok",
             "service": "macro-tracker",
+            "commit": os.environ.get("RENDER_GIT_COMMIT", "")[:12] or None,
             "effective_date": day.isoformat(),
             "day_label": domain.day_label(day),
         }

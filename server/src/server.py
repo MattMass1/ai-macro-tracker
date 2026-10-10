@@ -3536,6 +3536,16 @@ async def api_chat(request: Request) -> Any:
                         )
                 else:
                     source = note if sourced_from == "lookup" else "ESTIMATE"
+                    if sourced_from == "lookup" and grams is not None:
+                        # The server owns portion arithmetic (spec 2026-10-09,
+                        # bug 5): a stated weight is re-scaled from the resolved
+                        # per-100g panel rather than trusting the parser's math.
+                        enforced = await _upgrade_estimate(clean_name, grams)
+                        if enforced is not None:
+                            portion_macros, source = enforced
+                            macros = domain.validate_macros(
+                                *(portion_macros.get(key, 0) for key in domain.MACRO_KEYS)
+                            )
                 # "Logged without macros" is the worst outcome: an all-zero
                 # panel on a non-zero-calorie food means the parser failed.
                 # Attach best-available macros — lookup scaled to the stated

@@ -9,8 +9,20 @@ Implementation notes (what shipped, where it differs from the text below):
 - Layer 1 gate: one identity rule (`_full_query_relevant`) is used both to
   pick which search hit to inspect and to accept it. Hits are ranked (exact
   item name before brand-anchored broader items) and at most two are fetched.
+- Variant disambiguation: when no hit IS the named item but several
+  acceptable brand-anchored hits differ in identity (Fried vs Grilled,
+  sizes), `search_fatsecret` returns nothing and the coach asks which, listing
+  them (`_ambiguous_variants`). An exact item name still auto-commits, so the
+  common case stays one turn.
 - Did-you-mean (`fatsecret_name_options`) reuses the hits from the failed
-  resolution's own search; no second provider round trip.
+  resolution's own search; no second provider round trip. The same reuse
+  means the whole-phrase probe and the component pass never search the same
+  text twice (`_fatsecret_search_hits`, 60 s window).
+- Round-trip budget (measured with a stubbed provider): a compound staple log
+  ("2 eggs and 2 slices of bacon") fell from 5 provider searches to 1, a
+  branded compound from 13 calls to 8. A compound phrase is probed whole
+  only (its fragments can never pass the whole-phrase gate), and ladder
+  fragments led by a connective or article are dropped (`_query_variants`).
 - Outage honesty: `web_nutrition_lookup.recent_failure` exposes the fresh
   failure reason; `server._unresolved_food_question` says the lookup service
   was unreachable for infrastructure reasons and otherwise asks what the food
@@ -19,12 +31,19 @@ Implementation notes (what shipped, where it differs from the text below):
 - OpenFoodFacts text search is deleted (`search_openfoodfacts`, `_relevant`);
   the barcode path (`search_openfoodfacts_by_code`) is unchanged.
 - Curated `restaurant_menu` rows are retained as a module (future cache seeds)
-  but are not consulted by the chain; the Layer 1 cache seeding itself and the
-  variant pick-list for an auto-match that also has close variants remain open.
-- Deliberately unchanged: the legacy web `/api/chat` path (`coach.py`
-  SYSTEM_PROMPT/TOOLS, `_coach_tool_handlers.lookup_food`) still lets the model
-  log a flagged "ESTIMATE" with its own macros and portion math. That is a
-  separate owner decision; only its stale provider wording was corrected.
+  but are not consulted by the chain; seeding them into the Layer 1 cache is a
+  data change for the owner to schedule.
+- Legacy web `/api/chat` path: a lookup-sourced item with a stated weight is
+  now re-scaled by the server from the resolved per-100g panel
+  (`_upgrade_estimate`), so bug 5 cannot recur there either. Deliberately
+  unchanged: that path's owner-approved allowance to log a flagged "ESTIMATE"
+  when nothing resolves (`coach.py` SYSTEM_PROMPT/TOOLS,
+  `_coach_tool_handlers.lookup_food`); only its stale provider wording was
+  corrected. The canvas and voice paths never estimate.
+- Not changed: `coach.py max_rounds=8` is a safety cap, not a per-turn cost;
+  cut it only against `mmacros.turn` telemetry. The per-call `fetch_presets`
+  (one DB read per resolved component) is left as is -- caching it risks a
+  stale miss right after save_preset for a few milliseconds of gain.
 
 ## Problem
 

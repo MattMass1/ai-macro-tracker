@@ -917,6 +917,28 @@ async def test_per_serving_without_per_100g_logs_parser_finals_as_is(monkeypatch
     )
 
 
+async def test_lookup_sourced_weight_is_rescaled_by_the_server_not_the_parser(monkeypatch):
+    """Spec 2026-10-09 bug 5: the parser returned per-100g values for a 200 g
+    portion. The server re-derives the portion from its own resolved panel."""
+    import food_lookup
+    assert "cooked white rice" not in {n.casefold() for n in srv.KNOWN_CHAT_FOOD_NAMES}
+    per_100g = food_lookup.resolve_generic_whole_food("cooked white rice")["macros_per_100g"]
+    written = _fast_path_env(monkeypatch, [
+        {"name": "cooked white rice", "grams": 200, "quantity": None, "basis": "per_100g",
+         **per_100g, "sourced_from": "lookup", "meal": "Dinner",
+         "note": "Generic: cooked white rice (parser copied the 100 g panel)"},
+    ])
+
+    response = await srv.api_chat(chat_request({"message": "200g cooked white rice"}))
+
+    assert response.status_code == 200
+    assert len(written) == 1
+    assert written[0]["calories"] == round(per_100g["calories"] * 2, 2)
+    assert written[0]["protein"] == round(per_100g["protein"] * 2, 2)
+    assert written[0]["source"].startswith("Generic: ")
+    assert written[0]["source"].endswith("rice, 200 g")
+
+
 async def test_exact_composite_food_message_persists_one_aggregate(monkeypatch):
     message = "6 oz chicken 3 oz sweet potatoes 3 oz green beans, 5 oz brown rice"
     written = _fast_path_env(monkeypatch, [

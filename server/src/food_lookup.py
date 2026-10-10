@@ -407,8 +407,13 @@ def _recent_search_hits(query: str) -> list[Any] | None:
 
 
 async def _fatsecret_search_hits(query: str) -> list[Any]:
-    """One live foods.search; the hits are remembered for did-you-mean reuse.
-    A failed or unconfigured request remembers nothing."""
+    """foods.search for this text, served from the fresh remembered hits when
+    the same text was searched moments ago (the whole-phrase probe and the
+    component pass ask the same question). A failed or unconfigured request
+    remembers nothing."""
+    remembered = _recent_search_hits(query)
+    if remembered is not None:
+        return remembered
     body = await _fatsecret_request({"method": "foods.search", "search_expression": query,
                                      "max_results": _SEARCH_MAX_RESULTS})
     if body is None:
@@ -456,11 +461,24 @@ def _fatsecret_result(query: str, food_id: str, food: Mapping[str, Any],
     return None
 
 
+def _ambiguous_variants(query: str, ranked: list[Mapping[str, Any]]) -> bool:
+    """No hit IS the item named, yet several acceptable brand-anchored hits
+    differ in identity (Fried vs Grilled, sizes): a pick, never a guess."""
+    if not ranked or _exact_name_match(query, ranked[0]):
+        return False
+    return len({frozenset(_name_identity_tokens(food)) for food in ranked}) > 1
+
+
 async def search_fatsecret(query: str) -> dict[str, Any] | None:
     """Layer 1: one search, then fetch the best-ranked acceptable hits in order
-    (at most two item fetches) until one carries usable serving macros."""
+    (at most two item fetches) until one carries usable serving macros. Close
+    variants with no exact match resolve to nothing so the coach asks which
+    (`fatsecret_name_options` lists them from the same search)."""
     hits = await _fatsecret_search_hits(query)
-    for candidate in _rank_hits(query, hits)[:_SEARCH_MAX_INSPECT]:
+    ranked = _rank_hits(query, hits)
+    if _ambiguous_variants(query, ranked):
+        return None
+    for candidate in ranked[:_SEARCH_MAX_INSPECT]:
         food_id = str(candidate["food_id"])
         food = _unwrap_food(await _fatsecret_request({"method":"food.get.v4", "food_id":food_id}))
         if food is None or not _fatsecret_relevant(query, food):
@@ -551,13 +569,22 @@ async def resolve_by_barcode(code: str) -> dict[str, Any] | None:
     return await search_openfoodfacts_by_code(code)
 
 
+_FRAGMENT_LEAD_WORDS = _CONNECTIVES | {"a", "an", "the"}
+
+
 def _query_variants(query: str) -> list[str]:
+    """Search texts for one food: the full text, then brand/flavor/generic
+    fragments. A compound phrase ("eggs and bacon") is searched whole only --
+    its fragments can never satisfy the whole-phrase identity gate -- and a
+    fragment led by a connective or article is dropped as noise."""
     text = " ".join(str(query or "").split()); words = text.split(); candidates = [text]
-    if len(words) >= 3:
+    if len(words) >= 3 and len(_split_components(text)) == 1:
         candidates += [" ".join(words[1:]), " ".join(words[2:]), " ".join(words[:2])]
         if len(words[-1]) >= 4:
             candidates.append(words[-1])
-    return list(dict.fromkeys(value for value in candidates if value))
+    return list(dict.fromkeys(
+        value for value in candidates
+        if value and value.split()[0].casefold() not in _FRAGMENT_LEAD_WORDS))
 
 
 def _quantity_value(token: str) -> float:

@@ -69,6 +69,70 @@ async def test_did_you_mean_reuses_the_failed_resolutions_search(monkeypatch):
     assert searches == ["chick fil a chicken"]
 
 
+def test_compound_phrase_is_probed_whole_and_noise_fragments_are_dropped():
+    # A compound utterance can only match a provider item as a whole; its
+    # fragments ("and 2 slices of bacon", "2 eggs") are never searched.
+    assert food_lookup._query_variants("2 eggs and 2 slices of bacon") == [
+        "2 eggs and 2 slices of bacon"]
+    assert food_lookup._query_variants("sweet and sour chicken") == ["sweet and sour chicken"]
+    # A single identity keeps its brand/flavor/generic ladder, minus fragments
+    # that start with a connective or article.
+    assert food_lookup._query_variants("chick fil a chicken sandwich") == [
+        "chick fil a chicken sandwich", "fil a chicken sandwich", "chick fil", "sandwich"]
+
+
+async def test_same_text_is_searched_once_across_probe_and_component_pass(monkeypatch):
+    fake = FakeVoiceStore()
+    monkeypatch.setattr(srv, "_client", fake)
+    srv._resolved_food_cache.clear()
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_provider_mode", lambda: "oauth1")
+    searches = []
+
+    async def request(data):
+        if data["method"] == "foods.search":
+            searches.append(data["search_expression"])
+        return {"foods": {"food": []}}
+
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_request", request)
+    token = bind_user(uuid4())
+    try:
+        result = await srv._voice_tool_handlers()["log_meal"]("once", {
+            "description": "zebra steak", "meal_type": "Dinner"})
+    finally:
+        reset_user(token)
+    assert result["status"] == "needs_clarification"
+    # The whole-phrase probe and the component resolution asked the same
+    # question; the provider heard it once.
+    assert searches == ["zebra steak"]
+
+
+async def test_close_variants_without_an_exact_match_ask_instead_of_guessing(monkeypatch):
+    _enable_fatsecret(monkeypatch)
+    fetched = []
+
+    async def request(data):
+        if data["method"] == "foods.search":
+            return {"foods": {"food": [
+                {"food_id": "f", "food_name": "Chicken Sandwich Fried", "brand_name": "Fixture Grill"},
+                {"food_id": "g", "food_name": "Chicken Sandwich Grilled", "brand_name": "Fixture Grill"},
+            ]}}
+        fetched.append(data["food_id"])
+        body = _fatsecret_get_hit("Chicken Sandwich Fried", description="1 sandwich", grams=180,
+                                 calories=440, protein=28, carbs=40, fat=18, fiber=1)
+        body["food"]["brand_name"] = "Fixture Grill"
+        return body
+
+    monkeypatch.setattr(food_lookup, "_fatsecret_request", request)
+    assert await food_lookup.search_fatsecret("fixture grill chicken sandwich") is None
+    assert fetched == []
+    assert await food_lookup.fatsecret_name_options("fixture grill chicken sandwich") == [
+        "Fixture Grill Chicken Sandwich Fried", "Fixture Grill Chicken Sandwich Grilled"]
+    # Naming the variant resolves it outright.
+    found = await food_lookup.search_fatsecret("fixture grill chicken sandwich fried")
+    assert found is not None and fetched == ["f"]
+
+
 async def test_web_recent_failure_reports_the_fresh_reason_only(monkeypatch):
     monkeypatch.setenv("OPENAI_ACCESS_TOKEN", "token")
 

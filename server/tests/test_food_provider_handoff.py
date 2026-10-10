@@ -121,17 +121,24 @@ async def test_explicit_slider_variant_and_spoken_two_do_not_repeat_pick_list(mo
     assert fake.insert_count == 1
 
 
-async def test_numeric_provider_name_is_identity_not_an_extra_item_count(monkeypatch):
-    fake, _ = provider_fixture(monkeypatch, "Fixture Candy", "3 Musketeers Bar")
+@pytest.mark.parametrize(("name", "query", "expected_calories"), [
+    ("3 Musketeers Bar", "3 Musketeers Bar", 180),
+    ("3 Musketeers Bar", "3 3 Musketeers Bars", 540),
+    ("Flavor 2", "2 Flavor 2", 360),
+])
+async def test_numeric_provider_name_is_identity_not_an_extra_item_count(
+    monkeypatch, name, query, expected_calories,
+):
+    fake, _ = provider_fixture(monkeypatch, "Fixture Candy", name)
     token = bind_user(uuid4())
     try:
         result = await srv._voice_tool_handlers()["log_meal"]("numeric-name", {
-            "description": "3 Musketeers Bar", "meal_type": "Snack",
+            "description": query, "meal_type": "Snack",
         })
     finally:
         reset_user(token)
     assert result["status"] == "committed", result
-    assert result["logged"]["calories"] == 180
+    assert result["logged"]["calories"] == expected_calories
     assert fake.insert_count == 1
 
 

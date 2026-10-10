@@ -1078,10 +1078,7 @@ async def _resolve_food_text(
             count = re.match(r"^(\d+)\s+(.+)$", remainder or text)
             identity = {"food_name": found.get("name"),
                         "brand_name": found.get("brand_name")}
-            identity_words = normalize_food_name(
-                f"{found.get('name', '')} {found.get('brand_name', '')}").split()
-            if (count and count[1] not in identity_words
-                    and _exact_name_match(count[2], identity)):
+            if count and _exact_name_match(count[2], identity):
                 quantity, unit = float(count[1]), "servings"
                 if not 0 < quantity <= 100:
                     return None

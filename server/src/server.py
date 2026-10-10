@@ -2676,12 +2676,12 @@ def _unresolved_food_question(description: str, options: list[str]) -> str:
     named as an outage, not disguised as "not found"."""
     if any(food_lookup._exact_name_match(description, {"food_name": option})
            for option in options):
-        return (f"I found the item you named, but couldn't verify its nutrition: "
+        return (f"I found the item you named, but couldn't retrieve its nutrition: "
                 f"{description}. Please try the nutrition lookup again in a moment.")
     if len(options) >= 2:
         return f"For {description}, did you mean " + " or ".join(options) + "?"
     if len(options) == 1:
-        return f"I couldn't verify {description}. Did you mean {options[0]}?"
+        return f"I couldn't find nutrition for {description}. Did you mean {options[0]}?"
     _quantity, _unit, identity = food_lookup._clean_component(description)
     reason = food_lookup.web_nutrition_lookup.recent_failure(identity or description)
     if reason == "timeout":
@@ -2690,7 +2690,7 @@ def _unresolved_food_question(description: str, options: list[str]) -> str:
     if reason in food_lookup.web_nutrition_lookup.INFRASTRUCTURE_REASONS:
         return (f"The nutrition lookup service was unreachable for {description}. "
                 "Try again in a moment.")
-    return (f"I couldn't verify {description}. What was it exactly: the brand, "
+    return (f"I couldn't find nutrition for {description}. What was it exactly: the brand, "
             "the dish, or how it was prepared?")
 
 

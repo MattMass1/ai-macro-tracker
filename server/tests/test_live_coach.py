@@ -3277,7 +3277,7 @@ async def test_voice_log_meal_resolution_failure_needs_clarification_and_writes_
 
     assert fake.insert_count == 0
     assert result["status"] == "needs_clarification"
-    assert "verify" in result["question"]
+    assert "nutrition" in result["question"]
 
 
 @pytest.mark.asyncio
@@ -3300,7 +3300,7 @@ async def test_voice_unseeded_whole_foods_cleanly_ask_for_clarification(monkeypa
         reset_user(token)
 
     assert result["status"] == "needs_clarification"
-    assert result["question"].startswith("I couldn't verify")
+    assert result["question"].startswith("I couldn't find nutrition")
     assert fake.insert_count == 0
 
 

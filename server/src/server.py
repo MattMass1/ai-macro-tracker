@@ -657,6 +657,46 @@ def get_default_exercises_for_type(workout_type: str) -> list[str]:
     return domain.get_default_exercises_for_type(workout_type)
 
 
+def _rotation_workout_type(page: Mapping[str, Any], rotation: list[str]) -> str | None:
+    """Return this row's stored rotation label, using legacy muscle derivation."""
+    types = page.get("workout_type") or []
+    if isinstance(types, str):
+        types = [types]
+    if types:
+        workout_type = next(
+            (name for name in rotation
+             if any(name.casefold() == str(value).casefold() for value in types)),
+            str(types[0]),
+        )
+    else:
+        workout_type = domain.workout_type_from_muscle(page.get("muscle_group") or [])
+    if workout_type is None:
+        return None
+    return next((name for name in rotation if name.casefold() == workout_type.casefold()), None)
+
+
+async def _last_rotation_workout(
+    before: str | None = None, *, rotation: list[str] | None = None,
+) -> tuple[str, _date] | None:
+    """Most recent split-advancing workout and its logged date."""
+    pages = await store_client().fetch_workouts()
+    rotation = list(domain.WORKOUT_ROTATION if rotation is None else rotation)
+
+    def sort_key(page: Mapping[str, Any]) -> str:
+        return page.get("date") or str(page.get("created_time") or "")[:10] or ""
+
+    pages.sort(key=sort_key, reverse=True)
+    for page in pages:
+        logged = sort_key(page)
+        if before is not None and logged >= before:
+            continue
+        workout_type = _rotation_workout_type(page, rotation)
+        logged_day = _as_day(logged)
+        if workout_type is not None and logged_day is not None:
+            return workout_type, logged_day
+    return None
+
+
 async def last_workout_type(before: str | None = None, *, rotation=None) -> str | None:
     """The workout type of the most recent split-advancing entry.
 
@@ -664,33 +704,8 @@ async def last_workout_type(before: str | None = None, *, rotation=None) -> str 
     back to `created_time`. Old rows only carry Muscle Group, so the type is
     derived via the shared mapping when the Workout type tag is empty.
     """
-    pages = await store_client().fetch_workouts()
-    rotation = domain.WORKOUT_ROTATION if rotation is None else rotation
-
-    def sort_key(page: Mapping[str, Any]) -> str:
-        return (
-            page.get("date") or str(page.get("created_time") or "")[:10]
-            or ""
-        )
-
-    pages.sort(key=sort_key, reverse=True)
-    for page in pages:
-        if before is not None and sort_key(page) >= before:
-            continue
-        types = page.get("workout_type") or []
-        if isinstance(types, str):
-            types = [types]
-        if types:
-            workout_type = next(
-                (t for t in rotation if t in types),
-                types[0],
-            )
-        else:
-            muscles = page.get("muscle_group") or []
-            workout_type = domain.workout_type_from_muscle(muscles)
-        if workout_type in rotation:
-            return workout_type
-    return None
+    found = await _last_rotation_workout(before, rotation=rotation)
+    return found[0] if found is not None else None
 
 
 def _as_day(value: Any) -> _date | None:
@@ -730,7 +745,9 @@ async def _resolve_today_session() -> tuple[int, str, list[dict[str, Any]], bool
     Returns (rotation_index, today_type, exercises, done). The index walks the
     plan rotation past the last logged split-advancing workout, overlaid by the
     per-user day-state: a completion recorded today pins today's type and marks
-    it done; a completion from an earlier day advances the rotation. Raises
+    it done; a completion from an earlier day advances after a newer log when
+    one exists. A null-dated state is an explicit queue and remains authoritative
+    because it has no completion date against which a log can be newer. Raises
     MacroError when no plan exists yet (the coach should onboard first).
     """
     today = domain.effective_date()
@@ -756,7 +773,11 @@ async def _resolve_today_session() -> tuple[int, str, list[dict[str, Any]], bool
             if done_date == today:
                 index, done = int(stored_index), True
             elif done_date is not None and done_date < today:
-                index = (int(stored_index) + 1) % len(rotation)
+                latest = await _last_rotation_workout(today.isoformat(), rotation=rotation)
+                if latest is not None and latest[1] > done_date:
+                    index = (rotation.index(latest[0]) + 1) % len(rotation)
+                else:
+                    index = (int(stored_index) + 1) % len(rotation)
             else:
                 index = int(stored_index)
     if index is None:
@@ -773,10 +794,7 @@ async def _resolve_today_session() -> tuple[int, str, list[dict[str, Any]], bool
         for row in await fetch_workouts(today):
             if str(row.get("date") or "") != today.isoformat():
                 continue
-            types = row.get("workout_type") or []
-            if isinstance(types, str):
-                types = [types]
-            match = next((name for name in rotation if name in types), None)
+            match = _rotation_workout_type(row, rotation)
             if match is not None:
                 index = rotation.index(match)
                 break

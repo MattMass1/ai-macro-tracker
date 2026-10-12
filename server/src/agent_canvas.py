@@ -18,7 +18,8 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from auth import current_user_id
 from coach import run_agent
-from domain import WORKOUT_TYPES, effective_day_window, effective_date, validate_workout_plan
+from domain import (WORKOUT_TYPES, effective_day_window, effective_date,
+                    validate_workout_plan, workout_type_from_muscle)
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from copy import deepcopy
@@ -314,6 +315,7 @@ class AgentSession:
     workout: dict | None = None
     acknowledged_rows: set[str] = field(default_factory=set)
     approval: dict | None = None
+    copy_clarification: dict | None = None
     setup_incomplete: bool = False
     setup_synced_at: float = 0.0
 
@@ -700,6 +702,12 @@ class CanvasService:
                 presented = result.get("status") == "awaiting_confirmation"
                 return result
 
+            async def copy_last_session(args):
+                nonlocal presented
+                result = await self._copy_last_session(session, args)
+                presented = result.get("status") == "awaiting_confirmation"
+                return result
+
             # Completed sets save immediately (like meals); plan changes above
             # still require a native Confirm tap. Each write is verified by
             # readback before the session credits it. One turn, one write per
@@ -736,7 +744,8 @@ class CanvasService:
                         "present_surface": present_surface, "request_exercise_swap": request_swap,
                         "request_plan_edit": request_plan_edit,
                         "propose_today_workout": propose_today_workout,
-                        "propose_tomorrow_workout": propose_tomorrow_workout}
+                        "propose_tomorrow_workout": propose_tomorrow_workout,
+                        "copy_last_session": copy_last_session}
             base = self.coach_factory()
             if "log_workout" in base:
                 handlers["log_workout"] = log_workout
@@ -745,7 +754,7 @@ class CanvasService:
                 handlers["complete_today_session"] = complete_today_session
             for name in ("get_today", "get_today_session", "get_library", "get_range_summary",
                          "get_display_name", "get_metrics", "get_targets", "get_workout_plan",
-                         "get_workout_outlook"):
+                         "get_workout_outlook", "get_recent_workouts"):
                 if name in base:
                     handlers[name] = base[name]
             for name in ("set_display_name", "set_metrics", "set_workout_plan"):
@@ -862,6 +871,15 @@ class CanvasService:
                 "input_schema": {"type": "object", "properties": {
                     "workout_type": {"type": "string", "minLength": 1, "maxLength": 80}},
                     "required": ["workout_type"], "additionalProperties": False}})
+            catalog.append({"name": "copy_last_session", "description":
+                "Read the latest dated logged session of this workout type and preview its complete distinct "
+                "exercise list for TODAY. Use for copy/repeat my last Push/Pull/etc session. Nothing is saved "
+                "until native Confirm. If the tool asks which ambiguous exercise was meant, call it again with "
+                "that one exercise_resolution; the rest of the session is retained.",
+                "input_schema": {"type": "object", "properties": {
+                    "workout_type": {"type": "string", "minLength": 1, "maxLength": 80},
+                    "exercise_resolution": {"type": "string", "minLength": 1, "maxLength": 160}},
+                    "required": ["workout_type"], "additionalProperties": False}})
             # Chat Completions rejects top-level combinators (HTTP 400 for the whole turn).
             # Handlers already enforce these either/or requirements server-side.
             catalog = [{**tool, "input_schema": {key: value for key, value in tool["input_schema"].items()
@@ -954,6 +972,7 @@ class CanvasService:
             if not draft or draft["id"] != action.get("reference"):
                 raise ValueError("Approval is no longer available")
             if name == "cancel":
+                session.copy_clarification = None
                 session.approval = None
                 session.canvas.dismiss("approval", cancel_approval=True)
                 if draft.get("kind") == "setup":
@@ -1228,6 +1247,7 @@ class CanvasService:
 
     async def _propose_tomorrow_workout(self, session, args):
         """Copy one saved routine day into tomorrow, pending native confirmation."""
+        session.copy_clarification = None
         if not isinstance(args, Mapping) or set(args) != {"workout_type"}:
             raise ValueError("Provide workout_type only")
         if session.approval:
@@ -1288,13 +1308,14 @@ class CanvasService:
                  "detail": f"{ex.get('sets', '?')} sets × {ex.get('reps', '?')}"}
                 for ex in plan["exercises"]]
 
-    async def _propose_today_workout(self, session, args):
+    async def _propose_today_workout(self, session, args, *, allow_unlisted_names=frozenset()):
         """Stage a today-only workout plan. Nothing is written until native Confirm.
 
         The model supplies the complete proposed list for TODAY (create, swap,
         shorten or remove). The recurring routine and other days never change.
         Exercises already trained today are kept so completed work is preserved.
         """
+        session.copy_clarification = None
         if not isinstance(args, Mapping) or set(args) - {"workout_type", "exercises"}:
             raise ValueError("Provide workout_type and exercises only")
         if session.approval:
@@ -1346,6 +1367,8 @@ class CanvasService:
         for exercise in proposed:
             resolved, suggestions = resolve_stored_name(exercise["name"], library_names)
             if resolved is None:
+                if exercise["name"].casefold() in allow_unlisted_names:
+                    continue
                 return {"status": "needs_clarification",
                         "question": _name_choice_question(exercise["name"], suggestions, "your exercise library")}
             exercise["name"] = resolved
@@ -1394,6 +1417,116 @@ class CanvasService:
              "actions": [{"action": "confirm", "reference": draft_id}, {"action": "cancel", "reference": draft_id}]},
         ])
         return {"status": "awaiting_confirmation", "detail": session.approval["detail"]}
+
+    async def _copy_last_session(self, session, args):
+        """Stage the tenant's complete latest dated session of one type."""
+        if (not isinstance(args, Mapping)
+                or set(args) - {"workout_type", "exercise_resolution"}):
+            raise ValueError("Provide workout_type and optionally exercise_resolution only")
+        requested = args.get("workout_type")
+        if not isinstance(requested, str) or not _WORKOUT_LABEL.fullmatch(requested.strip()):
+            raise ValueError("Invalid workout label: use 1-80 safe display characters")
+        requested = requested.strip()
+        store = self.store_factory()
+        rows = await store.fetch_workouts()
+
+        def row_type(row):
+            values = row.get("workout_type") or []
+            if isinstance(values, str):
+                values = [values]
+            value = (next((str(item) for item in values
+                           if str(item).casefold() == requested.casefold()), None)
+                     if values else workout_type_from_muscle(row.get("muscle_group") or []))
+            return value is not None and value.casefold() == requested.casefold()
+
+        dated = []
+        today = effective_date()
+        for index, row in enumerate(rows):
+            if not isinstance(row, Mapping) or not row_type(row):
+                continue
+            raw_day = str(row.get("date") or str(row.get("created_time") or "")[:10])
+            try:
+                logged_day = date.fromisoformat(raw_day)
+            except ValueError:
+                continue
+            if logged_day <= today:
+                dated.append((logged_day, index, row))
+        if not dated:
+            session.copy_clarification = None
+            return {"status": "not_found",
+                    "message": f"No logged {requested} session was found. Nothing was staged."}
+        latest = max(item[0] for item in dated)
+        selected = [(index, row) for day, index, row in dated if day == latest]
+        if all(row.get("created_time") for _, row in selected):
+            selected.sort(key=lambda item: str(item[1]["created_time"]))
+        else:
+            selected.sort(key=lambda item: item[0])
+        grouped = OrderedDict()
+        for _, row in selected:
+            name = str(row.get("exercise") or "").strip()
+            sets = row.get("sets") or []
+            if not name or not isinstance(sets, list) or not sets:
+                continue
+            key = name.casefold()
+            if key not in grouped:
+                grouped[key] = [name, []]
+            grouped[key][1].extend(item for item in sets if isinstance(item, Mapping))
+        if not grouped:
+            session.copy_clarification = None
+            return {"status": "not_found",
+                    "message": f"No logged exercises were found in the latest {requested} session. Nothing was staged."}
+        library = [row.get("name") for row in await store.fetch_workout_library()
+                   if isinstance(row, Mapping) and isinstance(row.get("name"), str)]
+        source_identity = deepcopy([(latest.isoformat(), row) for _, row in selected])
+        target_day = today.isoformat()
+        pending = session.copy_clarification
+        supplied = args.get("exercise_resolution")
+        replacements = {}
+        if supplied is not None:
+            if (not pending or pending.get("workout_type", "").casefold() != requested.casefold()
+                    or pending.get("source_identity") != source_identity
+                    or pending.get("target_day") != target_day
+                    or not isinstance(supplied, str) or supplied not in pending["suggestions"]
+                    or supplied not in library):
+                session.copy_clarification = None
+                raise ValueError("That exercise clarification is no longer available")
+            replacements = deepcopy(pending.get("resolutions") or {})
+            replacements[pending["exercise"]] = supplied
+        elif pending:
+            session.copy_clarification = None
+        exercises = []
+        unlisted = set()
+        merged = OrderedDict()
+        for logged_name, logged_sets in grouped.values():
+            name = replacements.get(logged_name)
+            if name is None:
+                resolved, suggestions = resolve_stored_name(logged_name, library)
+                if resolved is not None:
+                    name = resolved
+                elif suggestions:
+                    session.copy_clarification = {"workout_type": requested,
+                                                  "exercise": logged_name,
+                                                  "suggestions": suggestions,
+                                                  "resolutions": replacements,
+                                                  "source_identity": source_identity,
+                                                  "target_day": target_day}
+                    return {"status": "needs_clarification",
+                            "question": _name_choice_question(logged_name, suggestions, "your exercise library")}
+                else:
+                    name = logged_name
+                    unlisted.add(name.casefold())
+            key = name.casefold()
+            if key not in merged:
+                merged[key] = [name, []]
+            merged[key][1].extend(logged_sets)
+        for name, logged_sets in merged.values():
+            values = [f'{float(item.get("reps") or 0):g}' for item in logged_sets[:10]]
+            exercises.append({"name": name, "sets": min(len(logged_sets), 10),
+                              "reps": ", ".join(values)[:40]})
+        session.copy_clarification = None
+        return await self._propose_today_workout(
+            session, {"workout_type": requested, "exercises": exercises},
+            allow_unlisted_names=frozenset(unlisted))
 
     async def _log_workout(self, session, args, logged):
         """Immediate, verified set logging for voice and text.
@@ -1643,6 +1776,8 @@ Read via supplied tools when answering numbers. Do not imply opening a logger sa
 For today's workout, what is left, or what is next, call get_workout_outlook; say planned vs logged.
 To create, swap, shorten or remove exercises for today use propose_today_workout (today only by
 default; the saved routine is unchanged; native Confirm required; use history only for load guidance).
+For copy/repeat my last Push/Pull/etc day, call copy_last_session. It reads the latest dated logged
+session and stages its full exercise set for today; never reconstruct it from presets, PRs or one exercise.
 For 'change tomorrow to Pull/Legs/XYZ day', call propose_tomorrow_workout with the user's day name.
 It copies a saved routine day to tomorrow only and requires native Confirm. Never use today's tool
 or rewrite the routine for tomorrow. Other future dates and delayed routine changes are unsupported;

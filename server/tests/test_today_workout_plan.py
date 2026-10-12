@@ -290,16 +290,240 @@ async def test_canvas_catalog_and_instructions_offer_today_tools_by_default():
         return "ok", []
     service = CanvasService(store_factory=lambda: store, food_factory=lambda: {},
                             coach_factory=lambda: {"get_today_session": _service(store).coach_factory()["get_today_session"],
-                                                   "get_workout_outlook": lambda _a: None}, agent=agent)
+                                                   "get_workout_outlook": lambda _a: None,
+                                                   "get_recent_workouts": lambda _a: None}, agent=agent)
     scope = bind_user(uuid4())
     try:
         await service.turn(str(uuid4()), str(uuid4()), "What's my workout today?", adapter="voice")
     finally:
         reset_user(scope)
-    assert {"propose_today_workout", "get_workout_outlook"} <= set(seen["names"])
-    assert {"propose_today_workout", "get_workout_outlook"} <= seen["handlers"]
+    assert {"propose_today_workout", "get_workout_outlook", "copy_last_session",
+            "get_recent_workouts"} <= set(seen["names"])
+    assert {"propose_today_workout", "get_workout_outlook", "copy_last_session",
+            "get_recent_workouts"} <= seen["handlers"]
     assert "propose_today_workout" in CANVAS_INSTRUCTIONS
+    assert "copy_last_session" in CANVAS_INSTRUCTIONS
     assert "today only" in CANVAS_INSTRUCTIONS.casefold()
+
+
+@pytest.mark.asyncio
+async def test_copy_last_session_stages_full_latest_dated_session_and_writes_only_on_confirm():
+    store = CanvasDayStore()
+    original_plan = deepcopy(store.plan)
+    store.state = {"rotation_index": 1, "done_date": "2026-10-01"}
+    original_state = deepcopy(store.state)
+    store.workouts = [
+        {"id": "old", "exercise": "Face Pull", "workout_type": ["Push"], "date": "2026-10-01",
+         "sets": [{"weight": 20, "reps": 15}]},
+        {"id": "a", "exercise": "Bench Press", "workout_type": ["Push"], "date": "2026-10-09",
+         "sets": [{"weight": 135, "reps": 8}, {"weight": 135, "reps": 7}]},
+        {"id": "b", "exercise": "Incline Dumbbell Press", "workout_type": ["push"], "date": "2026-10-09",
+         "sets": [{"weight": 45, "reps": 10}, {"weight": 45, "reps": 9}, {"weight": 40, "reps": 12}]},
+    ]
+    original_history = deepcopy(store.workouts)
+    service = _service(store)
+    scope = bind_user(uuid4())
+    sid = str(uuid4())
+    try:
+        session = service.session(sid, create=True)
+        result = await service._copy_last_session(session, {"workout_type": "Push"})
+        assert result["status"] == "awaiting_confirmation"
+        copied = session.approval["after"]["exercises"]
+        assert [{key: item[key] for key in ("name", "sets", "reps")} for item in copied] == [
+            {"name": "Bench Press", "sets": 2, "reps": "8, 7"},
+            {"name": "Incline Dumbbell Press", "sets": 3, "reps": "10, 9, 12"},
+        ]
+        assert store.day_plan_writes == []
+        assert store.plan == original_plan and store.workouts == original_history and store.state == original_state
+        await service.action(sid, {"action": "confirm", "reference": session.approval["id"]})
+        assert len(store.day_plan_writes) == 1
+        assert store.day_plan_writes[0] == {
+            "day": domain.effective_date().isoformat(), "type": "Push",
+            "exercises": [
+                {"name": "Bench Press", "sets": 2, "reps": "8, 7", "rest_sec": 90},
+                {"name": "Incline Dumbbell Press", "sets": 3, "reps": "10, 9, 12"},
+            ],
+            "revision": 1, "operation_id": store.day_plan_writes[0]["operation_id"],
+        }
+        assert store.plan == original_plan and store.workouts == original_history and store.state == original_state
+    finally:
+        reset_user(scope)
+
+
+@pytest.mark.asyncio
+async def test_copy_last_session_has_no_stage_when_history_has_no_requested_type():
+    store = CanvasDayStore()
+    store.workouts = [{"id": "x", "exercise": "Squat", "workout_type": ["Legs"],
+                       "date": "2026-10-09", "sets": [{"weight": 135, "reps": 8}]}]
+    service = _service(store)
+    scope = bind_user(uuid4())
+    try:
+        session = service.session(str(uuid4()), create=True)
+        result = await service._copy_last_session(session, {"workout_type": "Push"})
+        assert result["status"] == "not_found"
+        assert session.approval is None and store.day_plan_writes == []
+    finally:
+        reset_user(scope)
+
+
+@pytest.mark.asyncio
+async def test_copy_last_session_clarification_resolves_one_item_and_keeps_full_session():
+    store = CanvasDayStore()
+    store.library = []
+    store.fetch_workout_library = lambda: _async_value([
+        {"name": "Cable Row"}, {"name": "Machine Row"}, {"name": "Face Pull"}])
+    store.workouts = [
+        {"id": "a", "exercise": "Row", "workout_type": ["Pull"], "date": "2026-10-09",
+         "sets": [{"weight": 90, "reps": 10}]},
+        {"id": "b", "exercise": "Face Pull", "workout_type": ["Pull"], "date": "2026-10-09",
+         "sets": [{"weight": 20, "reps": 15}]},
+    ]
+    service = _service(store)
+    scope = bind_user(uuid4())
+    try:
+        session = service.session(str(uuid4()), create=True)
+        first = await service._copy_last_session(session, {"workout_type": "Pull"})
+        assert first["status"] == "needs_clarification" and "Cable Row" in first["question"]
+        second = await service._copy_last_session(
+            session, {"workout_type": "Pull", "exercise_resolution": "Cable Row"})
+        assert second["status"] == "awaiting_confirmation"
+        assert [x["name"] for x in session.approval["after"]["exercises"]] == ["Cable Row", "Face Pull"]
+    finally:
+        reset_user(scope)
+
+
+@pytest.mark.asyncio
+async def test_copy_last_session_accumulates_two_ambiguous_resolutions():
+    store = CanvasDayStore()
+    store.fetch_workout_library = lambda: _async_value([
+        {"name": "Bench Press"}, {"name": "Shoulder Press"},
+        {"name": "Cable Fly"}, {"name": "Dumbbell Fly"}])
+    store.workouts = [
+        {"id": "press", "exercise": "Press", "workout_type": ["Push"], "date": "2026-10-09",
+         "sets": [{"weight": 90, "reps": 8}]},
+        {"id": "fly", "exercise": "Fly", "workout_type": ["Push"], "date": "2026-10-09",
+         "sets": [{"weight": 20, "reps": 12}]},
+    ]
+    service = _service(store)
+    scope = bind_user(uuid4())
+    try:
+        session = service.session(str(uuid4()), create=True)
+        assert (await service._copy_last_session(session, {"workout_type": "Push"}))["status"] == "needs_clarification"
+        second = await service._copy_last_session(
+            session, {"workout_type": "Push", "exercise_resolution": "Bench Press"})
+        assert second["status"] == "needs_clarification" and "Cable Fly" in second["question"]
+        third = await service._copy_last_session(
+            session, {"workout_type": "Push", "exercise_resolution": "Cable Fly"})
+        assert third["status"] == "awaiting_confirmation"
+        assert [x["name"] for x in session.approval["after"]["exercises"]] == ["Bench Press", "Cable Fly"]
+    finally:
+        reset_user(scope)
+
+
+@pytest.mark.asyncio
+async def test_copy_last_session_includes_legacy_rows_and_merges_canonical_duplicates():
+    store = CanvasDayStore()
+    store.workouts = [
+        {"id": "a", "exercise": "Bench Press", "workout_type": [], "muscle_group": ["Push"],
+         "date": "2026-10-09", "sets": [{"weight": 135, "reps": 8}]},
+        {"id": "b", "exercise": "bench press", "workout_type": ["push"], "muscle_group": [],
+         "date": "2026-10-09", "sets": [{"weight": 135, "reps": 7}]},
+        {"id": "c", "exercise": "Bench", "workout_type": ["Push"], "muscle_group": [],
+         "date": "2026-10-09", "sets": [{"weight": 115, "reps": 10}]},
+    ]
+    service = _service(store)
+    scope = bind_user(uuid4())
+    try:
+        session = service.session(str(uuid4()), create=True)
+        result = await service._copy_last_session(session, {"workout_type": "Push"})
+        assert result["status"] == "awaiting_confirmation"
+        assert session.approval["after"]["exercises"] == [
+            {"name": "Bench Press", "sets": 3, "reps": "8, 7, 10", "rest_sec": 90}]
+    finally:
+        reset_user(scope)
+
+
+@pytest.mark.asyncio
+async def test_copy_last_session_ignores_future_history():
+    store = CanvasDayStore()
+    store.workouts = [
+        {"id": "past", "exercise": "Bench Press", "workout_type": ["Push"], "date": "2026-10-09",
+         "sets": [{"weight": 100, "reps": 8}]},
+        {"id": "future", "exercise": "Incline Dumbbell Press", "workout_type": ["Push"],
+         "date": "2999-10-20", "sets": [{"weight": 50, "reps": 12}]},
+    ]
+    service = _service(store)
+    scope = bind_user(uuid4())
+    try:
+        session = service.session(str(uuid4()), create=True)
+        await service._copy_last_session(session, {"workout_type": "Push"})
+        assert [x["name"] for x in session.approval["after"]["exercises"]] == ["Bench Press"]
+    finally:
+        reset_user(scope)
+
+
+@pytest.mark.asyncio
+async def test_copy_clarification_is_invalidated_by_source_change_cancel_and_superseding_intent():
+    store = CanvasDayStore()
+    store.fetch_workout_library = lambda: _async_value([{"name": "Cable Row"}, {"name": "Machine Row"},
+                                                        {"name": "Face Pull"}])
+    store.workouts = [{"id": "old", "exercise": "Row", "workout_type": ["Pull"],
+                       "date": "2026-10-09", "sets": [{"weight": 90, "reps": 10}]}]
+    service = _service(store)
+    scope = bind_user(uuid4())
+    try:
+        sid = str(uuid4())
+        session = service.session(sid, create=True)
+        await service._copy_last_session(session, {"workout_type": "Pull"})
+        store.workouts.append({"id": "new", "exercise": "Row", "workout_type": ["Pull"],
+                               "date": "2026-10-10", "sets": [{"weight": 95, "reps": 8}]})
+        with pytest.raises(ValueError, match="no longer available"):
+            await service._copy_last_session(
+                session, {"workout_type": "Pull", "exercise_resolution": "Cable Row"})
+        assert session.approval is None
+
+        await service._copy_last_session(session, {"workout_type": "Pull"})
+        await service._propose_today_workout(session, {
+            "workout_type": "Pull", "exercises": [{"name": "Face Pull", "sets": 2, "reps": "15"}]})
+        assert session.copy_clarification is None
+        session.copy_clarification = {"stale": True}
+        await service.action(sid, {"action": "cancel", "reference": session.approval["id"]})
+        assert session.copy_clarification is None
+
+        await service._copy_last_session(session, {"workout_type": "Pull"})
+        await service._propose_tomorrow_workout(session, {"workout_type": "Push"})
+        assert session.copy_clarification is None
+    finally:
+        reset_user(scope)
+
+
+async def _async_value(value):
+    return value
+
+
+@pytest.mark.asyncio
+async def test_copy_last_session_reads_only_the_bound_tenants_history():
+    class TenantStore(CanvasDayStore):
+        def __init__(self):
+            super().__init__()
+            self.by_user = {}
+
+        async def fetch_workouts(self, start=None, end=None, exercise=None):
+            return deepcopy(self.by_user.get(current_user_id(), []))
+
+    store = TenantStore()
+    owner, other = uuid4(), uuid4()
+    store.by_user[owner] = [{"id": "private", "exercise": "Bench Press",
+                             "workout_type": ["Push"], "date": "2026-10-09",
+                             "sets": [{"weight": 135, "reps": 8}]}]
+    service = _service(store)
+    scope = bind_user(other)
+    try:
+        session = service.session(str(uuid4()), create=True)
+        result = await service._copy_last_session(session, {"workout_type": "Push"})
+        assert result["status"] == "not_found" and session.approval is None
+    finally:
+        reset_user(scope)
 
 
 @pytest.mark.asyncio

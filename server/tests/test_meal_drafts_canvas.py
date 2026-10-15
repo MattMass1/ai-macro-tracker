@@ -141,3 +141,11 @@ def test_drafts_instructions_drop_legacy_food_rules_cleanly():
     assert "confirmation above still applies" not in _DRAFTS_BASE_INSTRUCTIONS
     from meal_drafts import MEAL_DRAFT_INSTRUCTIONS
     assert "do NOT send add again" in MEAL_DRAFT_INSTRUCTIONS
+
+
+def test_duplicate_guard_ignores_formatting_differences():
+    from agent_canvas import _meal_call_fingerprint
+    a = {"add": [{"description": "Banana", "quantity": 1}, {"description": "apple"}]}
+    b = {"add": [{"description": "apple", "unit": None}, {"description": " banana ", "quantity": 1.0}]}
+    assert _meal_call_fingerprint(a) == _meal_call_fingerprint(b)
+    assert _meal_call_fingerprint(a) != _meal_call_fingerprint({"add": [{"description": "banana", "quantity": 2}]})

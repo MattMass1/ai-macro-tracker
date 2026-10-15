@@ -442,6 +442,7 @@ async def test_legacy_preset_quantity_amend_scales_its_panel(env):
         reset_user(token)
     assert logged["logged"]["calories"] == 200
     assert amended["status"] == "amended" and amended["logged"]["calories"] == 400
+    assert amended["logged"]["name"] == "Usual protein shake x2"
 
 
 @pg

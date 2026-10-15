@@ -562,6 +562,9 @@ class MealDrafts:
         if draft.get("usual_label") and all((c["item"].get("field_origins") or {}).get("all") in
                                             {"saved_usual", "saved_preset"} for c in components):
             name = f"Usual {draft['usual_label']}"
+            counts = [c["item"].get("quantity") for c in components]
+            if len(components) == 1 and counts[0] not in (None, 1, 1.0):
+                name += f" x{float(counts[0]):g}"
         sources = [str(c["resolution"].get("macro_source") or "") for c in components]
         source = sources[0] if len(sources) == 1 else "Composite: " + "; ".join(sources)
         allow_estimate = any("estimate" in s.casefold() for s in sources) and all(
@@ -692,7 +695,9 @@ class MealDrafts:
         try:
             values, _ = self._values(draft, live)
         except (domain.MacroError, ValueError, TypeError) as exc:
-            return {"status": "failed", "confirmation": str(exc)}
+            logger.warning("usual values rejected: %s", exc)
+            return {"status": "failed",
+                    "confirmation": "I couldn't put together usable numbers for that usual, so I didn't save it."}
         saved = await self.store.save_usual(
             label=f"Usual {label}", items=items, totals={k: values[k] for k in MACROS},
             macro_source=values["macro_source"], meal=values["meal"])

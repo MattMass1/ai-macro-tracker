@@ -628,8 +628,7 @@ class CanvasService:
                 # One turn never creates the same new meal twice (e.g. the model
                 # re-sends `add` after an unknown save outcome).
                 new_meal = not any(args.get(k) for k in ("draft_ref", "amend_ref", "repeat_ref", "save_usual"))
-                fingerprint = json.dumps({k: args.get(k) for k in ("add", "intent", "meal_type")},
-                                         sort_keys=True, default=str) if new_meal else None
+                fingerprint = _meal_call_fingerprint(args) if new_meal else None
                 if fingerprint in turn_meals:
                     return turn_meals[fingerprint]
                 result = await drafts.handle(args, session_ref=f"canvas:{session_id}")
@@ -1880,6 +1879,31 @@ have 400 calories and 40 g of protein." Use the actual returned totals, never th
 numbers as a fallback. Preserve the exact web-estimate consent question and unknown-save guidance.
 Report only verified tool outcomes. Reply in at most two short sentences, no emoji.
 """
+
+def _meal_call_fingerprint(args) -> str:
+    """Normalized identity of a new-meal call, so a re-sent call matches even
+    when the model writes 1 vs 1.0, adds null fields or reorders items."""
+    def item(spec):
+        if not isinstance(spec, Mapping):
+            return str(spec)
+        out = {}
+        for key, value in spec.items():
+            if value in (None, "", False):
+                continue
+            if key == "quantity":
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    pass
+            elif isinstance(value, str):
+                value = " ".join(value.split()).casefold()
+            out[key] = value
+        return json.dumps(out, sort_keys=True, default=str)
+    added = args.get("add") if isinstance(args.get("add"), list) else []
+    return json.dumps({"add": sorted(item(spec) for spec in added),
+                       "intent": args.get("intent") or "consume",
+                       "meal_type": str(args.get("meal_type") or "").casefold()}, sort_keys=True)
+
 
 _LEGACY_FOOD_RULES_START = "Explicit food consumption/logging: call log_meal"
 _LEGACY_FOOD_RULES_END = "needs_clarification: ask the provided question. unknown: ask to check data, NOT to retry.\n"

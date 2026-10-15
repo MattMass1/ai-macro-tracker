@@ -41,6 +41,9 @@ _WEIGHT_BASIS_FOODS = re.compile(
     r"\b(beef|chicken|turkey|pork|steak|salmon|tuna|fish|shrimp|lamb|bison|venison|"
     r"tilapia|cod|rice|pasta|noodles|quinoa)\b", re.IGNORECASE)
 _PREP_WORD = re.compile(r"\b(raw|uncooked|cooked)\b", re.IGNORECASE)
+# Words that already say the food was cooked; the weight is then a cooked weight.
+_COOKED_WORD = re.compile(r"\b(cooked|grilled|baked|roasted|fried|pan[- ]?browned|broiled|"
+                          r"boiled|steamed|seared|smoked|sauteed|sautéed)\b", re.IGNORECASE)
 _LEADING_FILLER = re.compile(r"^(?:(?:my|a|an|the|some)\s+)+", re.IGNORECASE)
 
 Resolver = Callable[[Mapping[str, Any]], Awaitable[dict[str, Any] | None]]
@@ -105,6 +108,7 @@ def item_text(item: Mapping[str, Any]) -> str:
 def needs_weight_basis(item: Mapping[str, Any]) -> bool:
     return (item.get("unit") in MASS_UNITS and not item.get("preparation")
             and not _PREP_WORD.search(item["description"])
+            and not _COOKED_WORD.search(item["description"])
             and bool(_WEIGHT_BASIS_FOODS.search(item["description"])))
 
 
@@ -112,7 +116,9 @@ def default_meal_type(now: datetime) -> str:
     """Meal slot from the local clock when the user didn't name one."""
     local = now.astimezone(domain.LOCAL_TZ)
     minutes = local.hour * 60 + local.minute
-    if 4 * 60 <= minutes < 10 * 60 + 30:
+    if minutes < 4 * 60:
+        return "Snack"  # after midnight, before the 4am logging-day rollover
+    if minutes < 10 * 60 + 30:
         return "Breakfast"
     if minutes < 15 * 60:
         return "Lunch"
@@ -147,7 +153,12 @@ def _persistable(resolution: Mapping[str, Any]) -> dict[str, Any]:
         "provider", "external_id", "verification_state", "cache_allowed", "source_host")
         if attribution.get(k) is not None}
     kept["fingerprint"] = _fingerprint(resolution)
-    if attribution.get("provider") == "FatSecret" and not attribution.get("cache_allowed"):
+    nested = [a for a in (resolution.get("component_attributions") or []) if isinstance(a, Mapping)]
+    nested += [m["attribution"] for m in (resolution.get("component_metadata") or [])
+               if isinstance(m, Mapping) and isinstance(m.get("attribution"), Mapping)]
+    unlicensed = any(a.get("provider") == "FatSecret" and not a.get("cache_allowed")
+                     for a in [attribution, *nested])
+    if unlicensed:
         for key in MACROS:
             kept.pop(key, None)
         kept["refresh"] = True
@@ -208,6 +219,14 @@ class MealDrafts:
         draft = await self._open_draft(args, session_ref)
         if isinstance(draft, dict) and draft.get("status"):
             return draft  # conflict / not found message
+        if draft.get("_new"):
+            # Validate the edits on the in-memory draft first, so a bad edit
+            # never leaves a stray open (or repeat-copy) draft behind.
+            await self._apply_edits(draft, args)
+            draft.pop("_new")
+            draft["_edits_applied"] = True
+            draft = {**(await self.store.create_meal_draft(draft)), "_edits_applied": True,
+                     "items": draft["items"]}
         expected = int(draft["revision"])
         if args.get("cancel"):
             if draft["state"] not in OPEN_STATES:
@@ -221,7 +240,8 @@ class MealDrafts:
             return {"status": "conflict", "draft_ref": str(draft["id"]),
                     "confirmation": "That meal is already logged. To change it, use amend_ref."}
 
-        await self._apply_edits(draft, args)
+        if not draft.pop("_edits_applied", False):
+            await self._apply_edits(draft, args)
         await self._resolve_items(draft)
         self._decide_state(draft)
         # Numbers fetched this turn but not storable (unlicensed panels) are
@@ -262,6 +282,13 @@ class MealDrafts:
         }
         if source is not None:
             draft["items"] = [{**item, "id": str(uuid4())} for item in source["items"]]
+            for item in draft["items"]:
+                resolution = item.get("resolution") or {}
+                # Consent covers one logged meal, not future repeats; unlicensed
+                # panels were never stored, so they are fetched again.
+                if args.get("repeat_ref") and (resolution.get("estimate_provenance") == "server_web_estimate"
+                                               or resolution.get("refresh")):
+                    self._invalidate(item)
             draft["meal_type"], draft["meal_type_origin"] = source.get("meal_type"), source.get("meal_type_origin")
             draft["usual_label"] = source.get("usual_label")
             if args.get("amend_ref"):
@@ -269,10 +296,19 @@ class MealDrafts:
                 if entry is None or int(entry["entry_revision"]) != int(source["committed_entry_revision"]):
                     return {"status": "conflict",
                             "confirmation": "That logged meal was changed or removed since. Check Today first."}
+                if draft["meal_type_origin"] != "user":
+                    # A correction keeps the slot the entry was logged in.
+                    draft["meal_type"], draft["meal_type_origin"] = entry["meal"], "logged"
                 draft.update(parent_draft_id=str(source["id"]), log_date=source["log_date"],
                              amends_entry_id=str(source["committed_entry_id"]),
                              amends_entry_revision=int(source["committed_entry_revision"]))
-        return await self.store.create_meal_draft(draft)
+            else:
+                # A repeat is a new meal now: its slot follows the current time
+                # unless the user names one (an amend keeps the logged slot).
+                if draft["meal_type_origin"] != "user":
+                    draft["meal_type"] = draft["meal_type_origin"] = None
+        draft["_new"] = True
+        return draft
 
     # ------------------------------------------------------------------ #
     # Edits
@@ -336,7 +372,22 @@ class MealDrafts:
             fields = {k: v for k, v in spec.items() if k != "item_ref"}
             if not fields or set(fields) - {"description", "quantity", "unit", "size", "preparation"}:
                 raise DraftInputError("Edits may change description, quantity, unit, size or preparation")
-            self._apply_fields(self._item(draft, spec["item_ref"]), fields, "user")
+            item = self._item(draft, spec["item_ref"])
+            if item.get("kind") == "usual" and item.get("resolution") and set(fields) == {"quantity"}:
+                # Opaque saved preset: "make that two" scales its stored panel.
+                base = item["resolution"].get("per_serving") or {k: item["resolution"].get(k) for k in MACROS}
+                count = _number(fields["quantity"], "quantity")
+                item["resolution"] = {**item["resolution"], "per_serving": base,
+                                      **{k: (round(float(base[k]) * count, 2) if base.get(k) is not None else None)
+                                         for k in MACROS}}
+                item["resolution"]["fingerprint"] = _fingerprint(item["resolution"])
+                item["quantity"] = count
+                continue
+            if item.get("kind") == "usual":
+                if item.get("resolution"):
+                    raise DraftInputError("A saved preset can only change its quantity; add separate foods instead")
+                item["kind"] = "food"  # the user is naming what the usual actually was
+            self._apply_fields(item, fields, "user")
         for ref in args.get("consent_estimate") or []:
             item = self._item(draft, ref)
             if item.get("needs") == "estimate_consent" and item.get("resolution"):
@@ -446,8 +497,11 @@ class MealDrafts:
                 item["needs"] = "portion"
                 item["question"] = f"How much {item['description']} was it?"
                 return
-            if found is not None and item.get("preparation") == "cooked" and "raw" in str(found.get("basis") or "").casefold():
-                found = None  # a cooked weight is never priced with a raw panel
+            basis = str((found or {}).get("basis") or "").casefold()
+            if found is not None and item.get("unit") in MASS_UNITS and (
+                    (item.get("preparation") == "cooked" and "raw" in basis)
+                    or (item.get("preparation") == "raw" and "cooked" in basis)):
+                found = None  # a weight is only priced with a panel of the same basis
             if found is None:
                 item["needs"] = "identity"
                 item["question"] = await self.unresolved_question(item_text(item))
@@ -472,6 +526,11 @@ class MealDrafts:
     @staticmethod
     def _decide_state(draft) -> None:
         included = [item for item in draft["items"] if item["status"] == "included"]
+        for item in included:
+            if not item.get("needs") and not item.get("resolution"):
+                # Never "ready" without numbers.
+                item["needs"] = "identity"
+                item["question"] = item.get("question") or f"What exactly was the {item['description']}?"
         open_items = [item for item in included if item.get("needs")]
         if not included:
             draft["state"], draft["pending_question"] = "collecting", "What did you eat?"
@@ -509,6 +568,7 @@ class MealDrafts:
             c["resolution"].get("estimate_provenance") in {"curated_generic_assumption", "server_web_estimate"}
             for c in components if "estimate" in str(c["resolution"].get("macro_source") or "").casefold())
         meal = draft.get("meal_type") or default_meal_type(self.clock())
+        draft["meal_type"] = meal  # recorded on the committed draft by the store
         values = self.validate_values(name[:200], *(totals[k] for k in MACROS), source, meal,
                                       draft["log_date"].isoformat(), allow_estimate=allow_estimate)
         metadata = [{"description": item_text(c["item"]), "source": c["resolution"].get("macro_source"),
@@ -525,7 +585,11 @@ class MealDrafts:
         refresh = [item for item in draft["items"] if item["status"] == "included"
                    and (item.get("resolution") or {}).get("refresh") and not live.get(item["id"])]
         for item in refresh:
-            found = await self.resolve(_food_query(item))
+            try:
+                found = await self.resolve(_food_query(item))
+            except Exception as exc:
+                logger.warning("meal draft refresh failed: %s", type(exc).__name__)
+                found = None
             if not found or found.get("portion_error") or _fingerprint(found) != item["resolution"]["fingerprint"]:
                 return {"status": "needs_detail", "draft_ref": str(draft["id"]),
                         "question": f"The nutrition source for {item_text(item)} changed. Tell me again and I'll re-check it.",
@@ -534,7 +598,9 @@ class MealDrafts:
         try:
             values, metadata = self._values(draft, live)
         except (domain.MacroError, ValueError, TypeError) as exc:
-            return {"status": "failed", "draft_ref": str(draft["id"]), "confirmation": str(exc)}
+            logger.warning("meal draft values rejected: %s", exc)
+            return {"status": "failed", "draft_ref": str(draft["id"]),
+                    "confirmation": "I couldn't put together usable numbers for that meal, so I didn't log it."}
         meal_type_origin = "user" if draft.get("meal_type") else "time_of_day"
         request_hash = hashlib.sha256(json.dumps({**values, "day": values["day"].isoformat()},
                                                  sort_keys=True, default=str).encode()).hexdigest()
@@ -714,6 +780,8 @@ meals with their refs; use it for short answers and corrections. A correction to
 amend_ref (it changes that one entry, never adds a second); "another one"/"same as yesterday" uses
 repeat_ref (a NEW entry). If several meals fit a reference, ask which one. Only a clear statement
 like "I always weigh it cooked" uses remember_preparation; "cooked this time" is just an edit.
+If update_meal returns status unknown, do NOT send add again: ask the user to check Today; to
+recover, call update_meal with only that same draft_ref. Never log the same meal twice in one turn.
 consent_estimate only after the user agrees to that web estimate. save_usual only after the user
 explicitly says yes to remembering a usual. Report only the returned confirmation or question,
 plus any returned offer as a question. Never claim a meal was logged unless status is committed,

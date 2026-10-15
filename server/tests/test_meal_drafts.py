@@ -357,3 +357,129 @@ async def test_logging_day_is_pinned_across_4am(env):
     finally:
         reset_user(token)
     assert done["logged"]["date"] == "2026-10-15"
+
+
+# --------------------------------------------------------------------------- #
+# Review fixes (ce93c26 review: B1, S1, S2, S3, S5, S6)
+# --------------------------------------------------------------------------- #
+
+@pg
+async def test_amend_keeps_the_logged_slot_when_time_moves_on(env):
+    import domain
+    from auth import reset_user
+    engine, url, clock = env["engine"], env["url"], env["clock"]
+    token = _as(env["users"][0])
+    try:
+        logged = await engine.handle({"add": [{"description": "banana", "quantity": 1}]})
+        clock["now"] = datetime(2026, 10, 15, 19, 0, tzinfo=domain.LOCAL_TZ)
+        amended = await engine.handle({"amend_ref": logged["draft_ref"],
+                                       "edit": [{"item_ref": "item1", "quantity": 2}]})
+        moved = await engine.handle({"amend_ref": amended["draft_ref"], "meal_type": "Snack"})
+    finally:
+        reset_user(token)
+    assert amended["status"] == "amended" and amended["logged"]["meal"] == "Lunch"
+    assert moved["status"] == "amended" and moved["logged"]["meal"] == "Snack"  # only when asked
+    rows = await _rows(url, "SELECT meal_type FROM meals")
+    assert [r["meal_type"] for r in rows] == ["Snack"]  # emptied Lunch rollup removed
+
+
+@pg
+async def test_late_night_defaults_to_snack_on_the_previous_logging_day(env):
+    import domain
+    from auth import reset_user
+    env["clock"]["now"] = datetime(2026, 10, 16, 1, 30, tzinfo=domain.LOCAL_TZ)
+    token = _as(env["users"][0])
+    try:
+        result = await env["engine"].handle({"add": [{"description": "banana", "quantity": 1}]})
+    finally:
+        reset_user(token)
+    assert result["logged"]["meal"] == "Snack" and result["logged"]["date"] == "2026-10-15"
+
+
+@pg
+async def test_grilled_is_already_cooked_and_raw_weight_never_uses_a_cooked_panel(env):
+    from auth import reset_user
+    engine, url = env["engine"], env["url"]
+    token = _as(env["users"][0])
+    try:
+        grilled = await engine.handle({"add": [{"description": "grilled chicken", "quantity": 100, "unit": "g"}]})
+        raw = await engine.handle({"add": [
+            {"description": "grilled chicken", "quantity": 100, "unit": "g", "preparation": "raw"}]})
+    finally:
+        reset_user(token)
+    assert grilled["status"] == "committed"  # no raw/cooked question for grilled
+    assert raw["status"] == "needs_detail"  # cooked panel refused for a raw weight
+    assert len(await _rows(url, "SELECT 1 FROM nutrition_entries")) == 1
+
+
+@pg
+async def test_editing_a_usual_placeholder_names_its_food(env):
+    from auth import reset_user
+    engine = env["engine"]
+    token = _as(env["users"][0])
+    try:
+        first = await engine.handle({"add": [{"description": "chick fil a", "usual": True}]})
+        second = await engine.handle({"draft_ref": first["draft_ref"],
+                                      "edit": [{"item_ref": "item1", "description": "banana"}]})
+    finally:
+        reset_user(token)
+    assert second["status"] == "committed", second
+
+
+@pg
+async def test_legacy_preset_quantity_amend_scales_its_panel(env):
+    from auth import reset_user
+    engine, store = env["engine"], env["store"]
+    token = _as(env["users"][0])
+    try:
+        await store.save_preset({"name": "protein shake", "emoji": "x", "calories": 200, "protein": 30,
+                                 "carbs": 5, "fat": 3, "fiber": 1, "meal": "Snack",
+                                 "macro_source": "Label: shake"})
+        logged = await engine.handle({"add": [{"description": "protein shake", "usual": True}]})
+        amended = await engine.handle({"amend_ref": logged["draft_ref"],
+                                       "edit": [{"item_ref": "item1", "quantity": 2}]})
+    finally:
+        reset_user(token)
+    assert logged["logged"]["calories"] == 200
+    assert amended["status"] == "amended" and amended["logged"]["calories"] == 400
+
+
+@pg
+async def test_bad_edit_leaves_no_stray_draft(env):
+    from auth import reset_user
+    from meal_drafts import DraftInputError
+    engine = env["engine"]
+    token = _as(env["users"][0])
+    try:
+        logged = await engine.handle({"add": [{"description": "banana", "quantity": 1}]})
+        with pytest.raises(DraftInputError):
+            await engine.handle({"repeat_ref": logged["draft_ref"], "edit": [{"item_ref": "item9", "quantity": 2}]})
+        with pytest.raises(DraftInputError):
+            await engine.handle({"add": [{"description": "banana", "unit": "!!"}]})
+    finally:
+        reset_user(token)
+    assert await _rows(env["url"], "SELECT 1 FROM meal_drafts WHERE state <> 'committed'") == []
+
+
+@pg
+async def test_repeat_asks_again_for_a_web_estimate(env):
+    from auth import reset_user
+    engine = env["engine"]
+    estimate = {"name": "fixture stew", "macro_source": "WEB ESTIMATE (unverified): example.test",
+                "calories": 300, "protein": 20, "carbs": 30, "fat": 10, "fiber": 2,
+                "estimate_provenance": "server_web_estimate", "attribution": {"source_host": "example.test"}}
+    real = engine.resolve
+
+    async def resolve(component):
+        return dict(estimate) if "stew" in component["description"] else await real(component)
+    engine.resolve = resolve
+    token = _as(env["users"][0])
+    try:
+        first = await engine.handle({"add": [{"description": "fixture stew", "quantity": 1}]})
+        assert first["status"] == "needs_detail" and "web estimate" in first["question"]
+        logged = await engine.handle({"draft_ref": first["draft_ref"], "consent_estimate": ["item1"]})
+        assert logged["status"] == "committed", logged
+        again = await engine.handle({"repeat_ref": logged["draft_ref"]})
+    finally:
+        reset_user(token)
+    assert again["status"] == "needs_detail" and "web estimate" in again["question"]

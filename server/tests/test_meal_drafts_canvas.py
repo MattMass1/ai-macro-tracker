@@ -114,3 +114,30 @@ async def test_engine_off_when_schema_missing(monkeypatch):
         assert await srv._meal_drafts_engine() is None
     finally:
         reset_user(scope)
+
+
+@pytest.mark.asyncio
+async def test_same_new_meal_twice_in_one_turn_writes_once():
+    drafts = StubDrafts()
+
+    async def agent(**kwargs):
+        args = {"add": [{"description": "banana", "quantity": 1}]}
+        first = await kwargs["handlers"]["update_meal"](args)
+        second = await kwargs["handlers"]["update_meal"](dict(args))
+        assert second == first
+        return first["confirmation"], []
+
+    scope = bind_user(uuid4())
+    try:
+        await _service(agent, drafts).turn(str(uuid4()), str(uuid4()), "a banana", adapter="text")
+    finally:
+        reset_user(scope)
+    assert len(drafts.calls) == 1
+
+
+def test_drafts_instructions_drop_legacy_food_rules_cleanly():
+    from agent_canvas import _DRAFTS_BASE_INSTRUCTIONS
+    assert "log_meal" not in _DRAFTS_BASE_INSTRUCTIONS
+    assert "confirmation above still applies" not in _DRAFTS_BASE_INSTRUCTIONS
+    from meal_drafts import MEAL_DRAFT_INSTRUCTIONS
+    assert "do NOT send add again" in MEAL_DRAFT_INSTRUCTIONS

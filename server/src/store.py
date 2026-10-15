@@ -1213,8 +1213,10 @@ class Store:
                 outcome = "committed"
             await conn.execute(
                 "UPDATE meal_drafts SET state='committed',committed_entry_id=$3,committed_entry_revision=$4,"
-                "committed_operation_key=$5,committed_at=now(),updated_at=now() WHERE user_id=$1 AND id=$2",
-                user_id, key, row["id"], int(row["entry_revision"]), f"meal-draft:{key}:{expected_revision}")
+                "committed_operation_key=$5,committed_at=now(),updated_at=now(),meal_type=$6,"
+                "meal_type_origin=COALESCE(meal_type_origin,'time_of_day') WHERE user_id=$1 AND id=$2",
+                user_id, key, row["id"], int(row["entry_revision"]), f"meal-draft:{key}:{expected_revision}",
+                values["meal"])
             day_row = await conn.fetchrow(
                 "SELECT calories,protein,carbs,fat,fiber FROM days WHERE user_id=$1 AND date=$2", user_id, day)
             return {"outcome": outcome, "entry": {**meal(row), "entry_revision": int(row["entry_revision"]),

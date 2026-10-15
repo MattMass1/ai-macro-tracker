@@ -5,7 +5,7 @@ Status: built and automated-tested on a throwaway local PostgreSQL. NOT applied 
 ## What changes for the user (once enabled)
 
 - The coach keeps the meal you're describing in the database, one item per food. A short answer ("raw") fixes only the item the question was about. Nothing is re-guessed, and food that's already resolved is never looked up again.
-- It asks only for what's missing, and asks independent questions together. There is no forced "one question, then assume a standard serving".
+- It asks only for what's missing, and asks independent questions together. There is no forced "one question, then assume a standard serving". A food named with no amount ("a banana") still uses a standard size, and the receipt says so.
 - A complete meal logs once, with no "are you sure?". Corrections to a logged meal update that one entry ("make that two"). "Another one" or "same as yesterday" creates a new entry.
 - "My usual X": if a saved usual exists, its items are expanded. If not, the coach asks once what it contains, logs it, then offers to remember it. Saving happens only on your yes, and saving never logs anything.
 - "I always weigh it cooked" is remembered privately per food. "Cooked this time" applies only to that meal.
@@ -21,7 +21,7 @@ All three must agree before anything changes; otherwise chat behaves exactly as 
 
 ## Data safety
 
-- Additive only: 4 new tables, 2 new unique indexes on existing primary-key pairs, and 2 nullable or defaulted columns (`nutrition_entries.entry_revision` default 1, `meal_draft_id`, `meal_presets.template_revision`). No existing value changes.
+- Additive only: 4 new tables, 2 new unique indexes on existing primary-key pairs, and 3 nullable or defaulted columns (`nutrition_entries.entry_revision` default 1, `nutrition_entries.meal_draft_id`, `meal_presets.template_revision`). No existing value changes.
 - Every new row has a NOT NULL owner. Draft items, preset items and aliases reference their parent by `(user_id, id)`, so the database itself rejects a cross-user link (tested).
 - Draft commits do not create shared-catalog aliases, so private meal names never become global food names.
 - Provider panels not licensed for caching (FatSecret with `FATSECRET_CACHE_ALLOWED=false`) are not stored in drafts. They are re-fetched at commit, and a changed panel triggers a re-check instead of a silent save.
@@ -41,7 +41,7 @@ All three must agree before anything changes; otherwise chat behaves exactly as 
 
 ## Known limits of this first slice
 
-- The meal slot defaults from time of day (before 10:30 Breakfast, before 3pm Lunch, before 9pm Dinner, otherwise Snack) unless said.
+- The meal slot defaults from time of day (4:00-10:29 Breakfast, until 2:59pm Lunch, until 8:59pm Dinner, otherwise Snack) unless said. A correction keeps the slot the meal was logged in unless you name a new one.
 - Size words map to curated per-food weights only (small/medium/large exist for some generics, such as apple and banana). Restaurant items rely on the existing lookup.
 - No UI for open drafts yet. Drafts are reachable through chat context, covering 12 hours of open drafts and today's and yesterday's logged meals.
 - `/api/chat` (legacy web) and MCP `log_meal` are unchanged.

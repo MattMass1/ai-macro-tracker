@@ -24,6 +24,7 @@ SERVER = Path(__file__).resolve().parents[1]
 ADMIN_URL = os.environ.get("MMMACROS_TEST_PG_ADMIN_URL", "")
 NUTRIENTS = ("protein", "carbs", "fat", "fiber")
 M003 = migrations.NULLABLE_NUTRIENTS_MIGRATION
+M004 = "004_meal_drafts.sql"
 
 
 def load_script(name):
@@ -370,15 +371,15 @@ async def test_pg_runner_holds_003_without_exact_approval_and_service_stays_comp
     held: list[str] = []
     applied = await migrations.apply_migrations(scratch_db, held)
     assert applied == ["000_legacy_schema.sql", "001_food_catalog.sql", "002_daily_workout_plans.sql"]
-    assert held == [M003]
+    assert held == [M003, M004]  # 004 is gated too and waits behind 003
     monkeypatch.setenv("APPROVED_MIGRATIONS", f"{M003}:{'0' * 64}")  # stale/wrong approval
     held = []
-    assert await migrations.apply_migrations(scratch_db, held) == [] and held == [M003]
+    assert await migrations.apply_migrations(scratch_db, held) == [] and held == [M003, M004]
     conn = await asyncpg.connect(scratch_db)
     try:
         assert await _nullable(conn) == []
         status = await migrations.migration_status(conn)
-        assert status["compatible"] is True and status["held"] == [M003]
+        assert status["compatible"] is True and status["held"] == [M003, M004]
     finally:
         await conn.close()
     store = Store(scratch_db)
@@ -499,7 +500,7 @@ async def test_pg_rollback_restores_not_null_only_when_empty_and_keeps_ledger(sc
             ("003_restore_nutrients_not_null.sql", rollback.rollback_checksum())]
         assert await migrations.apply_migrations(scratch_db) == [], "003 is not re-applied"
         status = await migrations.migration_status(conn)
-        assert status["compatible"] is True and status["pending"] == []
+        assert status["compatible"] is True and status["pending"] == [M004] and status["held"] == [M004]
         # The live-schema check closes calorie-only writes even with every flag on.
         assert await store.nullable_nutrients_ready() is False
         monkeypatch.setenv("CALORIE_ONLY_WRITES_ENABLED", "true")

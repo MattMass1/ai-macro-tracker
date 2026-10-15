@@ -86,6 +86,31 @@ def calorie_only_write_allowed() -> bool:
             and _user_in_canary())
 
 
+MEAL_DRAFTS_FLAG = "MEAL_DRAFTS_ENABLED"
+MEAL_DRAFTS_USERS_FLAG = "MEAL_DRAFTS_USER_IDS"
+
+
+def meal_drafts_allowed() -> bool:
+    """Operator switch (+ optional canary list) for durable meal drafts.
+
+    Fails closed: only the exact value ``true`` opens it, and a malformed
+    canary list allows nobody. The schema check lives in the store.
+    """
+    if os.environ.get(MEAL_DRAFTS_FLAG, "").strip().casefold() != "true":
+        return False
+    raw = os.environ.get(MEAL_DRAFTS_USERS_FLAG, "").strip()
+    if not raw:
+        return True
+    try:
+        allowed = {UUID(part.strip()) for part in raw.split(",") if part.strip()}
+    except ValueError:
+        return False
+    try:
+        return current_user_id() in allowed
+    except RuntimeError:
+        return False
+
+
 def gate_status() -> dict[str, bool]:
     """Non-secret gate state for diagnostics and tests."""
     return {

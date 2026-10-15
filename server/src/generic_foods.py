@@ -17,6 +17,12 @@ USDA_SR = "USDA FoodData Central SR Legacy https://fdc.nal.usda.gov"
 FOODS: dict[str, dict[str, Any]] = {
     "93 7 ground beef": {"name":"93/7 ground beef","basis":"raw","grams":100,
         "macros":(152,20.54,0,7.14,0),"source":"OpenFoodFacts 0710178008028 (unbranded generic record)"},
+    # Cooked-weight row: a stated cooked weight is never converted through a
+    # raw panel or a universal yield factor.
+    "93 7 ground beef cooked": {"name":"93/7 ground beef, cooked","basis":"cooked, pan-browned crumbles",
+        "grams":100,"macros":(209,28.9,0,9.51,0),
+        "source":f"{USDA_SR}, FDC 174755 (beef, ground, 93% lean / 7% fat, crumbles, cooked, pan-browned)"},
+    "cooked 93 7 ground beef": {"alias_of":"93 7 ground beef cooked"},
     "steak": {"name":"beef fillet steak","basis":"raw","grams":100,
         "macros":(155,20.9,0,7.9,0),"source":f"{COFID}, food 18-017"},
     "chicken breast": {"name":"chicken breast","basis":"raw, meat only","grams":100,

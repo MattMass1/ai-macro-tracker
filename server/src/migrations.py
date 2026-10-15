@@ -23,7 +23,7 @@ LOCK_KEY = 6_291_470_021
 # A missing, malformed or stale approval keeps the migration held. A held
 # migration does not make the service incompatible: application code must keep
 # working on the pre-migration schema until it is approved and applied.
-APPROVAL_REQUIRED = frozenset({"003_calorie_only_unknown_macros.sql"})
+APPROVAL_REQUIRED = frozenset({"003_calorie_only_unknown_macros.sql", "004_meal_drafts.sql"})
 APPROVAL_ENV = "APPROVED_MIGRATIONS"
 NULLABLE_NUTRIENTS_MIGRATION = "003_calorie_only_unknown_macros.sql"
 

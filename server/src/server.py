@@ -50,6 +50,7 @@ from store import ChatQuotaExceeded, InviteAlreadyClaimed, InviteNotFound  # noq
 from auth import bind_user, current_user_id, reset_user  # noqa: E402
 from coach import CoachProviderError, run_agent  # noqa: E402
 from agent_canvas import PROTOCOL as CANVAS_PROTOCOL, CanvasService  # noqa: E402
+from meal_drafts import MealDrafts  # noqa: E402
 import food_lookup  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -2865,6 +2866,160 @@ def _unresolved_food_question(description: str, options: list[str]) -> str:
             "the dish, or how it was prepared?")
 
 
+def _trusted_food(found: Mapping[str, Any] | None) -> bool:
+    """Food writes require a validated identity and usable provenance."""
+    if not found or "UNRESOLVED:" in str(found.get("source") or ""):
+        return False
+    attribution = found.get("attribution")
+    if (str(found.get("source") or "").startswith("FatSecret:")
+            and not isinstance(attribution, Mapping)):
+        return False
+    allowed_states = {"exact_identifier", "official_curated", "internal_curated",
+                      "official_source_exact_row"}
+
+    # provider_assumed_variant exists only on a follow-up after the one
+    # allowed question (food_lookup sets it solely when asked to assume).
+    provider_states = {"provider_exact_identity", "provider_assumed_variant"}
+
+    def provider_identity(attribution: Mapping[str, Any], source=None) -> bool:
+        external_id = str(attribution.get("external_id") or "")
+        return (attribution.get("verification_state") in provider_states
+                and attribution.get("provider") == "FatSecret"
+                and bool(external_id)
+                and (source is None or source == f"FatSecret: {external_id}"))
+
+    if isinstance(attribution, Mapping):
+        state = attribution.get("verification_state")
+        if state == "unverified_web_estimate":
+            if found.get("estimate_provenance") != "server_web_estimate":
+                return False
+        elif state in provider_states:
+            if not provider_identity(attribution, found.get("source")):
+                return False
+        elif state not in allowed_states:
+            return False
+    component_attributions = found.get("component_attributions")
+    return not (
+        isinstance(component_attributions, list)
+        and any(
+            isinstance(item, Mapping)
+            and item.get("verification_state") not in allowed_states | {"unverified_web_estimate"}
+            and not provider_identity(item)
+            for item in component_attributions
+        )
+    )
+
+async def _known_food_with_bad_portion(query: str, *, atomic: bool = False) -> bool:
+    quantity, unit, identity = food_lookup._clean_component(query)
+    if quantity is None or not identity:
+        return False
+    base = await resolve_food(identity, atomic=atomic)
+    return _trusted_food(base)
+
+async def _resolve_food_component(
+    component: Mapping[str, Any], *, atomic: bool,
+    pre_resolved: Mapping[str, Any] | None = None,
+    assume_variant: bool = False,
+    resolution_cache: Mapping[str, tuple[Any, str, dict[str, Any]]] | None = None,
+) -> dict[str, Any] | None:
+    """Resolve, verify and portion one food component, or ``None``.
+
+    Returns ``{"portion_error": True, "name": ...}`` when the food is known
+    but the stated portion cannot be applied."""
+    resolution_cache = resolution_cache if resolution_cache is not None else {}
+    description = domain.validate_name(str(component.get("description") or ""))
+    portion = " ".join(str(component.get("portion") or "").split())
+    grams = component.get("grams")
+    quantity = component.get("quantity")
+    query = f"{portion} {description}".strip() if portion else description
+    resolution_ref = str(component.get("resolution_ref") or "")
+    cached = resolution_cache.get(resolution_ref) if resolution_ref else None
+    found = (dict(pre_resolved) if pre_resolved is not None else
+             cached[2] if cached is not None
+             and cached[0] == current_user_id()
+             and food_lookup._clean_component(food_lookup._normalize_query_text(cached[1]))[2]
+             == food_lookup._clean_component(food_lookup._normalize_query_text(query))[2]
+             else None)
+    if resolution_ref and found is None:
+        return None
+    if found is None:
+        found = await resolve_food(query, atomic=atomic, assume_variant=assume_variant)
+    if not _trusted_food(found):
+        if found is None and await _known_food_with_bad_portion(query, atomic=atomic):
+            return {"portion_error": True, "name": query}
+        return None
+    if grams is not None:
+        portioned = food_lookup.portion_from_grams(found, grams)
+    else:
+        portioned = food_lookup.portion_from_serving(found)
+    if portioned is None:
+        return {"portion_error": True, "name": query}
+    macros, source = portioned
+    if quantity is not None:
+        try:
+            count = float(quantity)
+        except (TypeError, ValueError):
+            return {"portion_error": True, "name": query}
+        if not 0 < count <= 100:
+            return {"portion_error": True, "name": query}
+        applied_count = found.get("applied_quantity")
+        if applied_count is not None and float(applied_count) != count:
+            return {"portion_error": True, "name": query}
+        if applied_count is None:
+            macros = {
+                key: round(float(macros.get(key, 0)) * count, 2)
+                for key in domain.MACRO_KEYS
+            }
+            source = f"{source} x{count:g}"
+    result = {"name": query, "macro_source": source, **macros}
+    for field in ("basis", "assumption", "estimate_provenance",
+                  "carbohydrate_definition"):
+        if found.get(field):
+            result[field] = found[field]
+    attribution = found.get("attribution")
+    if isinstance(attribution, Mapping):
+        allowed_attribution = {
+            "provider", "source_type", "candidate_url", "source_host",
+            "retrieved_at", "serving_basis", "items_per_serving_assumption",
+            "carbohydrate_definition", "verification_state", "source_limitations",
+            "cache_allowed", "evidence_hash", "external_id", "fiber_method",
+        }
+        result["attribution"] = {
+            key: value for key, value in attribution.items()
+            if key in allowed_attribution
+        }
+        if found.get("estimate_provenance") == "server_web_estimate":
+            result["attribution"].pop("candidate_url", None)
+    component_metadata = found.get("component_metadata")
+    if isinstance(component_metadata, list) and component_metadata:
+        validated_metadata = []
+        for item in component_metadata:
+            if not isinstance(item, Mapping):
+                return None
+            item_description = item.get("description")
+            item_source = item.get("source")
+            item_attribution = item.get("attribution")
+            if (not isinstance(item_description, str) or not item_description.strip()
+                    or not isinstance(item_source, str) or not item_source.strip()
+                    or (item_attribution is not None
+                        and not isinstance(item_attribution, Mapping))):
+                return None
+            safe_item_attribution = (dict(item_attribution)
+                if isinstance(item_attribution, Mapping) else None)
+            if (item.get("estimate_provenance") == "server_web_estimate"
+                    and safe_item_attribution is not None):
+                safe_item_attribution.pop("candidate_url", None)
+            validated_metadata.append({
+                "description": item_description,
+                "source": item_source,
+                "attribution": safe_item_attribution,
+                "estimate_provenance": item.get("estimate_provenance"),
+                "carbohydrate_definition": item.get("carbohydrate_definition"),
+            })
+        result["component_metadata"] = validated_metadata
+    return result
+
+
 def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Awaitable[Any]]]:
     """Tenant-bound voice dispatch: the same four handlers the typed coach
     uses, reused as-is (immediate commit, no chat-turn staging) — except
@@ -2874,152 +3029,17 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
     base = _coach_tool_handlers()
     resolution_cache: dict[str, tuple[Any, str, dict[str, Any]]] = {}
 
-    def voice_verified(found: Mapping[str, Any] | None) -> bool:
-        """Voice writes require a validated identity and usable provenance."""
-        if not found or "UNRESOLVED:" in str(found.get("source") or ""):
-            return False
-        attribution = found.get("attribution")
-        if (str(found.get("source") or "").startswith("FatSecret:")
-                and not isinstance(attribution, Mapping)):
-            return False
-        allowed_states = {"exact_identifier", "official_curated", "internal_curated",
-                          "official_source_exact_row"}
-
-        # provider_assumed_variant exists only on a follow-up after the one
-        # allowed question (food_lookup sets it solely when asked to assume).
-        provider_states = {"provider_exact_identity", "provider_assumed_variant"}
-
-        def provider_identity(attribution: Mapping[str, Any], source=None) -> bool:
-            external_id = str(attribution.get("external_id") or "")
-            return (attribution.get("verification_state") in provider_states
-                    and attribution.get("provider") == "FatSecret"
-                    and bool(external_id)
-                    and (source is None or source == f"FatSecret: {external_id}"))
-
-        if isinstance(attribution, Mapping):
-            state = attribution.get("verification_state")
-            if state == "unverified_web_estimate":
-                if found.get("estimate_provenance") != "server_web_estimate":
-                    return False
-            elif state in provider_states:
-                if not provider_identity(attribution, found.get("source")):
-                    return False
-            elif state not in allowed_states:
-                return False
-        component_attributions = found.get("component_attributions")
-        return not (
-            isinstance(component_attributions, list)
-            and any(
-                isinstance(item, Mapping)
-                and item.get("verification_state") not in allowed_states | {"unverified_web_estimate"}
-                and not provider_identity(item)
-                for item in component_attributions
-            )
-        )
-
-    async def known_food_with_bad_portion(query: str, *, atomic: bool = False) -> bool:
-        quantity, unit, identity = food_lookup._clean_component(query)
-        if quantity is None or not identity:
-            return False
-        base = await resolve_food(identity, atomic=atomic)
-        return voice_verified(base)
+    voice_verified = _trusted_food
+    known_food_with_bad_portion = _known_food_with_bad_portion
 
     async def resolve_component(
         component: Mapping[str, Any], *, atomic: bool,
         pre_resolved: Mapping[str, Any] | None = None,
         assume_variant: bool = False,
     ) -> dict[str, Any] | None:
-        description = domain.validate_name(str(component.get("description") or ""))
-        portion = " ".join(str(component.get("portion") or "").split())
-        grams = component.get("grams")
-        quantity = component.get("quantity")
-        query = f"{portion} {description}".strip() if portion else description
-        resolution_ref = str(component.get("resolution_ref") or "")
-        cached = resolution_cache.get(resolution_ref) if resolution_ref else None
-        found = (dict(pre_resolved) if pre_resolved is not None else
-                 cached[2] if cached is not None
-                 and cached[0] == current_user_id()
-                 and food_lookup._clean_component(food_lookup._normalize_query_text(cached[1]))[2]
-                 == food_lookup._clean_component(food_lookup._normalize_query_text(query))[2]
-                 else None)
-        if resolution_ref and found is None:
-            return None
-        if found is None:
-            found = await resolve_food(query, atomic=atomic, assume_variant=assume_variant)
-        if not voice_verified(found):
-            if found is None and await known_food_with_bad_portion(query, atomic=atomic):
-                return {"portion_error": True, "name": query}
-            return None
-        if grams is not None:
-            portioned = food_lookup.portion_from_grams(found, grams)
-        else:
-            portioned = food_lookup.portion_from_serving(found)
-        if portioned is None:
-            return {"portion_error": True, "name": query}
-        macros, source = portioned
-        if quantity is not None:
-            try:
-                count = float(quantity)
-            except (TypeError, ValueError):
-                return {"portion_error": True, "name": query}
-            if not 0 < count <= 100:
-                return {"portion_error": True, "name": query}
-            applied_count = found.get("applied_quantity")
-            if applied_count is not None and float(applied_count) != count:
-                return {"portion_error": True, "name": query}
-            if applied_count is None:
-                macros = {
-                    key: round(float(macros.get(key, 0)) * count, 2)
-                    for key in domain.MACRO_KEYS
-                }
-                source = f"{source} x{count:g}"
-        result = {"name": query, "macro_source": source, **macros}
-        for field in ("basis", "assumption", "estimate_provenance",
-                      "carbohydrate_definition"):
-            if found.get(field):
-                result[field] = found[field]
-        attribution = found.get("attribution")
-        if isinstance(attribution, Mapping):
-            allowed_attribution = {
-                "provider", "source_type", "candidate_url", "source_host",
-                "retrieved_at", "serving_basis", "items_per_serving_assumption",
-                "carbohydrate_definition", "verification_state", "source_limitations",
-                "cache_allowed", "evidence_hash", "external_id", "fiber_method",
-            }
-            result["attribution"] = {
-                key: value for key, value in attribution.items()
-                if key in allowed_attribution
-            }
-            if found.get("estimate_provenance") == "server_web_estimate":
-                result["attribution"].pop("candidate_url", None)
-        component_metadata = found.get("component_metadata")
-        if isinstance(component_metadata, list) and component_metadata:
-            validated_metadata = []
-            for item in component_metadata:
-                if not isinstance(item, Mapping):
-                    return None
-                item_description = item.get("description")
-                item_source = item.get("source")
-                item_attribution = item.get("attribution")
-                if (not isinstance(item_description, str) or not item_description.strip()
-                        or not isinstance(item_source, str) or not item_source.strip()
-                        or (item_attribution is not None
-                            and not isinstance(item_attribution, Mapping))):
-                    return None
-                safe_item_attribution = (dict(item_attribution)
-                    if isinstance(item_attribution, Mapping) else None)
-                if (item.get("estimate_provenance") == "server_web_estimate"
-                        and safe_item_attribution is not None):
-                    safe_item_attribution.pop("candidate_url", None)
-                validated_metadata.append({
-                    "description": item_description,
-                    "source": item_source,
-                    "attribution": safe_item_attribution,
-                    "estimate_provenance": item.get("estimate_provenance"),
-                    "carbohydrate_definition": item.get("carbohydrate_definition"),
-                })
-            result["component_metadata"] = validated_metadata
-        return result
+        return await _resolve_food_component(
+            component, atomic=atomic, pre_resolved=pre_resolved,
+            assume_variant=assume_variant, resolution_cache=resolution_cache)
 
     async def voice_log_meal_tool(call_id: str, args: Mapping[str, Any]) -> Any:
         scope = _turn_presets.set({})
@@ -4142,11 +4162,45 @@ async def readiness(request: Request) -> Any:
 _canvas_service: CanvasService | None = None
 
 
+async def _meal_drafts_engine():
+    """The durable meal-draft engine when released for this user, else None.
+
+    Fails closed to the legacy log_meal path: the operator switch, the
+    optional canary list and the live schema (migration 004) must all agree.
+    """
+    if not release_gates.meal_drafts_allowed():
+        return None
+    client = store_client()
+    try:
+        if not await client.meal_drafts_ready():
+            return None
+    except Exception:
+        logger.exception("Meal draft readiness check failed; using legacy food path")
+        return None
+    return MealDrafts(store=client, resolve=_resolve_draft_component,
+                      unresolved_question=_draft_unresolved_question,
+                      validate_values=_validated_meal_values)
+
+
+async def _resolve_draft_component(component: Mapping[str, Any]) -> dict[str, Any] | None:
+    """One draft item through the shared verified resolver, once."""
+    scope = _turn_presets.set({})
+    try:
+        return await _resolve_food_component(component, atomic=True)
+    finally:
+        _turn_presets.reset(scope)
+
+
+async def _draft_unresolved_question(description: str) -> str:
+    return _unresolved_food_question(description, await _closest_food_options(description))
+
+
 def canvas_service() -> CanvasService:
     global _canvas_service
     if _canvas_service is None:
         _canvas_service = CanvasService(store_factory=store_client,
-            food_factory=_voice_tool_handlers, coach_factory=lambda: _coach_tool_handlers(canvas=True))
+            food_factory=_voice_tool_handlers, coach_factory=lambda: _coach_tool_handlers(canvas=True),
+            drafts_factory=_meal_drafts_engine)
     return _canvas_service
 
 

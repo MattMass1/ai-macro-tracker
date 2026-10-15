@@ -90,6 +90,10 @@ class IdempotencyConflict(StoreError):
     """An idempotency key was reused with a different request body."""
 
 
+class DraftConflict(StoreError):
+    """A meal draft or its target entry changed; nothing was written."""
+
+
 class IdempotencyStateError(StoreError):
     """An idempotency claim could not be read back from durable state."""
 
@@ -616,11 +620,14 @@ class Store:
 
     async def _insert_meal_conn(self, conn, *, user_id, name, meal, calories, protein,
                                 carbs, fat, fiber, day, macro_source,
-                                component_metadata_json=None, origin=None):
+                                component_metadata_json=None, origin=None,
+                                catalog_snapshot=True):
         """Insert one nutrition row using the caller's transaction.
 
         For voice-originated writes only, returns an identical recent voice
-        row unchanged. Other origins always insert a new row.
+        row unchanged. Other origins always insert a new row. Meal-draft
+        commits pass ``catalog_snapshot=False``: a private composite name
+        (a saved usual, a personal order) never becomes a shared catalog alias.
         """
         await _guard_unknown_nutrients(
             conn, {"protein": protein, "carbs": carbs, "fat": fat, "fiber": fiber})
@@ -643,9 +650,11 @@ class Store:
             "INSERT INTO meals(id,user_id,day,meal_type) VALUES($1,$2,$3,$4) "
             "ON CONFLICT(user_id,day,meal_type) DO UPDATE SET meal_type=EXCLUDED.meal_type RETURNING id",
             str(uuid4()), user_id, day, meal)
-        item_id, observation_id = await self._catalog_snapshot(
-            conn, name=name, macros={"calories": calories, "protein": protein,
-            "carbs": carbs, "fat": fat, "fiber": fiber}, macro_source=macro_source)
+        item_id = observation_id = None
+        if catalog_snapshot:
+            item_id, observation_id = await self._catalog_snapshot(
+                conn, name=name, macros={"calories": calories, "protein": protein,
+                "carbs": carbs, "fat": fat, "fiber": fiber}, macro_source=macro_source)
         stored_metadata_json = _component_metadata_with_origin_json(
             component_metadata_json, origin
         )
@@ -1017,6 +1026,298 @@ class Store:
         r=await pool.fetchrow("INSERT INTO meal_presets(id,user_id,name,emoji,calories,protein,carbs,fat,fiber,meal,sort_order,active,macro_source) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,emoji=EXCLUDED.emoji,calories=EXCLUDED.calories,protein=EXCLUDED.protein,carbs=EXCLUDED.carbs,fat=EXCLUDED.fat,fiber=EXCLUDED.fiber,meal=EXCLUDED.meal,active=true,macro_source=EXCLUDED.macro_source WHERE meal_presets.user_id=EXCLUDED.user_id RETURNING *",id,user_id,values['name'],values['emoji'],values['calories'],values['protein'],values['carbs'],values['fat'],values['fiber'],values['meal'],values.get('sort_order',0),macro_source);
         if r is None: raise StoreError("Preset does not belong to authenticated user")
         return _dict(r)
+
+    # ------------------------------------------------------------------ #
+    # Durable meal drafts (migration 004). Every query is owner-scoped.
+    # ------------------------------------------------------------------ #
+
+    _DRAFT_COLUMNS = ("intent", "state", "log_date", "meal_type", "meal_type_origin",
+                      "usual_label", "session_ref", "pending_question", "parent_draft_id",
+                      "amends_entry_id", "amends_entry_revision")
+    _ITEM_COLUMNS = ("id", "position", "kind", "status", "description", "quantity", "unit",
+                     "preparation", "size", "field_origins", "needs", "question",
+                     "resolution", "estimate_consent", "template_item_id")
+    _JSON_ITEM_COLUMNS = frozenset({"field_origins", "resolution"})
+
+    async def meal_drafts_ready(self) -> bool:
+        """Whether migration 004's tables exist in the live schema."""
+        if getattr(self, "_meal_drafts_ready", False):
+            return True
+        pool = await self.connect()
+        ready = bool(await pool.fetchval(
+            "SELECT to_regclass('meal_drafts') IS NOT NULL AND to_regclass('meal_draft_items') IS NOT NULL "
+            "AND to_regclass('user_food_aliases') IS NOT NULL AND to_regclass('meal_preset_items') IS NOT NULL"))
+        self._meal_drafts_ready = ready
+        return ready
+
+    @classmethod
+    def _draft_dict(cls, row, items) -> dict[str, Any]:
+        draft = _dict(row) or {}
+        # The intended logging day is pinned at creation: a reconnect after
+        # the 4am rollover must not move it, so keep it a real date.
+        if isinstance(draft.get("log_date"), str):
+            draft["log_date"] = date.fromisoformat(draft["log_date"])
+        draft["items"] = []
+        for item in items:
+            data = _dict(item) or {}
+            for key in cls._JSON_ITEM_COLUMNS:
+                if isinstance(data.get(key), str):
+                    data[key] = json.loads(data[key])
+            if data.get("quantity") is not None:
+                data["quantity"] = float(data["quantity"])
+            draft["items"].append({key: data.get(key) for key in cls._ITEM_COLUMNS})
+        return draft
+
+    async def _draft_conn(self, conn, user_id, draft_id, *, lock: bool = False):
+        row = await conn.fetchrow(
+            "SELECT * FROM meal_drafts WHERE user_id=$1 AND id=$2" + (" FOR UPDATE" if lock else ""),
+            user_id, draft_id)
+        if row is None:
+            return None
+        items = await conn.fetch(
+            "SELECT * FROM meal_draft_items WHERE user_id=$1 AND draft_id=$2 ORDER BY position",
+            user_id, draft_id)
+        return self._draft_dict(row, items)
+
+    async def _write_draft_items(self, conn, user_id, draft_id, items) -> None:
+        await conn.execute("DELETE FROM meal_draft_items WHERE user_id=$1 AND draft_id=$2",
+                           user_id, draft_id)
+        for position, item in enumerate(items):
+            await conn.execute(
+                "INSERT INTO meal_draft_items(id,user_id,draft_id,position,kind,status,description,"
+                "quantity,unit,preparation,size,field_origins,needs,question,resolution,"
+                "estimate_consent,template_item_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,"
+                "$12::jsonb,$13,$14,$15::jsonb,$16,$17)",
+                UUID(str(item["id"])), user_id, draft_id, position, item.get("kind") or "food",
+                item.get("status") or "included", item["description"], item.get("quantity"),
+                item.get("unit"), item.get("preparation"), item.get("size"),
+                json.dumps(item.get("field_origins") or {}), item.get("needs"), item.get("question"),
+                json.dumps(item["resolution"], default=str) if item.get("resolution") is not None else None,
+                item.get("estimate_consent"),
+                UUID(str(item["template_item_id"])) if item.get("template_item_id") else None)
+
+    async def create_meal_draft(self, draft: Mapping[str, Any]) -> dict[str, Any]:
+        """Insert a new draft and its items for the authenticated user."""
+        pool = await self.connect(); user_id = current_user_id()
+        draft_id = UUID(str(draft["id"]))
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "INSERT INTO meal_drafts(id,user_id," + ",".join(self._DRAFT_COLUMNS) + ") VALUES($1,$2,"
+                + ",".join(f"${i}" for i in range(3, 3 + len(self._DRAFT_COLUMNS))) + ")",
+                draft_id, user_id, *(draft.get(key) for key in self._DRAFT_COLUMNS))
+            await self._write_draft_items(conn, user_id, draft_id, draft.get("items") or [])
+            return await self._draft_conn(conn, user_id, draft_id)
+
+    async def fetch_meal_draft(self, draft_id: str) -> dict[str, Any] | None:
+        pool = await self.connect(); user_id = current_user_id()
+        try:
+            key = UUID(str(draft_id))
+        except ValueError:
+            return None
+        async with pool.acquire() as conn:
+            return await self._draft_conn(conn, user_id, key)
+
+    async def fetch_meal_draft_context(self, *, open_since: datetime, committed_days: list[date],
+                                       limit: int = 4) -> dict[str, list[dict[str, Any]]]:
+        """Open drafts updated since ``open_since`` and current committed meals on the days."""
+        pool = await self.connect(); user_id = current_user_id()
+        async with pool.acquire() as conn:
+            open_ids = await conn.fetch(
+                "SELECT id FROM meal_drafts WHERE user_id=$1 AND state IN ('collecting','needs_detail','ready') "
+                "AND updated_at >= $2 ORDER BY updated_at DESC LIMIT $3", user_id, open_since, limit)
+            # Only the current head of each entry can be amended.
+            done_ids = await conn.fetch(
+                "SELECT d.id FROM meal_drafts d JOIN nutrition_entries e ON e.user_id=d.user_id "
+                "AND e.id=d.committed_entry_id AND e.entry_revision=d.committed_entry_revision "
+                "WHERE d.user_id=$1 AND d.state='committed' AND d.log_date = ANY($2::date[]) "
+                "ORDER BY d.committed_at DESC LIMIT $3", user_id, list(committed_days), limit)
+            return {
+                "open": [await self._draft_conn(conn, user_id, row["id"]) for row in open_ids],
+                "committed": [await self._draft_conn(conn, user_id, row["id"]) for row in done_ids],
+            }
+
+    async def save_meal_draft(self, draft: Mapping[str, Any], expected_revision: int
+                              ) -> dict[str, Any] | None:
+        """Compare-and-swap an editable draft. ``None`` means a stale revision."""
+        pool = await self.connect(); user_id = current_user_id()
+        draft_id = UUID(str(draft["id"]))
+        settable = ("intent", "state", "meal_type", "meal_type_origin", "usual_label", "pending_question")
+        async with pool.acquire() as conn, conn.transaction():
+            updated = await conn.fetchval(
+                "UPDATE meal_drafts SET " + ",".join(f"{key}=${i}" for i, key in enumerate(settable, 4))
+                + ",revision=revision+1,updated_at=now() WHERE user_id=$1 AND id=$2 AND revision=$3 "
+                "AND state IN ('collecting','needs_detail','ready') RETURNING id",
+                user_id, draft_id, int(expected_revision), *(draft.get(key) for key in settable))
+            if updated is None:
+                return None
+            await self._write_draft_items(conn, user_id, draft_id, draft.get("items") or [])
+            return await self._draft_conn(conn, user_id, draft_id)
+
+    async def commit_meal_draft(self, draft_id: str, expected_revision: int, request_hash: str,
+                                values: Mapping[str, Any], component_metadata: Any,
+                                ) -> dict[str, Any]:
+        """Write (or amend) one nutrition entry from a ready draft, exactly once.
+
+        Idempotency key is the draft revision, so a retry after an uncertain
+        response replays the stored receipt instead of writing again. The
+        draft is locked and re-validated inside the same transaction.
+        """
+        user_id = current_user_id()
+        key = UUID(str(draft_id))
+        metadata_json = _component_metadata_json(component_metadata)
+
+        async def write(conn):
+            draft = await self._draft_conn(conn, user_id, key, lock=True)
+            if draft is None or draft["state"] != "ready" or int(draft["revision"]) != int(expected_revision):
+                raise DraftConflict("The meal changed before it was saved")
+            day = draft["log_date"]
+            if draft.get("amends_entry_id"):
+                entry_id = draft["amends_entry_id"]
+                old = await conn.fetchrow(
+                    "SELECT day,meal FROM nutrition_entries WHERE user_id=$1 AND id=$2 AND entry_revision=$3 FOR UPDATE",
+                    user_id, entry_id, int(draft["amends_entry_revision"]))
+                if old is None:
+                    raise DraftConflict("That logged meal changed since it was read")
+                await _guard_unknown_nutrients(conn, values)
+                await conn.execute("INSERT INTO days(user_id,date) VALUES($1,$2) ON CONFLICT(user_id,date) DO NOTHING",
+                                   user_id, old["day"])
+                await conn.fetchval("SELECT date FROM days WHERE user_id=$1 AND date=$2 FOR UPDATE", user_id, old["day"])
+                meal_id = await conn.fetchval(
+                    "INSERT INTO meals(id,user_id,day,meal_type) VALUES($1,$2,$3,$4) "
+                    "ON CONFLICT(user_id,day,meal_type) DO UPDATE SET meal_type=EXCLUDED.meal_type RETURNING id",
+                    str(uuid4()), user_id, old["day"], values["meal"])
+                row = await conn.fetchrow(
+                    "UPDATE nutrition_entries SET name=$3,meal=$4,calories=$5,protein=$6,carbs=$7,fat=$8,fiber=$9,"
+                    "macro_source=$10,meal_id=$11,component_metadata=$12::jsonb,entry_revision=entry_revision+1,"
+                    "meal_draft_id=$13,food_item_id=NULL,food_observation_id=NULL "
+                    "WHERE user_id=$1 AND id=$2 RETURNING *",
+                    user_id, entry_id, values["name"], values["meal"], values["calories"], values["protein"],
+                    values["carbs"], values["fat"], values["fiber"], values["macro_source"], meal_id,
+                    metadata_json, key)
+                await self._refresh_rollups(conn, user_id, old["day"])
+                await conn.execute(
+                    "DELETE FROM meals WHERE user_id=$1 AND day=$2 AND NOT EXISTS "
+                    "(SELECT 1 FROM nutrition_entries WHERE user_id=$1 AND meal_id=meals.id)", user_id, old["day"])
+                outcome = "amended"
+                day = old["day"]
+            else:
+                row = await self._insert_meal_conn(
+                    conn, user_id=user_id, component_metadata_json=metadata_json,
+                    catalog_snapshot=False, day=day, **{k: values[k] for k in (
+                        "name", "meal", "calories", "protein", "carbs", "fat", "fiber", "macro_source")})
+                await conn.execute("UPDATE nutrition_entries SET meal_draft_id=$3 WHERE user_id=$1 AND id=$2",
+                                   user_id, row["id"], key)
+                await self._refresh_rollups(conn, user_id, day)
+                row = await conn.fetchrow("SELECT * FROM nutrition_entries WHERE user_id=$1 AND id=$2",
+                                          user_id, row["id"])
+                outcome = "committed"
+            await conn.execute(
+                "UPDATE meal_drafts SET state='committed',committed_entry_id=$3,committed_entry_revision=$4,"
+                "committed_operation_key=$5,committed_at=now(),updated_at=now() WHERE user_id=$1 AND id=$2",
+                user_id, key, row["id"], int(row["entry_revision"]), f"meal-draft:{key}:{expected_revision}")
+            day_row = await conn.fetchrow(
+                "SELECT calories,protein,carbs,fat,fiber FROM days WHERE user_id=$1 AND date=$2", user_id, day)
+            return {"outcome": outcome, "entry": {**meal(row), "entry_revision": int(row["entry_revision"]),
+                                                  "macro_source": row["macro_source"]},
+                    "day_total": {k: float(day_row[k] or 0) for k in ("calories", "protein", "carbs", "fat", "fiber")}
+                    if day_row else None}
+
+        return await self.run_idempotent(f"meal-draft:{key}:{expected_revision}", request_hash, write,
+                                         replay_marker=True)
+
+    async def cancel_meal_draft(self, draft_id: str, expected_revision: int) -> bool:
+        pool = await self.connect(); user_id = current_user_id()
+        return bool(await pool.fetchval(
+            "UPDATE meal_drafts SET state='canceled',revision=revision+1,updated_at=now() WHERE user_id=$1 "
+            "AND id=$2 AND revision=$3 AND state IN ('collecting','needs_detail','ready') RETURNING id",
+            user_id, UUID(str(draft_id)), int(expected_revision)))
+
+    async def fetch_entry_revision(self, entry_id: str) -> dict[str, Any] | None:
+        pool = await self.connect(); user_id = current_user_id()
+        row = await pool.fetchrow("SELECT * FROM nutrition_entries WHERE user_id=$1 AND id=$2",
+                                  user_id, str(entry_id))
+        if row is None:
+            return None
+        return {**meal(row), "entry_revision": int(row["entry_revision"]), "macro_source": row["macro_source"]}
+
+    async def resolve_usual(self, phrase: str) -> dict[str, Any] | None:
+        """The user's private saved usual for a phrase: structured or legacy."""
+        pool = await self.connect(); user_id = current_user_id()
+        normalized = normalize_food_name(phrase)
+        async with pool.acquire() as conn:
+            alias = await conn.fetchrow(
+                "SELECT target_preset_id FROM user_food_aliases WHERE user_id=$1 AND phrase=$2 AND active "
+                "AND target_preset_id IS NOT NULL", user_id, normalized)
+            preset = None
+            if alias is not None:
+                preset = await conn.fetchrow("SELECT * FROM meal_presets WHERE user_id=$1 AND id=$2 AND active",
+                                             user_id, alias["target_preset_id"])
+            if preset is None:
+                candidates = [row for row in await conn.fetch(
+                    "SELECT * FROM meal_presets WHERE user_id=$1 AND active", user_id)
+                    if normalize_food_name(row["name"]) == normalized]
+                preset = candidates[0] if len(candidates) == 1 else None
+            if preset is None:
+                return None
+            items = []
+            if preset["template_revision"] is not None:
+                items = [_dict(row) for row in await conn.fetch(
+                    "SELECT id,description,quantity,unit,preparation,size FROM meal_preset_items "
+                    "WHERE user_id=$1 AND preset_id=$2 AND template_revision=$3 ORDER BY position",
+                    user_id, preset["id"], preset["template_revision"])]
+            return {"preset": _dict(preset), "items": items}
+
+    async def save_usual(self, *, label: str, items: list[Mapping[str, Any]],
+                         totals: Mapping[str, Any], macro_source: str, meal: str) -> dict[str, Any]:
+        """Create or replace a structured usual. Saving never logs a meal."""
+        pool = await self.connect(); user_id = current_user_id()
+        phrase = normalize_food_name(label)
+        source = validate_macro_source(macro_source)
+        async with pool.acquire() as conn, conn.transaction():
+            existing = await conn.fetchrow(
+                "SELECT p.id,p.template_revision FROM user_food_aliases a JOIN meal_presets p ON "
+                "p.user_id=a.user_id AND p.id=a.target_preset_id WHERE a.user_id=$1 AND a.phrase=$2 AND a.active "
+                "FOR UPDATE OF p", user_id, phrase)
+            revision = int(existing["template_revision"] or 0) + 1 if existing else 1
+            preset_id = existing["id"] if existing else str(uuid4())
+            await conn.execute(
+                "INSERT INTO meal_presets(id,user_id,name,calories,protein,carbs,fat,fiber,meal,active,"
+                "macro_source,template_revision) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,true,$10,$11) "
+                "ON CONFLICT(id) DO UPDATE SET calories=EXCLUDED.calories,protein=EXCLUDED.protein,"
+                "carbs=EXCLUDED.carbs,fat=EXCLUDED.fat,fiber=EXCLUDED.fiber,macro_source=EXCLUDED.macro_source,"
+                "template_revision=EXCLUDED.template_revision,active=true WHERE meal_presets.user_id=EXCLUDED.user_id",
+                preset_id, user_id, label[:120], *(totals[k] for k in ("calories", "protein", "carbs", "fat", "fiber")),
+                meal, source, revision)
+            for position, item in enumerate(items):
+                await conn.execute(
+                    "INSERT INTO meal_preset_items(id,user_id,preset_id,template_revision,position,description,"
+                    "quantity,unit,preparation,size) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                    uuid4(), user_id, preset_id, revision, position, item["description"], item.get("quantity"),
+                    item.get("unit"), item.get("preparation"), item.get("size"))
+            if not existing:
+                await conn.execute(
+                    "INSERT INTO user_food_aliases(id,user_id,phrase,target_preset_id) VALUES($1,$2,$3,$4)",
+                    uuid4(), user_id, phrase, preset_id)
+            return {"preset_id": preset_id, "template_revision": revision, "phrase": phrase}
+
+    async def fetch_food_default(self, identity: str) -> str | None:
+        pool = await self.connect()
+        return await pool.fetchval(
+            "SELECT default_preparation FROM user_food_aliases WHERE user_id=$1 AND phrase=$2 AND active "
+            "AND target_identity IS NOT NULL", current_user_id(), normalize_food_name(identity))
+
+    async def set_food_default(self, identity: str, preparation: str) -> None:
+        """Remember an explicitly confirmed, recurring preparation for one food."""
+        pool = await self.connect(); user_id = current_user_id(); phrase = normalize_food_name(identity)
+        async with pool.acquire() as conn, conn.transaction():
+            updated = await conn.fetchval(
+                "UPDATE user_food_aliases SET default_preparation=$3,revision=revision+1,confirmed_at=now() "
+                "WHERE user_id=$1 AND phrase=$2 AND active AND target_identity IS NOT NULL RETURNING id",
+                user_id, phrase, preparation)
+            if updated is None:
+                await conn.execute(
+                    "INSERT INTO user_food_aliases(id,user_id,phrase,target_identity,default_preparation) "
+                    "VALUES($1,$2,$3,$4,$5)", uuid4(), user_id, phrase, identity[:200], preparation)
 
     async def insert_targets(self, day: date, values: Mapping[str, float]):
         pool=await self.connect(); id=str(uuid4()); user_id=current_user_id()

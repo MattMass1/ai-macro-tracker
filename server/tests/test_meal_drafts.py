@@ -484,3 +484,50 @@ async def test_repeat_asks_again_for_a_web_estimate(env):
     finally:
         reset_user(token)
     assert again["status"] == "needs_detail" and "web estimate" in again["question"]
+
+
+
+# --------------------------------------------------------------------------- #
+# Ahi tuna loop (reported 2026-10-16): raw/cooked answered, then "how much?"
+# asked again and again after the user had already said 3 oz.
+# --------------------------------------------------------------------------- #
+
+@pg
+async def test_ahi_tuna_by_weight_logs_after_raw_or_cooked(env):
+    from auth import reset_user
+    token = _as(env["users"][0])
+    try:
+        first = await env["engine"].handle({"add": [{"description": "ahi tuna", "quantity": 3, "unit": "oz"}]})
+        assert first["question"] == "Was that 3 oz of ahi tuna weighed raw or cooked?"
+        raw = await env["engine"].handle({"draft_ref": first["draft_ref"],
+                                          "edit": [{"item_ref": "item1", "preparation": "raw"}]})
+        cooked = await env["engine"].handle({"add": [
+            {"description": "ahi tuna", "quantity": 3, "unit": "oz", "preparation": "cooked"}]})
+    finally:
+        reset_user(token)
+    assert raw["status"] == "committed", raw
+    assert raw["logged"]["calories"] == round(85.0485 * 1.09, 2) and "FDC 175159" in raw["logged"]["macro_source"]
+    assert cooked["status"] == "committed" and "FDC 172006" in cooked["logged"]["macro_source"]
+
+
+@pg
+async def test_never_asks_how_much_again_after_an_amount_was_given(env):
+    from auth import reset_user
+    engine = env["engine"]
+
+    async def unweighable(component):  # a provider panel with no weight
+        return {"portion_error": True, "name": component["description"]}
+    engine.resolve = unweighable
+    token = _as(env["users"][0])
+    try:
+        first = await engine.handle({"add": [{"description": "fixture poke bowl", "quantity": 3, "unit": "oz"}]})
+        again = await engine.handle({"draft_ref": first["draft_ref"],
+                                     "edit": [{"item_ref": "item1", "quantity": 3, "unit": "oz"}]})
+        unstated = await engine.handle({"add": [{"description": "fixture poke bowl"}]})
+    finally:
+        reset_user(token)
+    for result in (first, again):
+        assert result["status"] == "needs_detail"
+        assert "How much" not in result["question"]
+        assert "can't be measured as 3 oz" in result["question"]
+    assert unstated["question"] == "How much fixture poke bowl was it?"  # only when no amount was given

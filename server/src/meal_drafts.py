@@ -494,8 +494,19 @@ class MealDrafts:
                     logger.warning("meal draft item resolution failed: %s", type(exc).__name__)
                     found = None
             if found is not None and found.get("portion_error"):
-                item["needs"] = "portion"
-                item["question"] = f"How much {item['description']} was it?"
+                origins = item.get("field_origins") or {}
+                if any(origins.get(k) in {"user", "saved_usual"} for k in ("quantity", "unit", "size")) \
+                        or origins.get("all") == "saved_usual":
+                    # The user already gave the amount; asking "how much" again
+                    # loops forever. The source can't use that amount, so say so
+                    # and ask for something that can change the lookup.
+                    item["needs"] = "identity"
+                    item["question"] = (f"I found {item['description']}, but its nutrition source can't be "
+                                        f"measured as {portion_text(item) or 'that amount'}. Is it a specific "
+                                        "brand or dish, or how many servings was it?")
+                else:
+                    item["needs"] = "portion"
+                    item["question"] = f"How much {item['description']} was it?"
                 return
             basis = str((found or {}).get("basis") or "").casefold()
             if found is not None and item.get("unit") in MASS_UNITS and (

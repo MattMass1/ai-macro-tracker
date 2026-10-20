@@ -18,7 +18,7 @@ class StubDrafts:
         return {"open_meals": [{"draft_ref": "d1", "items": [{"item_ref": "item1", "text": "3 oz 93/7 ground beef",
                                                            "needs": "preparation"}]}], "logged_meals": []}
 
-    async def handle(self, args, *, session_ref=None):
+    async def handle(self, args, *, session_ref=None, **_turn):  # turn_ref/settle from the canvas
         self.calls.append((args, session_ref))
         return {"status": "committed", "draft_ref": "d1", "logged": {"id": "row-1", "name": "3 oz beef"},
                 "confirmation": "Logged 3 oz beef as Lunch."}

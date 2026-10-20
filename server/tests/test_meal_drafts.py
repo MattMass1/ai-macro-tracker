@@ -463,27 +463,35 @@ async def test_bad_edit_leaves_no_stray_draft(env):
 
 
 @pg
-async def test_repeat_asks_again_for_a_web_estimate(env):
+async def test_web_estimate_is_auto_included_and_refetched_on_repeat(env):
+    # Option A (owner decision 2026-10-20): a source-backed web estimate is
+    # included automatically and disclosed as "est."; no consent question.
     from auth import reset_user
     engine = env["engine"]
     estimate = {"name": "fixture stew", "macro_source": "WEB ESTIMATE (unverified): example.test",
                 "calories": 300, "protein": 20, "carbs": 30, "fat": 10, "fiber": 2,
                 "estimate_provenance": "server_web_estimate", "attribution": {"source_host": "example.test"}}
     real = engine.resolve
+    stew_calls = []
 
     async def resolve(component):
-        return dict(estimate) if "stew" in component["description"] else await real(component)
+        if "stew" in component["description"]:
+            stew_calls.append(component["description"])
+            return dict(estimate)
+        return await real(component)
     engine.resolve = resolve
     token = _as(env["users"][0])
     try:
-        first = await engine.handle({"add": [{"description": "fixture stew", "quantity": 1}]})
-        assert first["status"] == "needs_detail" and "web estimate" in first["question"]
-        logged = await engine.handle({"draft_ref": first["draft_ref"], "consent_estimate": ["item1"]})
+        logged = await engine.handle({"add": [{"description": "fixture stew", "quantity": 1}]})
         assert logged["status"] == "committed", logged
+        assert "(est., example.test)" in logged["confirmation"]
         again = await engine.handle({"repeat_ref": logged["draft_ref"]})
     finally:
         reset_user(token)
-    assert again["status"] == "needs_detail" and "web estimate" in again["question"]
+    assert again["status"] == "committed" and again["entry_id"] != logged["entry_id"]
+    assert "(est., example.test)" in again["confirmation"]
+    assert len(stew_calls) == 2  # the repeat re-fetches the estimate instead of reusing it
+    assert len(await _rows(env["url"], "SELECT 1 FROM nutrition_entries")) == 2
 
 
 

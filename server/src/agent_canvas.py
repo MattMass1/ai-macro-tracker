@@ -622,6 +622,9 @@ class CanvasService:
             presented = False
 
             turn_meals: dict[str, dict] = {}
+            turn_drafts: dict[str, dict] = {}  # last update_meal result per draft this turn
+            turn_heads: dict[str, tuple[str, bool]] = {}  # meal key -> (newest draft_ref, logged?)
+            turn_keys: dict[str, str] = {}  # any ref of a meal seen this turn -> its meal key
 
             async def update_meal(args):
                 nonlocal last_food_result
@@ -631,9 +634,55 @@ class CanvasService:
                 fingerprint = _meal_call_fingerprint(args) if new_meal else None
                 if fingerprint in turn_meals:
                     return turn_meals[fingerprint]
-                result = await drafts.handle(args, session_ref=f"canvas:{session_id}")
+                # Every call in this user turn shares turn_id; an unanswered
+                # question is settled once, after the whole turn (below), so
+                # several calls in one round all apply first.
+                # One meal may get several calls in one turn (often one round):
+                # every call naming it, by draft_ref or amend_ref, goes to its
+                # newest version this turn (the head), so no call edits a stale
+                # copy and no food is lost.
+                ref = str(args.get("draft_ref") or args.get("amend_ref") or "")
+                key = turn_keys.get(ref, ref)  # the meal's first ref this turn
+                head = turn_heads.get(key)
+                call = dict(args)
+                if head is not None:
+                    call.pop("amend_ref", None)
+                    # An open head takes the edit; a logged head replays a no-op
+                    # from ITS items, and a real change is retried as its amend.
+                    call["draft_ref"] = head[0]
+                result = await drafts.handle(call, session_ref=f"canvas:{session_id}",
+                                             turn_ref=turn_id, settle=False)
+                if result.get("status") == "conflict" and head is not None and head[1]:
+                    # The head was logged earlier in this turn (e.g. "Raw" before
+                    # "just log the tuna"): amend that entry. One re-call only.
+                    amend = {k: v for k, v in call.items() if k != "draft_ref"}
+                    result = await drafts.handle({**amend, "amend_ref": head[0]},
+                                                 session_ref=f"canvas:{session_id}",
+                                                 turn_ref=turn_id, settle=False)
+                if key:
+                    result["reply_key"] = key  # the same meal: its last receipt is the reply
+                    status = result.get("status")
+                    if result.get("draft_ref") and status in {"committed", "amended", "needs_detail"}:
+                        # Replays and failures never move the head.
+                        turn_heads[key] = (str(result["draft_ref"]), status != "needs_detail")
+                        turn_keys[ref] = turn_keys[str(result["draft_ref"])] = key
                 if fingerprint is not None and result.get("status") in {"committed", "replayed", "unknown", "needs_detail", "planned"}:
                     turn_meals[fingerprint] = result
+                return present_meal(result)
+
+            def present_meal(result):
+                nonlocal last_food_result
+                # The server writes the final reply: a verified receipt (plus any
+                # offer) or the one open question ends the turn without another
+                # model round, so the model can't paraphrase or re-ask.
+                if result.get("status") in {"committed", "amended", "replayed"} and result.get("confirmation"):
+                    result["end_turn"] = True
+                    result["reply"] = " ".join(filter(None, (result["confirmation"], result.get("offer"))))
+                elif result.get("status") == "needs_detail" and result.get("question"):
+                    result["end_turn"] = True
+                    result["reply"] = result["question"]
+                if result.get("reply_key") or result.get("draft_ref"):
+                    turn_drafts[str(result.get("reply_key") or result["draft_ref"])] = result
                 last_food_result = result
                 if result.get("status") in {"committed", "amended", "replayed"}:
                     task = session.canvas.surfaces.get("task")
@@ -955,6 +1004,20 @@ class CanvasService:
                     record_usage=record_usage,
                     instruction_override=instructions,
                 )
+                # Ask once: a meal still waiting on a question asked in an
+                # EARLIER turn is settled now (assumed basis or not counted),
+                # and its receipt replaces the repeated question.
+                settled = False
+                for ref, last in list(turn_drafts.items()):
+                    if last.get("status") == "needs_detail" and hasattr(drafts, "settle"):
+                        outcome = await drafts.settle(str(last.get("draft_ref") or ref), turn_ref=turn_id)
+                        if outcome is not None:
+                            present_meal(outcome)
+                            settled = True
+                if settled:
+                    reply = " ".join(dict.fromkeys(
+                        str(r.get("reply") or r.get("confirmation") or "") for r in turn_drafts.values()
+                        if r.get("reply") or r.get("confirmation")))
             except Exception as exc:
                 # Operational diagnosis only: exception class and the provider's
                 # error message (never request bodies, headers or user content).

@@ -215,6 +215,15 @@ async def run_agent(
 
         messages.append({"role": "assistant", "content": assistant.get("content"),
                          "tool_calls": uses})
+        # A handler result marked end_turn carries the server-written reply
+        # (e.g. a meal receipt or its one question): the rest of this round
+        # still runs, then the turn ends with no further provider call.
+        server_replies: dict[str, str] = {}  # last reply per draft_ref, in first-seen order
+        # Never let an end_turn reply hide another call's outcome: failure texts
+        # are added to the reply, and a raw tool error sends the round back to
+        # the model instead of ending the turn.
+        failures: list[str] = []
+        round_error = False
         for use in uses:
             # One API round may carry many tool_use blocks, so the round cap
             # alone does not bound writes — recheck before every execution.
@@ -245,6 +254,16 @@ async def run_agent(
                     except Exception as exc:  # Tool failures are observations, not API crashes.
                         is_error = True
                         result = {"error": str(exc)}
+            if not is_error and isinstance(result, Mapping) and result.get("end_turn"):
+                text = str(result.get("reply") or result.get("confirmation")
+                           or result.get("question") or "").strip()
+                if text:
+                    key = result.get("reply_key") or result.get("draft_ref") or f"call-{len(server_replies)}"
+                    server_replies[str(key)] = text
+            elif (not is_error and isinstance(result, Mapping) and result.get("confirmation")
+                    and result.get("status") in {"conflict", "failed", "unknown"}):
+                failures.append(str(result["confirmation"]).strip())
+            round_error = round_error or is_error
             audit_entry = {"tool": name, "input": tool_input, "ok": not is_error}
             # Keep the complete result in the tool message for the model, but
             # persist only the fields needed by response widgets/cards.
@@ -268,4 +287,6 @@ async def run_agent(
             messages.append({"role": "tool", "tool_call_id": use.get("id"),
                              "content": json.dumps({"result": result, "is_error": is_error},
                                                    default=str)})
+        if server_replies and not round_error:
+            return " ".join(dict.fromkeys([*server_replies.values(), *failures])), audit
     raise CoachProviderError("The coach reached its tool limit.")

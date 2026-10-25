@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Awaitable, Callable, Mapping
 from uuid import UUID, uuid4
 
+import dish_estimates
 import domain
 from food_catalog import normalize_food_name
 
@@ -59,7 +60,16 @@ _CONDIMENT_TAIL = re.compile(
 # The only condiment names that may contain "and"/"&" (one token while splitting).
 _COMPOUND_CONDIMENT = re.compile(
     r"\b(?:sweet\s*(?:and|&)\s*sour|salt\s*(?:and|&)\s*pepper|oil\s*(?:and|&)\s*vinegar)\b", re.IGNORECASE)
-ESTIMATE_PROVENANCE = frozenset({"curated_generic_assumption", "server_web_estimate", "generic_core_fallback"})
+ESTIMATE_PROVENANCE = frozenset({"curated_generic_assumption", "server_web_estimate", "generic_core_fallback",
+                                 "typical_serving_estimate"})
+TYPICAL = "typical_serving_estimate"
+
+
+def typical_estimates_enabled() -> bool:
+    """Kill switch: TYPICAL_SERVING_ESTIMATES=off restores the previous
+    behavior (no recipe-built dish estimates, no typical piece counts)."""
+    import os
+    return os.environ.get("TYPICAL_SERVING_ESTIMATES", "").strip().casefold() != "off"
 NOT_COUNTED_HINT = "tell me what it was to add it"
 
 Resolver = Callable[[Mapping[str, Any]], Awaitable[dict[str, Any] | None]]
@@ -77,7 +87,7 @@ def _fingerprint(resolution: Mapping[str, Any]) -> str:
 def _clean_description(text: Any) -> str:
     value = " ".join(str(text or "").split()).strip(" .,")
     value = _LEADING_FILLER.sub("", value).strip()
-    if not 1 <= len(value) <= 160:
+    if not 1 <= len(value) <= 200:
         raise DraftInputError("Each food needs a short description")
     return value
 
@@ -160,6 +170,9 @@ def estimate_label(resolution: Mapping[str, Any]) -> str | None:
     provenance = resolution.get("estimate_provenance")
     if provenance not in ESTIMATE_PROVENANCE:
         return None
+    if provenance == TYPICAL:
+        size = resolution.get("typical_size")
+        return f"(est., typical {size} recipe)" if size else "(est., standard serving)"
     web = provenance == "server_web_estimate" or resolution.get("core_provenance") == "server_web_estimate"
     host = (resolution.get("attribution") or {}).get("source_host") if web else None
     parts = [f"est., {host or ('web' if web else 'generic')}"]
@@ -204,7 +217,8 @@ def _persistable(resolution: Mapping[str, Any]) -> dict[str, Any]:
     attribution: Mapping[str, Any] = raw_attribution if isinstance(raw_attribution, Mapping) else {}
     kept = {key: resolution.get(key) for key in (
         "name", "macro_source", *MACROS, "assumption", "basis", "estimate_provenance",
-        "carbohydrate_definition") if resolution.get(key) is not None}
+        "carbohydrate_definition", "typical_size", "built_from", "not_counted_parts")
+        if resolution.get(key) is not None}
     kept["attribution"] = {k: attribution.get(k) for k in (
         "provider", "external_id", "verification_state", "cache_allowed", "source_host")
         if attribution.get(k) is not None}
@@ -759,12 +773,35 @@ class MealDrafts:
                     item["field_origins"] = {**(item.get("field_origins") or {}), "preparation": "saved_default"}
         gate = asyncio.Semaphore(4)
 
+        typical_on = typical_estimates_enabled()
+
         async def one(item):
             if needs_weight_basis(item):
                 item["needs"] = "preparation"
                 item["question"] = f"Was that {portion_text(item)} of {item['description']} weighed raw or cooked?"
                 return
+            origins = item.get("field_origins") or {}
+            if typical_on and item.get("quantity") is None and not item.get("unit") and not item.get("size") \
+                    and origins.get("all") not in {"saved_usual", "saved_preset"}:
+                # "eggs", "bacon": no amount at all means a typical serving, not one piece.
+                count = dish_estimates.typical_count(item["description"])
+                if count:
+                    item["quantity"] = float(count)
+                    item["field_origins"] = origins = {**origins, "quantity": "typical_serving"}
+            typical = dish_estimates.estimate(item) if typical_on else None
+            if typical and typical.get("dish") and typical.get("listed"):
+                # The user said what was in it: build it from those contents at a
+                # typical serving; a database or web guess at the dish name can't
+                # know what this one held.
+                self._accept(item, typical)
+                return
             found = await self._lookup(item, gate)
+            if typical and (found is None or found.get("portion_error")
+                            or found.get("estimate_provenance") == "server_web_estimate"):
+                # No source for that amount, or only a web guess: a typical serving
+                # (marked est.) instead of asking or leaving it out.
+                self._accept(item, typical)
+                return
             if found is not None and found.get("portion_error"):
                 origins = item.get("field_origins") or {}
                 item["needs"] = "portion"
@@ -980,7 +1017,15 @@ class MealDrafts:
                 notes.append(f"used your usual {item['preparation']} weight for {item['description']}")
             # A count ("1 apple") is not a size: the standard-size assumption is disclosed.
             stated = any(origins.get(k) == "user" for k in ("unit", "size"))
-            if resolution.get("assumption") and not stated and origins.get("all") not in {"saved_usual", "saved_preset"}:
+            if origins.get("quantity") == "typical_serving":
+                notes.append(f"{item['description']}: assumed {item['quantity']:g}, a typical serving")
+            elif resolution.get("estimate_provenance") == TYPICAL:
+                # Always say what a typical-serving estimate was built from, so it can be corrected.
+                note = f"{item['description']}: {resolution.get('assumption')}"
+                if resolution.get("not_counted_parts"):
+                    note += "; not counted: " + ", ".join(resolution["not_counted_parts"])
+                notes.append(note)
+            elif resolution.get("assumption") and not stated and origins.get("all") not in {"saved_usual", "saved_preset"}:
                 notes.append(f"{item['description']}: {resolution['assumption']}")
         if notes:
             text += " " + "; ".join(notes).capitalize() + "."
@@ -1068,11 +1113,14 @@ MEAL_DRAFT_TOOL = {
         "draft_ref plus edit/remove. Log a repeat ('same as yesterday', 'another one'): repeat_ref. "
         "My usual X: add {description:X, usual:true}. Future/planned food: intent plan. "
         "Unknown foods are estimated by the server (marked est.) or left out as not counted; they never "
-        "block the meal. Open meal lanes: log_now:true logs what is ready now ('log it', 'log what you "
+        "block the meal. A dish with its contents is ONE item: put the contents in its description "
+        "('breakfast burrito with eggs, sausage and cheese'), small/medium/large in size; the server "
+        "estimates a typical serving of that recipe. Separate foods are separate items. Open meal lanes: log_now:true logs what is ready now ('log it', 'log what you "
         "have', 'whatever', 'estimate it', 'that's fine'); only:[item_ref] for 'just log X' or 'only the X' "
         "(everything else is removed); skip:[item_ref] for 'skip X' or 'leave X out'. "
         "Never send macro numbers. Examples: "
         '{"add":[{"description":"93/7 ground beef","quantity":3,"unit":"oz"},{"description":"green apple","quantity":1}]} '
+        '{"add":[{"description":"eggs"},{"description":"breakfast burrito with sausage and cheese","size":"large"}]} '
         '{"draft_ref":"<ref>","edit":[{"item_ref":"item1","preparation":"raw"}]} '
         '{"draft_ref":"<ref>","log_now":true} '
         '{"add":[{"description":"chick fil a","usual":true}]}'),
@@ -1083,7 +1131,7 @@ MEAL_DRAFT_TOOL = {
         "intent": {"type": "string", "enum": ["consume", "plan"]},
         "meal_type": {"type": "string", "enum": list(domain.MEALS)},
         "add": {"type": "array", "maxItems": MAX_ITEMS, "items": {"type": "object", "properties": {
-            "description": {"type": "string", "minLength": 1, "maxLength": 160},
+            "description": {"type": "string", "minLength": 1, "maxLength": 200},
             "quantity": {"type": "number", "exclusiveMinimum": 0, "maximum": 5000},
             "unit": {"type": "string", "maxLength": 20},
             "size": {"type": "string", "enum": ["small", "medium", "large"]},
@@ -1092,7 +1140,7 @@ MEAL_DRAFT_TOOL = {
             "required": ["description"], "additionalProperties": False}},
         "edit": {"type": "array", "maxItems": MAX_ITEMS, "items": {"type": "object", "properties": {
             "item_ref": {"type": "string", "maxLength": 16},
-            "description": {"type": "string", "minLength": 1, "maxLength": 160},
+            "description": {"type": "string", "minLength": 1, "maxLength": 200},
             "quantity": {"type": "number", "exclusiveMinimum": 0, "maximum": 5000},
             "unit": {"type": "string", "maxLength": 20},
             "size": {"type": "string", "enum": ["small", "medium", "large"]},
@@ -1123,6 +1171,11 @@ exactly that question (the server sends its question or receipt as the reply). W
 call update_meal with the SAME draft_ref and edit only the item_ref the question named.
 The server estimates foods it can't verify (marked est. with the source) and leaves out anything it
 has no source for as "not counted"; neither blocks the meal and you never ask about them yourself.
+No measurements is fine: never ask for weights, sizes or amounts. A dish and what was in it is ONE
+item with the contents in its description ("salad with bacon and cheese", "breakfast burrito with
+eggs, sausage and cheese"), plus size small/medium/large only if the user said it; the server
+estimates a typical serving of that recipe and says what it assumed. To correct a dish ("it also had
+bacon", "it was a large one"), edit that item's description or size.
 Lanes for an open meal, always with its SAME draft_ref:
 - "log it", "log what you have", "that's it" -> log_now:true (open items become not counted).
 - "just log X", "only the X", "skip the rest" -> only:[X's item_ref] (every other item is removed).

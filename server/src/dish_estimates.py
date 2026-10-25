@@ -353,3 +353,9 @@ _TYPICAL_COUNTS = {"eggs": 2, "scrambled eggs": 2, "boiled eggs": 2, "hard boile
 def typical_count(description: str) -> int | None:
     """Pieces in a typical serving of a bare count food, else None."""
     return _TYPICAL_COUNTS.get(" ".join(_FILLER.sub(" ", _norm(description)).split()))
+
+
+def dish_name(description: str) -> str | None:
+    """The dish word(s) alone ("breakfast burrito") from a described dish, or None."""
+    match = _DISH_PATTERN.search(_norm(description))
+    return match[1] if match else None

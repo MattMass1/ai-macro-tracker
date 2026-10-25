@@ -25,6 +25,7 @@ from uuid import UUID, uuid4
 
 import dish_estimates
 import domain
+import meal_intent
 from food_catalog import normalize_food_name
 
 logger = logging.getLogger("meal_drafts")
@@ -198,7 +199,7 @@ def default_meal_type(now: datetime) -> str:
 
 def _food_query(item: Mapping[str, Any]) -> dict[str, Any]:
     """The resolver component for one item: identity plus the stated portion."""
-    description = item["description"]
+    description = meal_intent.lookup_description(item)
     preparation = item.get("preparation")
     if preparation and not _PREP_WORD.search(description):
         description = f"{preparation} {description}"
@@ -217,7 +218,7 @@ def _persistable(resolution: Mapping[str, Any]) -> dict[str, Any]:
     attribution: Mapping[str, Any] = raw_attribution if isinstance(raw_attribution, Mapping) else {}
     kept = {key: resolution.get(key) for key in (
         "name", "macro_source", *MACROS, "assumption", "basis", "estimate_provenance",
-        "carbohydrate_definition", "typical_size", "built_from", "not_counted_parts")
+        "carbohydrate_definition", "typical_size", "built_from", "not_counted_parts", "place_not_found")
         if resolution.get(key) is not None}
     kept["attribution"] = {k: attribution.get(k) for k in (
         "provider", "external_id", "verification_state", "cache_allowed", "source_host")
@@ -506,6 +507,10 @@ class MealDrafts:
                     if key == "item_ref":
                         continue
                     current = item.get(key)
+                    if key in {"source", "place"}:
+                        current = (item.get("field_origins") or {}).get("source_kind" if key == "source" else "place")
+                        if key == "place" and value is not None:
+                            value = meal_intent.clean_place(value)
                     if key == "description":
                         value = _clean_description(value)
                     elif key == "quantity":
@@ -514,7 +519,7 @@ class MealDrafts:
                         value = str(value).strip().casefold()
                     if current != value:
                         return False
-        except (DraftInputError, AttributeError, TypeError):
+        except (DraftInputError, AttributeError, TypeError, ValueError):
             return False
         return True
 
@@ -551,8 +556,32 @@ class MealDrafts:
                 raise DraftInputError("preparation must be raw or cooked")
             item["preparation"] = preparation
             origins["preparation"] = origin
+        self._route(item, origins, spec)
         item["field_origins"] = origins
         self._invalidate(item)
+
+    @staticmethod
+    def _route(item, origins, spec) -> None:
+        """The intent layer: restaurant, brand or homemade, decided before any
+        lookup (meal_intent). The model's call wins; otherwise the words decide;
+        a description edit re-infers unless the model chose the lane."""
+        kind = spec.get("source", origins.get("source_kind") if origins.get("source_decided") == "model" else None)
+        if kind is not None and kind not in meal_intent.KINDS:
+            raise DraftInputError("source must be restaurant, packaged or homemade")
+        try:
+            place = meal_intent.clean_place(spec["place"]) if "place" in spec else (
+                origins.get("place") if origins.get("source_decided") == "model" else None)
+        except ValueError as exc:
+            raise DraftInputError(str(exc)) from None
+        if place and kind is None:
+            kind = "restaurant" if meal_intent.chain_in(place) else "packaged"
+        if kind == "packaged" and not place:
+            kind = None  # a packaged lane needs the maker's name; let the words decide
+        lane, place, decided = meal_intent.route(item["description"], kind, place)
+        for key in ("source_kind", "place", "source_decided"):
+            origins.pop(key, None)
+        if lane:
+            origins.update(source_kind=lane, source_decided=decided, **({"place": place} if place else {}))
 
     async def _apply_edits(self, draft, args) -> None:
         if args.get("intent"):
@@ -579,8 +608,8 @@ class MealDrafts:
             if not isinstance(spec, Mapping) or "item_ref" not in spec:
                 raise DraftInputError("Each edit needs an item_ref")
             fields = {k: v for k, v in spec.items() if k != "item_ref"}
-            if not fields or set(fields) - {"description", "quantity", "unit", "size", "preparation"}:
-                raise DraftInputError("Edits may change description, quantity, unit, size or preparation")
+            if not fields or set(fields) - {"description", "quantity", "unit", "size", "preparation", "source", "place"}:
+                raise DraftInputError("Edits may change description, quantity, unit, size, preparation, source or place")
             item = self._item(draft, spec["item_ref"])
             if item.get("kind") == "usual" and item.get("resolution") and set(fields) == {"quantity"}:
                 # Opaque saved preset: "make that two" scales its stored panel.
@@ -619,8 +648,9 @@ class MealDrafts:
         for spec in added:
             if not isinstance(spec, Mapping):
                 raise DraftInputError("Each added food must be an object")
-            if set(spec) - {"description", "quantity", "unit", "size", "preparation", "usual"}:
-                raise DraftInputError("Added foods take description, quantity, unit, size, preparation, usual")
+            if set(spec) - {"description", "quantity", "unit", "size", "preparation", "usual", "source", "place"}:
+                raise DraftInputError("Added foods take description, quantity, unit, size, preparation, "
+                                      "source, place, usual")
             if spec.get("usual"):
                 await self._add_usual(draft, spec)
                 continue
@@ -789,15 +819,31 @@ class MealDrafts:
                     item["quantity"] = float(count)
                     item["field_origins"] = origins = {**origins, "quantity": "typical_serving"}
             typical = dish_estimates.estimate(item) if typical_on else None
-            if typical and typical.get("dish") and typical.get("listed"):
-                # The user said what was in it: build it from those contents at a
-                # typical serving; a database or web guess at the dish name can't
-                # know what this one held.
+            lane = origins.get("source_kind") if typical_on else None
+            if typical and typical.get("dish") and (lane == "homemade" or (lane is None and typical.get("listed"))):
+                # Home cooking (or a dish the user described by its contents): a
+                # menu or web number for the dish name can't know this one, so it
+                # is built from a typical recipe. Never looked up by name.
                 self._accept(item, typical)
                 return
             found = await self._lookup(item, gate)
-            if typical and (found is None or found.get("portion_error")
-                            or found.get("estimate_provenance") == "server_web_estimate"):
+            if lane in {"restaurant", "packaged"} and (found is None or found.get("portion_error")):
+                # "McDonald's breakfast burrito with eggs and sausage": menus list the
+                # item by its name, so search the place plus the dish name alone.
+                core = dish_estimates.dish_name(item["description"])
+                if core and core != item["description"].casefold():
+                    trial = await self._lookup({**item, "description": core}, gate)
+                    if trial is not None and not trial.get("portion_error"):
+                        found = trial
+            if lane in {"restaurant", "packaged"}:
+                # Restaurant and packaged food is looked up as that place's item
+                # (menu/label data, then an online estimate). Only when nothing at
+                # all is found is a typical recipe used, and the receipt says so.
+                if typical and (found is None or found.get("portion_error")):
+                    self._accept(item, typical, place_not_found=origins.get("place") or lane)
+                    return
+            elif typical and (found is None or found.get("portion_error")
+                              or found.get("estimate_provenance") == "server_web_estimate"):
                 # No source for that amount, or only a web guess: a typical serving
                 # (marked est.) instead of asking or leaving it out.
                 self._accept(item, typical)
@@ -931,7 +977,13 @@ class MealDrafts:
     def _counted_text(item) -> str:
         """What the numbers describe: the core food for a generic-core estimate."""
         core = (item.get("resolution") or {}).get("core_identity")
-        return item_text({**item, "description": core}) if core else item_text(item)
+        text = item_text({**item, "description": core}) if core else item_text(item)
+        origins = item.get("field_origins") or {}
+        place = origins.get("place")
+        if place and origins.get("source_kind") in {"restaurant", "packaged"} \
+                and not meal_intent.names_place(item["description"], place):
+            text += f" ({place})"
+        return text
 
     async def _commit(self, draft, live: dict[str, dict[str, Any]]) -> dict[str, Any]:
         from store import DraftConflict  # local import keeps this module store-agnostic
@@ -1022,13 +1074,20 @@ class MealDrafts:
             elif resolution.get("estimate_provenance") == TYPICAL:
                 # Always say what a typical-serving estimate was built from, so it can be corrected.
                 note = f"{item['description']}: {resolution.get('assumption')}"
+                if resolution.get("place_not_found"):
+                    missing = resolution["place_not_found"]
+                    note = (f"{item['description']}: no published numbers found for {missing}, so this is a "
+                            f"typical recipe; " + str(resolution.get("assumption")))
                 if resolution.get("not_counted_parts"):
                     note += "; not counted: " + ", ".join(resolution["not_counted_parts"])
                 notes.append(note)
             elif resolution.get("assumption") and not stated and origins.get("all") not in {"saved_usual", "saved_preset"}:
                 notes.append(f"{item['description']}: {resolution['assumption']}")
+
         if notes:
-            text += " " + "; ".join(notes).capitalize() + "."
+            joined = "; ".join(notes)
+            # Only the first letter: names like McDonald's keep their capitals.
+            text += " " + joined[:1].upper() + joined[1:] + "."
         left_out = [item for item in draft["items"] if not_counted(item)]
         if left_out:
             text += f" Not counted: {self._not_counted_text(left_out)}; {NOT_COUNTED_HINT}."
@@ -1115,12 +1174,16 @@ MEAL_DRAFT_TOOL = {
         "Unknown foods are estimated by the server (marked est.) or left out as not counted; they never "
         "block the meal. A dish with its contents is ONE item: put the contents in its description "
         "('breakfast burrito with eggs, sausage and cheese'), small/medium/large in size; the server "
-        "estimates a typical serving of that recipe. Separate foods are separate items. Open meal lanes: log_now:true logs what is ready now ('log it', 'log what you "
+        "estimates a typical serving of that recipe. Separate foods are separate items. "
+        "Tag where each food came from: source restaurant (+ place, e.g. McDonald's) for restaurant, "
+        "fast-food or takeout food; packaged (+ place = its maker) for a store-bought product; homemade for "
+        "home cooking or a generic dish. Infer it from the whole conversation; omit if unclear. Open meal lanes: log_now:true logs what is ready now ('log it', 'log what you "
         "have', 'whatever', 'estimate it', 'that's fine'); only:[item_ref] for 'just log X' or 'only the X' "
         "(everything else is removed); skip:[item_ref] for 'skip X' or 'leave X out'. "
         "Never send macro numbers. Examples: "
         '{"add":[{"description":"93/7 ground beef","quantity":3,"unit":"oz"},{"description":"green apple","quantity":1}]} '
-        '{"add":[{"description":"eggs"},{"description":"breakfast burrito with sausage and cheese","size":"large"}]} '
+        '{"add":[{"description":"eggs","source":"homemade"},{"description":"breakfast burrito with sausage and cheese","size":"large","source":"homemade"}]} '
+        '{"add":[{"description":"Big Mac","source":"restaurant","place":"McDonald\'s"},{"description":"medium fries","source":"restaurant","place":"McDonald\'s"}]} '
         '{"draft_ref":"<ref>","edit":[{"item_ref":"item1","preparation":"raw"}]} '
         '{"draft_ref":"<ref>","log_now":true} '
         '{"add":[{"description":"chick fil a","usual":true}]}'),
@@ -1136,6 +1199,8 @@ MEAL_DRAFT_TOOL = {
             "unit": {"type": "string", "maxLength": 20},
             "size": {"type": "string", "enum": ["small", "medium", "large"]},
             "preparation": {"type": "string", "enum": ["raw", "cooked"]},
+            "source": {"type": "string", "enum": ["restaurant", "packaged", "homemade"]},
+            "place": {"type": "string", "minLength": 1, "maxLength": 60},
             "usual": {"type": "boolean"}},
             "required": ["description"], "additionalProperties": False}},
         "edit": {"type": "array", "maxItems": MAX_ITEMS, "items": {"type": "object", "properties": {
@@ -1144,7 +1209,9 @@ MEAL_DRAFT_TOOL = {
             "quantity": {"type": "number", "exclusiveMinimum": 0, "maximum": 5000},
             "unit": {"type": "string", "maxLength": 20},
             "size": {"type": "string", "enum": ["small", "medium", "large"]},
-            "preparation": {"type": "string", "enum": ["raw", "cooked"]}},
+            "preparation": {"type": "string", "enum": ["raw", "cooked"]},
+            "source": {"type": "string", "enum": ["restaurant", "packaged", "homemade"]},
+            "place": {"type": "string", "minLength": 1, "maxLength": 60}},
             "required": ["item_ref"], "additionalProperties": False}},
         "remove": {"type": "array", "maxItems": MAX_ITEMS, "items": {"type": "string", "maxLength": 16}},
         "only": {"type": "array", "maxItems": MAX_ITEMS, "items": {"type": "string", "maxLength": 16}},
@@ -1176,6 +1243,13 @@ item with the contents in its description ("salad with bacon and cheese", "break
 eggs, sausage and cheese"), plus size small/medium/large only if the user said it; the server
 estimates a typical serving of that recipe and says what it assumed. To correct a dish ("it also had
 bacon", "it was a large one"), edit that item's description or size.
+WHERE IT CAME FROM (set on every food you can, from the whole conversation; never ask the user):
+- source "restaurant" + place: ordered at a restaurant, chain or takeout ("Big Mac", "a Chipotle
+  bowl", "I'm at Chick-fil-A" earlier then "nuggets and fries"). The server looks up that menu item.
+- source "packaged" + place = its maker: a store-bought product ("Kodiak waffles", "Chobani yogurt").
+- source "homemade": cooked at home or a generic dish with no place ("I made a burrito", "salad with
+  bacon and cheese", "eggs"). The server builds it from a typical recipe instead of searching online.
+- Not sure: omit source. "Actually it was from Panera" -> edit that item with source and place.
 Lanes for an open meal, always with its SAME draft_ref:
 - "log it", "log what you have", "that's it" -> log_now:true (open items become not counted).
 - "just log X", "only the X", "skip the rest" -> only:[X's item_ref] (every other item is removed).

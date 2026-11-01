@@ -973,7 +973,8 @@ class Store:
             "JOIN food_source_records s ON s.id=o.source_record_id "
             "WHERE i.normalized_name=$1 AND i.product_identity=$2 AND s.provider=$3 AND s.trusted "
             "AND o.verification_state='official_curated' AND o.serving_basis='per_serving' "
-            "AND NOT (o.id::text = ANY($4::text[]) OR s.id::text = ANY($4::text[])) "
+            "AND NOT (o.id::text = ANY($4::text[]) OR s.id::text = ANY($4::text[]) "
+            "OR coalesce(s.metadata->>'values_digest','') = ANY($4::text[])) "
             "ORDER BY s.retrieved_at DESC, o.observed_at DESC LIMIT 1",
             identity, f"{provider}:{identity}", provider, revoked,
         )

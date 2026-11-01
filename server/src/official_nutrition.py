@@ -230,7 +230,7 @@ def official_host(url: str, source: OfficialSource) -> str | None:
 
 
 _SEP = r"[\s:|*]{0,6}"
-_NUM = r"(\d+(?:\.\d+)?)"
+_NUM = r"(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)"
 # Each nutrient must be read from its own label in the item's section. A
 # qualifier group lets "Saturated Fat" / "Trans Fat" / "Net Carbs" be skipped
 # instead of mistaken for the total.
@@ -239,24 +239,42 @@ _LABELS: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
     "protein": (re.compile(rf"(?<![a-z])()protein\b{_SEP}{_NUM}\s*g\b"), frozenset()),
     "carbs": (re.compile(rf"(?<![a-z])((?:total|net)\s+)?(?:carbohydrates?|carbs)\b{_SEP}{_NUM}\s*g\b"),
               frozenset({"net"})),
-    "fat": (re.compile(rf"(?<![a-z])((?:total|saturated|trans)\s+)?fat\b{_SEP}{_NUM}\s*g\b"),
-            frozenset({"saturated", "trans"})),
+    "fat": (re.compile(rf"(?<![a-z])((?:total|saturated|trans|polyunsaturated|monounsaturated|unsaturated)\s+)?"
+                       rf"fat\b{_SEP}{_NUM}\s*g\b"),
+            frozenset({"saturated", "trans", "polyunsaturated", "monounsaturated", "unsaturated"})),
     "fiber": (re.compile(rf"(?<![a-z])((?:total|dietary)\s+)?fib(?:er|re)\b{_SEP}{_NUM}\s*g\b"), frozenset()),
 }
 
 
+# Sub-headings that only label part of the item's own panel.
+_PANEL_HEADINGS = frozenset({"nutrition", "nutrition facts", "nutrition information",
+                             "nutritional information", "nutrition info"})
+
+
 def item_section(page: str, source: "OfficialSource", identity: str) -> str | None:
     """The page's own item section: from its first top-level heading, which
-    must name exactly this item, to the next top-level heading. A page whose
+    must name exactly this item, to the next heading of any level that is not
+    a generic panel label ("## Nutrition") or this same item. A page whose
     main heading is not this item (a menu index, a nutrition table) is not
-    evidence for one item."""
+    evidence for one item, and a "## Spicy Chicken Sandwich" or "## Sauce"
+    block inside it never supplies its numbers."""
     lines = page.splitlines()
     for index, line in enumerate(lines):
         if re.match(r"^#\s+\S", line):
             if identity_of(line.lstrip("#"), source) != identity:
                 return None
             rest = lines[index + 1:]
-            end = next((i for i, other in enumerate(rest) if re.match(r"^#\s+\S", other)), len(rest))
+
+            def ends(other: str) -> bool:
+                heading = re.match(r"^(#+)\s+(\S.*)$", other)
+                if not heading:
+                    return False
+                if len(heading.group(1)) == 1:
+                    return True
+                text = normalize_food_name(heading.group(2))
+                return text not in _PANEL_HEADINGS and identity_of(heading.group(2), source) != identity
+
+            end = next((i for i, other in enumerate(rest) if ends(other)), len(rest))
             return "\n".join([line, *rest[:end]])
     return None
 
@@ -271,7 +289,7 @@ def labeled_values(section: str) -> dict[str, float | None]:
             qualifier = (match.group(1) or "").strip()
             if qualifier in skipped:
                 continue
-            found[key] = float(match.group(2))
+            found[key] = float(match.group(2).replace(",", ""))
             break
     return found
 
@@ -515,17 +533,33 @@ async def wait_for_background() -> None:
 
 
 def revoked_ids() -> list[str] | None:
-    """Evidence ids (source record or observation) an operator withdrew.
+    """Evidence an operator withdrew: source record / observation ids (UUIDs)
+    or a nutrition version's ``values_digest`` (64 hex), which also blocks the
+    same panel from being stored again on any later day.
 
-    Evidence rows are immutable, so a wrong panel is withdrawn by listing its
-    id in OFFICIAL_NUTRITION_REVOKED_IDS. A malformed list fails closed: None
-    means no official record may be served at all."""
+    Evidence rows are immutable, so a wrong panel is withdrawn by listing it in
+    OFFICIAL_NUTRITION_REVOKED_IDS. A malformed list fails closed: None means
+    no official record may be served at all."""
     from uuid import UUID
     raw = os.environ.get(REVOKED_IDS_FLAG, "").strip()
-    try:
-        return [str(UUID(part.strip())) for part in raw.split(",") if part.strip()]
-    except ValueError:
-        return None
+    revoked: list[str] = []
+    for part in (piece.strip() for piece in raw.split(",")):
+        if not part:
+            continue
+        if re.fullmatch(r"[0-9a-f]{64}", part.casefold()):
+            revoked.append(part.casefold())
+            continue
+        try:
+            revoked.append(str(UUID(part)))
+        except ValueError:
+            return None
+    return revoked
+
+
+def is_revoked(record: Mapping[str, Any]) -> bool:
+    """A validated panel whose nutrition version was withdrawn (or an unreadable list)."""
+    revoked = revoked_ids()
+    return revoked is None or record["metadata"]["values_digest"] in revoked
 
 
 def _recent_miss(key: tuple[str, str]) -> bool:
@@ -591,7 +625,11 @@ async def _ingest_and_save(source: OfficialSource, identity: str, store,
             logger.info("official nutrition: provider failed place=%s error=%s", source.slug, type(exc).__name__)
             panel = None
         if panel is not None:
-            await store.save_official_observation(record_for(panel, source))
+            record = record_for(panel, source)
+            if is_revoked(record):
+                logger.info("official nutrition: revoked panel not stored place=%s", source.slug)
+                return None
+            await store.save_official_observation(record)
             saved = await store.fetch_official_observation(source.provider, identity)
         return saved
     finally:
@@ -627,6 +665,11 @@ async def lookup(query: str, *, store) -> dict[str, Any] | None:
         def _done(finished, key=key):
             if _inflight.get(key) is finished:
                 _inflight.pop(key, None)
+            # A meal that stopped waiting never awaits this task: consume and
+            # log its failure here instead of "exception was never retrieved".
+            if not finished.cancelled() and finished.exception() is not None:
+                logger.warning("official nutrition: background ingest failed place=%s error=%s",
+                               key[0], type(finished.exception()).__name__)
         task.add_done_callback(_done)
     try:
         # shield: a meal's own deadline never cancels the ingest it started.

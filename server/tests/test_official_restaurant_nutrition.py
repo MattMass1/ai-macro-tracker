@@ -414,6 +414,12 @@ async def test_a_revoked_record_is_never_served(env, monkeypatch):
     assert await store.fetch_official_observation(source.provider, "chicken sandwich") is None
     monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", "garbage")
     assert await store.fetch_official_observation(source.provider, "chicken sandwich") is None
+    # Revoking the nutrition version hides every dated record of that panel.
+    digest = official.record_for(panel, source)["metadata"]["values_digest"]
+    monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", digest)
+    assert await store.fetch_official_observation(source.provider, "chicken sandwich") is None
+    monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", "")
+    assert await store.fetch_official_observation(source.provider, "chicken sandwich") is not None
 
 
 @pg

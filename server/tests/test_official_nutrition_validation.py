@@ -336,3 +336,77 @@ def test_revocation_list_fails_closed(monkeypatch):
     assert official.revoked_ids() == [keep]
     monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", "not-a-uuid")
     assert official.revoked_ids() is None  # malformed: serve no official record at all
+
+
+# Review round 2 (N1, N2, N3, N4).
+
+def test_a_sub_section_about_another_item_never_supplies_the_numbers():
+    # N1: values only under "## Spicy Chicken Sandwich" are not the plain sandwich's.
+    page = ("# Chick-fil-A® Chicken Sandwich\nA boneless breast of chicken.\n"
+            "## Spicy Chicken Sandwich\nServing size 1 sandwich\nCalories 450\nFat 19g\n"
+            "Carbohydrates 45g\nFiber 2g\nProtein 28g\n")
+    spicy = candidate(page_text=page, panel={"calories": 450, "fat": 19, "carbs": 45, "fiber": 2, "protein": 28})
+    assert rejection(spicy) == "nutrient_not_in_page"
+    # A sauce block's "Fiber 0g" is not the sandwich's missing fiber.
+    sauce = FIXTURE_MARKDOWN.replace("Fiber 1g\n", "") + "## Chick-fil-A® Sauce\nCalories 140\nFiber 0g\n"
+    assert rejection(candidate(page_text=sauce, panel={"fiber": 0})) == "nutrient_not_in_page"
+    # Generic sub-headings ("## Nutrition Facts") stay part of the item.
+    facts = FIXTURE_MARKDOWN.replace("## Nutrition", "## Nutrition Facts")
+    assert official.validate(candidate(page_text=facts), CFA, "chicken sandwich").nutrients["fiber"] == 1
+
+
+def test_thousands_separators_and_other_fats_are_read_correctly():
+    assert official.labeled_values("Calories 1,020\nFat 50g")["calories"] == 1020
+    values = official.labeled_values("Polyunsaturated Fat 2g\nMonounsaturated Fat 3g\nFat 18g")
+    assert values["fat"] == 18
+
+
+def test_a_revoked_values_digest_blocks_the_same_panel_on_any_later_day(monkeypatch):
+    # N2: revocation follows the nutrition version, not one day's record id.
+    panel = official.validate(candidate(), CFA, "chicken sandwich")
+    digest = official.record_for(panel, CFA)["metadata"]["values_digest"]
+    monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", digest)
+    assert official.revoked_ids() == [digest]
+    assert official.is_revoked(official.record_for(panel, CFA))
+
+
+@pytest.mark.asyncio
+async def test_a_revoked_panel_is_never_saved_again(monkeypatch):
+    official.clear_process_caches()
+    panel = official.validate(candidate(), CFA, "chicken sandwich")
+
+    async def same_wrong_page(source, identity):
+        return panel
+    monkeypatch.setattr(official, "ingest", same_wrong_page)
+    monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", official.record_for(panel, CFA)["metadata"]["values_digest"])
+    store = MemoryOfficialStore()
+    assert await official.lookup("Chick-fil-A chicken sandwich", store=store) is None
+    assert store.saved == []
+    official.clear_process_caches()
+
+
+@pytest.mark.asyncio
+async def test_a_background_failure_is_logged_once_not_left_unretrieved(monkeypatch, caplog):
+    # N3: the done-callback consumes the exception of an ingest nobody awaits.
+    official.clear_process_caches()
+    monkeypatch.setattr(official, "INGEST_DEADLINE_SECONDS", 0.01)
+    release = asyncio.Event()
+
+    async def late_failure(source, identity):
+        await release.wait()
+        raise RuntimeError("fixture: late failure")
+    monkeypatch.setattr(official, "ingest", late_failure)
+    task_errors = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _loop, context: task_errors.append(context))
+    try:
+        assert await official.lookup("Chick-fil-A chicken sandwich", store=MemoryOfficialStore()) is None
+        task = next(iter(official._inflight.values()))
+        release.set()
+        await asyncio.wait([task])  # waits without retrieving the exception
+        await asyncio.sleep(0)  # let done-callbacks run
+        assert task.done() and task._log_traceback is False
+    finally:
+        loop.set_exception_handler(None)
+        official.clear_process_caches()
+    assert task_errors == []

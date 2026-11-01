@@ -111,6 +111,30 @@ def meal_drafts_allowed() -> bool:
         return False
 
 
+OFFICIAL_NUTRITION_FLAG = "OFFICIAL_RESTAURANT_NUTRITION_ENABLED"
+OFFICIAL_NUTRITION_USERS_FLAG = "OFFICIAL_RESTAURANT_NUTRITION_USER_IDS"
+
+
+def official_restaurant_nutrition_allowed() -> bool:
+    """Operator switch (+ optional canary list) for official restaurant
+    nutrition ingestion and reuse. Fails closed exactly like meal drafts:
+    only ``true`` opens it, and a malformed canary list allows nobody. Off,
+    the food resolver never reaches the official path or its providers."""
+    if os.environ.get(OFFICIAL_NUTRITION_FLAG, "").strip().casefold() != "true":
+        return False
+    raw = os.environ.get(OFFICIAL_NUTRITION_USERS_FLAG, "").strip()
+    if not raw:
+        return True
+    try:
+        allowed = {UUID(part.strip()) for part in raw.split(",") if part.strip()}
+    except ValueError:
+        return False
+    try:
+        return current_user_id() in allowed
+    except RuntimeError:
+        return False
+
+
 def gate_status() -> dict[str, bool]:
     """Non-secret gate state for diagnostics and tests."""
     return {

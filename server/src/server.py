@@ -52,6 +52,7 @@ from coach import CoachProviderError, run_agent  # noqa: E402
 from agent_canvas import PROTOCOL as CANVAS_PROTOCOL, CanvasService  # noqa: E402
 from meal_drafts import MealDrafts  # noqa: E402
 import food_lookup  # noqa: E402
+import official_nutrition  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +302,13 @@ async def resolve_food(query: str, **kwargs):
             macros, label = quantified
             return {**food, "macros_per_serving": macros, "serving_size": label,
                     "applied_quantity": count, "applied_unit": "servings"}
+        # A registered chain's own published panel (stored and reused; fetched
+        # from the official source only on first sight or when stale). Behind
+        # a fail-closed gate; off, this branch is never entered.
+        if tenant and release_gates.official_restaurant_nutrition_allowed():
+            official = await _official_restaurant_food(local_query, client)
+            if official is not None:
+                return official
         # An authenticated tenant's exact catalog is their highest-priority
         # reusable nutrition identity after an explicit preset.
         if catalog_lookup is not None:
@@ -361,6 +369,31 @@ async def resolve_food(query: str, **kwargs):
             while len(_resolved_food_cache) > _RESOLVED_CACHE_MAX:
                 _resolved_food_cache.popitem(last=False)
     return found
+
+
+async def _official_restaurant_food(query: str, client) -> dict[str, Any] | None:
+    """Official chain nutrition for one food text, or None to continue the
+    existing chain. A provider or store failure never blocks the meal."""
+    if official_nutrition.source_for(query) is None:
+        return None
+    quantity, unit, identity = food_lookup._clean_component(food_lookup._normalize_query_text(query))
+    if quantity is not None and unit not in {"serving", "servings"}:
+        return None  # a weight or volume is not a published per-item panel
+    try:
+        found = await official_nutrition.lookup(identity or query, store=client)
+    except Exception:
+        logger.exception("Official restaurant nutrition failed; continuing the existing food chain")
+        return None
+    if found is None or quantity is None or quantity == 1:
+        return found
+    if not 0 < quantity <= 100:
+        return None
+    quantified = food_lookup._quantify(found, quantity, "servings")
+    if quantified is None:
+        return None
+    macros, label = quantified
+    return {**found, "macros_per_serving": macros, "serving_size": label,
+            "applied_quantity": quantity, "applied_unit": "servings"}
 
 
 def _matching_preset(normalized: str, presets) -> Mapping[str, Any] | None:
@@ -2983,6 +3016,9 @@ async def _resolve_food_component(
             "retrieved_at", "serving_basis", "items_per_serving_assumption",
             "carbohydrate_definition", "verification_state", "source_limitations",
             "cache_allowed", "evidence_hash", "external_id", "fiber_method",
+            # Official restaurant evidence: the exact shared version used.
+            "source_url", "food_item_id", "observation_id", "source_record_id",
+            "freshness", "customization",
         }
         result["attribution"] = {
             key: value for key, value in attribution.items()

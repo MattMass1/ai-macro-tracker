@@ -904,6 +904,73 @@ class Store:
                     *(macros.get(macro, 0) for macro in ("calories","protein","carbs","fat","fiber")),
                 )
 
+    async def save_official_observation(self, record: Mapping[str, Any]) -> dict[str, str]:
+        """Store one validated official panel as an immutable evidence version.
+
+        Shared (not tenant) data: a restaurant's published panel. Idempotent on
+        the record's evidence hash; a changed panel is a new source record and
+        observation under the same food identity. No food_aliases row is
+        written, so the legacy alias catalog never serves official rows."""
+        nutrients = record["nutrients"]
+        if any(nutrients.get(key) is None for key in ("calories", "protein", "carbs", "fat", "fiber")):
+            raise ValueError("official observations require every nutrient; unknown is never zero")
+        pool = await self.connect()
+        async with pool.acquire() as conn, conn.transaction():
+            item_id = await conn.fetchval(
+                "INSERT INTO food_items(normalized_name,display_name,brand,product_identity) VALUES($1,$2,$3,$4) "
+                "ON CONFLICT(normalized_name,brand,product_identity) DO UPDATE SET display_name=food_items.display_name "
+                "RETURNING id",
+                record["normalized_name"], record["display_name"], record["brand"], record["product_identity"],
+            )
+            source_id = await conn.fetchval(
+                "WITH inserted AS (INSERT INTO food_source_records(provider,external_id,source_reference,source_url,"
+                "retrieved_at,evidence_hash,metadata,trusted,cache_allowed) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9) "
+                "ON CONFLICT(provider,evidence_hash) DO NOTHING RETURNING id) "
+                "SELECT id FROM inserted UNION ALL SELECT id FROM food_source_records "
+                "WHERE provider=$1 AND evidence_hash=$6 LIMIT 1",
+                record["provider"], record["product_identity"], record["source_reference"], record["source_url"],
+                record["retrieved_at"], record["evidence_hash"], json.dumps(record["metadata"], default=str),
+                bool(record["trusted"]), bool(record["cache_allowed"]),
+            )
+            observation_key = f"{record['product_identity']}:{record['evidence_hash']}"
+            observation_id = await conn.fetchval(
+                "WITH inserted AS (INSERT INTO food_nutrition_observations(observation_key,food_item_id,"
+                "source_record_id,verification_state,serving_basis,serving_text,serving_grams,calories,protein,"
+                "carbs,fat,fiber,observed_at) VALUES($1,$2,$3,'official_curated','per_serving',$4,$5,$6,$7,$8,$9,$10,$11) "
+                "ON CONFLICT(observation_key) DO NOTHING RETURNING id) "
+                "SELECT id FROM inserted UNION ALL SELECT id FROM food_nutrition_observations "
+                "WHERE observation_key=$1 LIMIT 1",
+                observation_key, item_id, source_id, record["serving_text"], record["serving_grams"],
+                *(nutrients[key] for key in ("calories", "protein", "carbs", "fat", "fiber")),
+                record["retrieved_at"],
+            )
+        return {"food_item_id": str(item_id), "source_record_id": str(source_id),
+                "observation_id": str(observation_id)}
+
+    async def fetch_official_observation(self, provider: str, identity: str) -> dict[str, Any] | None:
+        """The newest trusted official per-serving panel for one chain item."""
+        pool = await self.connect()
+        row = await pool.fetchrow(
+            "SELECT i.id food_item_id,i.display_name,i.product_identity,o.id observation_id,o.serving_text,"
+            "o.serving_grams,o.calories,o.protein,o.carbs,o.fat,o.fiber,s.id source_record_id,s.source_url,"
+            "s.retrieved_at,s.cache_allowed FROM food_items i "
+            "JOIN food_nutrition_observations o ON o.food_item_id=i.id "
+            "JOIN food_source_records s ON s.id=o.source_record_id "
+            "WHERE i.normalized_name=$1 AND i.product_identity=$2 AND s.provider=$3 AND s.trusted "
+            "AND o.verification_state='official_curated' AND o.serving_basis='per_serving' "
+            "ORDER BY s.retrieved_at DESC, o.observed_at DESC LIMIT 1",
+            identity, f"{provider}:{identity}", provider,
+        )
+        if row is None:
+            return None
+        found = dict(row)
+        for key in ("food_item_id", "observation_id", "source_record_id"):
+            found[key] = str(found[key])
+        for key in ("calories", "protein", "carbs", "fat", "fiber", "serving_grams"):
+            if found[key] is not None:
+                found[key] = float(found[key])
+        return found
+
     async def migration_readiness(self) -> dict[str, object]:
         """Return protected read-only connectivity and migration compatibility."""
         conn = await asyncpg.connect(self.database_url)

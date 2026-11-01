@@ -364,3 +364,105 @@ async def test_stale_record_refreshes_and_a_failed_refresh_keeps_the_stored_vers
     assert http.count("exa") == 2  # a stale record is re-checked once
     assert stale["macros_per_serving"]["calories"] == 420  # never dropped for a failed refresh
     assert stale["attribution"]["freshness"] == "stale"
+
+
+# ---------------------------------------------------------------------------
+# Review round 1: S1 race, revocation, servings, on-then-off, fresh refresh.
+# ---------------------------------------------------------------------------
+
+def _panel(official, **changes):
+    source = official.REGISTRY["Chick-fil-A"]
+    page = changes.pop("page", FIXTURE_MARKDOWN)
+    return source, official.validate(official.Candidate.from_extraction(
+        {**FIXTURE_PANEL, **changes}, source_url=CFA_PAGE, page_text=page,
+        discovered_via="exa", extracted_via="firecrawl"), source, "chicken sandwich")
+
+
+@pg
+async def test_a_concurrent_writer_of_the_same_evidence_never_fails_the_save(env):
+    import asyncpg
+    official, store, url = env["official"], env["store"], env["url"]
+    source, panel = _panel(official)
+    record = official.record_for(panel, source)
+    rival = await asyncpg.connect(url)
+    try:
+        transaction = rival.transaction()
+        await transaction.start()
+        await rival.execute(
+            "INSERT INTO food_source_records(provider,external_id,source_reference,source_url,retrieved_at,"
+            "evidence_hash,metadata,trusted,cache_allowed) VALUES($1,$2,$3,$4,$5,$6,'{}'::jsonb,true,true)",
+            record["provider"], record["product_identity"], record["source_reference"], record["source_url"],
+            record["retrieved_at"], record["evidence_hash"])
+        pending = asyncio.create_task(store.save_official_observation(record))
+        await asyncio.sleep(0.3)  # the save now waits on the rival's uncommitted row
+        assert not pending.done()
+        await transaction.commit()
+        saved = await asyncio.wait_for(pending, 5)
+    finally:
+        await rival.close()
+    rows = await _rows(url, "SELECT id FROM food_source_records")
+    assert len(rows) == 1 and saved["source_record_id"] == str(rows[0]["id"])
+
+
+@pg
+async def test_a_revoked_record_is_never_served(env, monkeypatch):
+    official, store = env["official"], env["store"]
+    source, panel = _panel(official)
+    saved = await store.save_official_observation(official.record_for(panel, source))
+    assert await store.fetch_official_observation(source.provider, "chicken sandwich") is not None
+    monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", saved["observation_id"])
+    assert await store.fetch_official_observation(source.provider, "chicken sandwich") is None
+    monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", "garbage")
+    assert await store.fetch_official_observation(source.provider, "chicken sandwich") is None
+
+
+@pg
+async def test_servings_scale_the_official_panel_and_a_weight_is_left_to_other_sources(env):
+    from auth import bind_user, reset_user
+    token = bind_user(env["users"][0])
+    try:
+        two = await env["srv"]._official_restaurant_food("2 servings Chick-fil-A chicken sandwich",
+                                                         env["store"])
+        weighed = await env["srv"]._official_restaurant_food("150 g Chick-fil-A chicken sandwich",
+                                                             env["store"])
+    finally:
+        reset_user(token)
+    assert two["macros_per_serving"]["calories"] == 840 and two["applied_quantity"] == 2
+    assert weighed is None
+
+
+@pg
+async def test_turning_the_gate_off_after_ingest_restores_the_previous_answer(env, monkeypatch):
+    srv = env["srv"]
+    from auth import bind_user, reset_user
+    token = bind_user(env["users"][0])
+    try:
+        on = await srv.resolve_food("Chick-fil-A chicken sandwich", atomic=True)
+        assert on["attribution"]["provider"] == "official:chick-fil-a"
+        env["forget"]()
+        monkeypatch.setenv("OFFICIAL_RESTAURANT_NUTRITION_ENABLED", "false")
+        off = await srv.resolve_food("Chick-fil-A chicken sandwich", atomic=True)
+    finally:
+        reset_user(token)
+    assert off is None or (off.get("attribution") or {}).get("provider") != "official:chick-fil-a"
+    assert env["web_calls"]  # the previous chain answered
+
+
+@pg
+async def test_a_successful_refresh_of_a_stale_record_is_fresh_again(env, monkeypatch):
+    official, http, srv = env["official"], env["http"], env["srv"]
+    from auth import bind_user, reset_user
+    token = bind_user(env["users"][0])
+    try:
+        await srv.resolve_food("Chick-fil-A chicken sandwich", atomic=True)
+        env["forget"]()
+        later = official.utcnow() + official.REGISTRY["Chick-fil-A"].max_age + official.timedelta(days=1)
+        monkeypatch.setattr(official, "utcnow", lambda: later)
+        refreshed = await srv.resolve_food("Chick-fil-A chicken sandwich", atomic=True)
+        env["forget"]()
+        reused = await srv.resolve_food("Chick-fil-A chicken sandwich", atomic=True)
+    finally:
+        reset_user(token)
+    assert refreshed["attribution"]["freshness"] == "fresh" and http.count("firecrawl") == 2
+    assert reused["attribution"]["freshness"] == "fresh" and http.count("firecrawl") == 2
+    assert len(await _rows(env["url"], "SELECT 1 FROM food_source_records")) == 2  # one per verification day

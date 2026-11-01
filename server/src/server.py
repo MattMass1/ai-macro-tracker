@@ -3016,10 +3016,11 @@ async def _resolve_food_component(
             "retrieved_at", "serving_basis", "items_per_serving_assumption",
             "carbohydrate_definition", "verification_state", "source_limitations",
             "cache_allowed", "evidence_hash", "external_id", "fiber_method",
-            # Official restaurant evidence: the exact shared version used.
-            "source_url", "food_item_id", "observation_id", "source_record_id",
-            "freshness", "customization",
         }
+        if str(attribution.get("provider") or "").startswith("official:"):
+            # Official restaurant evidence only: the exact shared version used.
+            allowed_attribution |= {"source_url", "food_item_id", "observation_id",
+                                    "source_record_id", "freshness", "customization"}
         result["attribution"] = {
             key: value for key, value in attribution.items()
             if key in allowed_attribution

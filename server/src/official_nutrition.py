@@ -47,7 +47,12 @@ logger = logging.getLogger("official_nutrition")
 
 REGISTRY_VERSION = "2026-11-01"
 VERIFICATION_STATE = "official_curated"
-INGEST_DEADLINE_SECONDS = 25.0
+# How long a meal waits for a first-sighting ingest. Kept well inside
+# food_lookup.RESOLUTION_DEADLINE_SECONDS; a slower ingest keeps running in the
+# background and its record is used from the next meal on.
+INGEST_DEADLINE_SECONDS = 8.0
+BACKGROUND_DEADLINE_SECONDS = 60.0
+REVOKED_IDS_FLAG = "OFFICIAL_NUTRITION_REVOKED_IDS"
 MISS_TTL_SECONDS = 6 * 3600
 MISS_CACHE_MAX = 512
 DISCOVERY_RESULTS = 3
@@ -63,7 +68,8 @@ class OfficialSource:
     """One chain's official nutrition source and what we may keep from it."""
     place: str                       # display name; matches meal_intent.CHAINS
     slug: str
-    domains: tuple[str, ...]         # official hosts (subdomains included)
+    domains: tuple[str, ...]         # official registrable domains (discovery filter)
+    hosts: tuple[str, ...]           # exact hosts whose pages count as evidence
     nutrition_url: str               # the chain's own nutrition index
     max_age: timedelta               # re-check a stored record after this
     storage_allowed: bool            # numeric facts + URL may be stored and reused
@@ -79,6 +85,7 @@ class OfficialSource:
 REGISTRY: dict[str, OfficialSource] = {
     "Chick-fil-A": OfficialSource(
         place="Chick-fil-A", slug="chick-fil-a", domains=("chick-fil-a.com",),
+        hosts=("www.chick-fil-a.com", "chick-fil-a.com"),
         nutrition_url="https://www.chick-fil-a.com/nutrition-allergens",
         max_age=timedelta(days=30), storage_allowed=True,
         storage_basis=("Published numeric nutrition facts with the official page URL and retrieval "
@@ -210,7 +217,8 @@ class Panel:
 
 
 def official_host(url: str, source: OfficialSource) -> str | None:
-    """The URL's host when it is https on one of the source's official domains."""
+    """The URL's host when it is https on one of the source's exact official hosts
+    (not every subdomain: careers or newsroom pages are not menu evidence)."""
     try:
         parts = urlsplit(url)
     except ValueError:
@@ -218,19 +226,61 @@ def official_host(url: str, source: OfficialSource) -> str | None:
     host = (parts.hostname or "").casefold()
     if parts.scheme != "https" or not host:
         return None
-    if any(host == domain or host.endswith("." + domain) for domain in source.domains):
-        return host
+    return host if host in source.hosts else None
+
+
+_SEP = r"[\s:|*]{0,6}"
+_NUM = r"(\d+(?:\.\d+)?)"
+# Each nutrient must be read from its own label in the item's section. A
+# qualifier group lets "Saturated Fat" / "Trans Fat" / "Net Carbs" be skipped
+# instead of mistaken for the total.
+_LABELS: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
+    "calories": (re.compile(rf"(?<![a-z])()calories\b{_SEP}{_NUM}(?!\s*(?:g|mg)\b)"), frozenset()),
+    "protein": (re.compile(rf"(?<![a-z])()protein\b{_SEP}{_NUM}\s*g\b"), frozenset()),
+    "carbs": (re.compile(rf"(?<![a-z])((?:total|net)\s+)?(?:carbohydrates?|carbs)\b{_SEP}{_NUM}\s*g\b"),
+              frozenset({"net"})),
+    "fat": (re.compile(rf"(?<![a-z])((?:total|saturated|trans)\s+)?fat\b{_SEP}{_NUM}\s*g\b"),
+            frozenset({"saturated", "trans"})),
+    "fiber": (re.compile(rf"(?<![a-z])((?:total|dietary)\s+)?fib(?:er|re)\b{_SEP}{_NUM}\s*g\b"), frozenset()),
+}
+
+
+def item_section(page: str, source: "OfficialSource", identity: str) -> str | None:
+    """The page's own item section: from its first top-level heading, which
+    must name exactly this item, to the next top-level heading. A page whose
+    main heading is not this item (a menu index, a nutrition table) is not
+    evidence for one item."""
+    lines = page.splitlines()
+    for index, line in enumerate(lines):
+        if re.match(r"^#\s+\S", line):
+            if identity_of(line.lstrip("#"), source) != identity:
+                return None
+            rest = lines[index + 1:]
+            end = next((i for i, other in enumerate(rest) if re.match(r"^#\s+\S", other)), len(rest))
+            return "\n".join([line, *rest[:end]])
     return None
 
 
-def _in_page(value: float, page: str) -> bool:
-    text = f"{value:g}"
-    return re.search(rf"(?<![\d.]){re.escape(text)}(?![\d.])", page) is not None
+def labeled_values(section: str) -> dict[str, float | None]:
+    """The first value printed after each nutrient's own label, else None."""
+    text = section.casefold()
+    found: dict[str, float | None] = {}
+    for key, (pattern, skipped) in _LABELS.items():
+        found[key] = None
+        for match in pattern.finditer(text):
+            qualifier = (match.group(1) or "").strip()
+            if qualifier in skipped:
+                continue
+            found[key] = float(match.group(2))
+            break
+    return found
 
 
 def validate(candidate: Candidate, source: OfficialSource, identity: str) -> Panel:
     """Accept a candidate only when it is provably this chain's own panel for
-    exactly this item. Raises Rejected with the first failing reason."""
+    exactly this item: every value is read again from its own label in the
+    page's item section and must equal what the extractor returned. Raises
+    Rejected with the first failing reason."""
     if official_host(candidate.source_url, source) is None:
         raise Rejected("not_official_source")
     display = re.sub(r"\s*[®™©]\s*", " ", candidate.name).strip()
@@ -252,17 +302,25 @@ def validate(candidate: Candidate, source: OfficialSource, identity: str) -> Pan
     energy = 4 * values["protein"] + 4 * values["carbs"] + 9 * values["fat"]
     if abs(energy - values["calories"]) > max(25.0, 0.2 * values["calories"]):
         raise Rejected("energy_inconsistent")
-    page = candidate.page_text
-    page_identity = identity_of(page, source) if page else ""
-    if not page or not all(word in page_identity.split() for word in identity.split()):
-        raise Rejected("item_not_in_page")
-    if not all(_in_page(values[key], page) for key in NUTRIENTS) or not (
-            normalize_food_name(candidate.serving_text) in normalize_food_name(page)):
+    section = item_section(candidate.page_text, source, identity)
+    if section is None:
+        raise Rejected("not_item_page")
+    printed = labeled_values(section)
+    if any(printed[key] is None for key in NUTRIENTS):
+        # A nutrient the page never labels is unknown, whatever the extractor said.
+        raise Rejected("nutrient_not_in_page")
+    if any(printed[key] != values[key] for key in NUTRIENTS):
         raise Rejected("values_not_in_page")
+    if normalize_food_name(candidate.serving_text) not in normalize_food_name(section):
+        raise Rejected("values_not_in_page")
+    grams = candidate.serving_grams
+    if grams is not None and not re.search(
+            rf"serving size[^\n]{{0,40}}(?<![\d.]){re.escape(f'{grams:g}')}\s*g\b", section.casefold()):
+        grams = None  # an unshown weight is not kept (unknown, not guessed)
     return Panel(place=source.place, identity=identity, display_name=display,
-                 serving_text=candidate.serving_text, serving_grams=candidate.serving_grams,
+                 serving_text=candidate.serving_text, serving_grams=grams,
                  nutrients=values, source_url=candidate.source_url,
-                 page_sha256=hashlib.sha256(page.encode("utf-8")).hexdigest(),
+                 page_sha256=hashlib.sha256(candidate.page_text.encode("utf-8")).hexdigest(),
                  discovered_via=candidate.discovered_via, extracted_via=candidate.extracted_via,
                  retrieved_at=utcnow())
 
@@ -436,12 +494,38 @@ async def ingest(source: OfficialSource, identity: str) -> Panel | None:
 # --------------------------------------------------------------------------- #
 
 _misses: "OrderedDict[tuple[str, str], float]" = OrderedDict()
-_locks: dict[tuple[str, str], asyncio.Lock] = {}
+_inflight: dict[tuple[str, str], "asyncio.Task[dict[str, Any] | None]"] = {}
+
+# Words that mean the phrase is a modified, sized, partial or multi-food order,
+# never one published item name. Such a phrase could only end as
+# identity_mismatch, so it is not searched (no paid call).
+_NOT_ONE_ITEM = re.compile(r"\b(?:and|with|without|no|plus|half|quarter|small|medium|large)\b")
 
 
 def clear_process_caches() -> None:
     _misses.clear()
-    _locks.clear()
+    _inflight.clear()
+
+
+async def wait_for_background() -> None:
+    """Let in-flight ingests finish (tests and orderly shutdown)."""
+    tasks = list(_inflight.values())
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def revoked_ids() -> list[str] | None:
+    """Evidence ids (source record or observation) an operator withdrew.
+
+    Evidence rows are immutable, so a wrong panel is withdrawn by listing its
+    id in OFFICIAL_NUTRITION_REVOKED_IDS. A malformed list fails closed: None
+    means no official record may be served at all."""
+    from uuid import UUID
+    raw = os.environ.get(REVOKED_IDS_FLAG, "").strip()
+    try:
+        return [str(UUID(part.strip())) for part in raw.split(",") if part.strip()]
+    except ValueError:
+        return None
 
 
 def _recent_miss(key: tuple[str, str]) -> bool:
@@ -491,39 +575,62 @@ def _result(stored: Mapping[str, Any], source: OfficialSource, freshness: str) -
     }
 
 
-async def lookup(query: str, *, store) -> dict[str, Any] | None:
-    """Official nutrition for a chain item, reusing stored evidence first.
-
-    None means "not handled here" (unregistered place, unusable identity, or
-    no valid official panel), and the caller's existing chain continues."""
-    source = source_for(query)
-    if source is None:
-        return None
-    identity = identity_of(query, source)
-    if not identity or len(identity.split()) > MAX_IDENTITY_WORDS or re.match(r"^\d", identity):
-        return None  # a count or empty item is never searched as a name
-    stored = await store.fetch_official_observation(source.provider, identity)
-    if stored is not None and _fresh(stored, source):
-        return _result(stored, source, "fresh")
-    key = (source.slug, identity)
-    if _recent_miss(key):
-        return _result(stored, source, "stale") if stored is not None else None
-    lock = _locks.setdefault(key, asyncio.Lock())
-    async with lock:
-        stored = await store.fetch_official_observation(source.provider, identity)
-        if stored is not None and _fresh(stored, source):
-            return _result(stored, source, "fresh")
+async def _ingest_and_save(source: OfficialSource, identity: str, store,
+                           key: tuple[str, str]) -> dict[str, Any] | None:
+    """One ingest for one identity, saved and read back. Any outcome other than
+    a persisted record (rejection, outage, timeout, store error, cancel) is
+    remembered, so later meals do not pay for the same search again."""
+    saved = None
+    try:
         try:
-            panel = await asyncio.wait_for(ingest(source, identity), INGEST_DEADLINE_SECONDS)
+            panel = await asyncio.wait_for(ingest(source, identity), BACKGROUND_DEADLINE_SECONDS)
         except ProviderUnavailable as exc:
             logger.info("official nutrition: provider unavailable place=%s reason=%s", source.slug, exc.reason)
             panel = None
         except (TimeoutError, httpx.HTTPError) as exc:
             logger.info("official nutrition: provider failed place=%s error=%s", source.slug, type(exc).__name__)
             panel = None
-        if panel is None:
+        if panel is not None:
+            await store.save_official_observation(record_for(panel, source))
+            saved = await store.fetch_official_observation(source.provider, identity)
+        return saved
+    finally:
+        if saved is None:
             _remember_miss(key)
-            return _result(stored, source, "stale") if stored is not None else None
-        await store.save_official_observation(record_for(panel, source))
-        saved = await store.fetch_official_observation(source.provider, identity)
-        return _result(saved, source, "fresh") if saved is not None else None
+
+
+async def lookup(query: str, *, store) -> dict[str, Any] | None:
+    """Official nutrition for a chain item, reusing stored evidence first.
+
+    None means "not handled here" (unregistered place, a phrase that is not one
+    item name, no valid official panel, or a first-sighting ingest still
+    running), and the caller's existing chain continues."""
+    source = source_for(query)
+    if source is None:
+        return None
+    identity = identity_of(query, source)
+    if (not identity or len(identity.split()) > MAX_IDENTITY_WORDS or re.match(r"^\d", identity)
+            or "," in query or _NOT_ONE_ITEM.search(identity)):
+        return None  # never searched as a name
+    stored = await store.fetch_official_observation(source.provider, identity)
+    if stored is not None and _fresh(stored, source):
+        return _result(stored, source, "fresh")
+    stale = _result(stored, source, "stale") if stored is not None else None
+    key = (source.slug, identity)
+    if _recent_miss(key):
+        return stale
+    task = _inflight.get(key)
+    if task is None:
+        task = asyncio.create_task(_ingest_and_save(source, identity, store, key))
+        _inflight[key] = task
+
+        def _done(finished, key=key):
+            if _inflight.get(key) is finished:
+                _inflight.pop(key, None)
+        task.add_done_callback(_done)
+    try:
+        # shield: a meal's own deadline never cancels the ingest it started.
+        saved = await asyncio.wait_for(asyncio.shield(task), INGEST_DEADLINE_SECONDS)
+    except TimeoutError:
+        return stale
+    return _result(saved, source, "fresh") if saved is not None else stale

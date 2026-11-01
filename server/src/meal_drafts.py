@@ -220,13 +220,13 @@ def _persistable(resolution: Mapping[str, Any]) -> dict[str, Any]:
         "name", "macro_source", *MACROS, "assumption", "basis", "estimate_provenance",
         "carbohydrate_definition", "typical_size", "built_from", "not_counted_parts", "place_not_found")
         if resolution.get(key) is not None}
-    # The official-evidence ids pin the exact shared version this private
-    # component was priced from (absent for every other provider).
-    kept["attribution"] = {k: attribution.get(k) for k in (
-        "provider", "external_id", "verification_state", "cache_allowed", "source_host",
-        "source_url", "food_item_id", "observation_id", "source_record_id", "retrieved_at",
-        "freshness", "customization")
-        if attribution.get(k) is not None}
+    keys = ["provider", "external_id", "verification_state", "cache_allowed", "source_host"]
+    if str(attribution.get("provider") or "").startswith("official:"):
+        # Official restaurant evidence only: the ids pin the exact shared
+        # version this private component was priced from.
+        keys += ["source_url", "food_item_id", "observation_id", "source_record_id",
+                 "retrieved_at", "freshness", "customization"]
+    kept["attribution"] = {k: attribution.get(k) for k in keys if attribution.get(k) is not None}
     kept["fingerprint"] = _fingerprint(resolution)
     nested = [a for a in (resolution.get("component_attributions") or []) if isinstance(a, Mapping)]
     nested += [m["attribution"] for m in (resolution.get("component_metadata") or [])

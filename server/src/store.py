@@ -932,6 +932,12 @@ class Store:
                 record["retrieved_at"], record["evidence_hash"], json.dumps(record["metadata"], default=str),
                 bool(record["trusted"]), bool(record["cache_allowed"]),
             )
+            if source_id is None:
+                # A concurrent writer committed the same evidence while this
+                # INSERT waited; the CTE's snapshot can't see it, a new statement can.
+                source_id = await conn.fetchval(
+                    "SELECT id FROM food_source_records WHERE provider=$1 AND evidence_hash=$2",
+                    record["provider"], record["evidence_hash"])
             observation_key = f"{record['product_identity']}:{record['evidence_hash']}"
             observation_id = await conn.fetchval(
                 "WITH inserted AS (INSERT INTO food_nutrition_observations(observation_key,food_item_id,"
@@ -944,11 +950,20 @@ class Store:
                 *(nutrients[key] for key in ("calories", "protein", "carbs", "fat", "fiber")),
                 record["retrieved_at"],
             )
+            if observation_id is None:
+                observation_id = await conn.fetchval(
+                    "SELECT id FROM food_nutrition_observations WHERE observation_key=$1", observation_key)
+            if source_id is None or observation_id is None:
+                raise RuntimeError("official evidence write could not be read back")
         return {"food_item_id": str(item_id), "source_record_id": str(source_id),
                 "observation_id": str(observation_id)}
 
     async def fetch_official_observation(self, provider: str, identity: str) -> dict[str, Any] | None:
-        """The newest trusted official per-serving panel for one chain item."""
+        """The newest trusted, unrevoked official per-serving panel for one chain item."""
+        import official_nutrition
+        revoked = official_nutrition.revoked_ids()
+        if revoked is None:
+            return None  # a malformed revocation list serves nothing official
         pool = await self.connect()
         row = await pool.fetchrow(
             "SELECT i.id food_item_id,i.display_name,i.product_identity,o.id observation_id,o.serving_text,"
@@ -958,8 +973,9 @@ class Store:
             "JOIN food_source_records s ON s.id=o.source_record_id "
             "WHERE i.normalized_name=$1 AND i.product_identity=$2 AND s.provider=$3 AND s.trusted "
             "AND o.verification_state='official_curated' AND o.serving_basis='per_serving' "
+            "AND NOT (o.id::text = ANY($4::text[]) OR s.id::text = ANY($4::text[])) "
             "ORDER BY s.retrieved_at DESC, o.observed_at DESC LIMIT 1",
-            identity, f"{provider}:{identity}", provider,
+            identity, f"{provider}:{identity}", provider, revoked,
         )
         if row is None:
             return None

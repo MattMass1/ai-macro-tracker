@@ -32,9 +32,32 @@ CFA_TITLE = "Chick-fil-A® Chicken Sandwich | Chick-fil-A"
 # rendered it on 2026-11-01, trimmed (see the file header). Live values on that
 # day: 420 kcal, 16 g fat, 41 g carbs, 1 g fiber, 29 g protein.
 FIXTURE_MARKDOWN = (Path(__file__).parent / "fixtures" / "cfa_chicken_sandwich_live_20261101.md").read_text()
-FIXTURE_PANEL = {"item_name": "Chick-fil-A® Chicken Sandwich", "serving_size": "",
-                 "serving_grams": None, "calories": 420, "protein": 29, "carbs": 41, "fat": 16, "fiber": 1}
 SERVING = "1 menu item as published"
+
+
+class MemoryOfficialStore:
+    """In-memory stand-in for the two official-evidence Store reads/writes."""
+
+    def __init__(self, domain=None):
+        self.saved = []
+        self.domain = domain
+
+    async def fetch_official_domain(self, provider):
+        return self.domain
+
+    async def fetch_official_observation(self, provider, identity):
+        if not self.saved:
+            return None
+        record, ids = self.saved[-1]
+        return {**ids, "display_name": record["display_name"], "product_identity": record["product_identity"],
+                "serving_text": record["serving_text"], "serving_grams": record["serving_grams"],
+                **record["nutrients"], "source_url": record["source_url"],
+                "retrieved_at": record["retrieved_at"], "cache_allowed": record["cache_allowed"]}
+
+    async def save_official_observation(self, record):
+        ids = {"food_item_id": "item", "observation_id": f"obs{len(self.saved)}", "source_record_id": "src"}
+        self.saved.append((record, ids))
+        return ids
 
 
 def fixture_firecrawl(markdown=FIXTURE_MARKDOWN, final_url=CFA_PAGE, title=CFA_TITLE):
@@ -209,11 +232,12 @@ async def test_chick_fil_a_ingest_log_half_serving_and_reuse_without_network(env
     service = _service(srv, agent)
     session_id = str(uuid4())
 
-    # Turn 1: first sighting -> one Exa discovery + one Firecrawl extraction.
+    # Turn 1: first sighting -> find the official site, search it, render one page.
     first = await _turn(service, user, session_id, "I had a Chick-fil-A chicken sandwich for lunch")
-    assert http.count("exa") == 1 and http.count("firecrawl") == 1
-    exa_payload = dict(http.calls[0][1])
-    assert exa_payload["includeDomains"] == ["chick-fil-a.com"]  # discovery only on official domains
+    assert http.count("exa") == 2 and http.count("firecrawl") == 1
+    site_search, item_search = dict(http.calls[0][1]), dict(http.calls[1][1])
+    assert "includeDomains" not in site_search and "Chick-fil-A" in site_search["query"]
+    assert item_search["includeDomains"] == ["chick-fil-a.com"]  # the item is searched on the official site only
     assert env["web_calls"] == []  # the generic web estimate was never needed
 
     sources = await _rows(url, "SELECT * FROM food_source_records WHERE provider='official:chick-fil-a'")
@@ -252,7 +276,7 @@ async def test_chick_fil_a_ingest_log_half_serving_and_reuse_without_network(env
     # Turn 2: "only half" amends that entry from the stored record, no network.
     env["forget"]()
     half = await _turn(service, user, session_id, "Actually I only ate half of it")
-    assert http.count("exa") == 1 and http.count("firecrawl") == 1
+    assert http.count("exa") == 2 and http.count("firecrawl") == 1
     entries = await _rows(url, "SELECT * FROM nutrition_entries WHERE user_id=$1", user)
     assert len(entries) == 1, "a correction never adds a second receipt"
     assert entries[0]["id"] == entry["id"] and entries[0]["entry_revision"] == 2
@@ -264,7 +288,7 @@ async def test_chick_fil_a_ingest_log_half_serving_and_reuse_without_network(env
     # Turn 3: the same meal again later is a new entry, priced from Postgres.
     env["forget"]()
     again = await _turn(service, user, session_id, "Had another Chick-fil-A chicken sandwich")
-    assert http.count("exa") == 1 and http.count("firecrawl") == 1
+    assert http.count("exa") == 2 and http.count("firecrawl") == 1
     entries = await _rows(url, "SELECT calories FROM nutrition_entries WHERE user_id=$1 ORDER BY created_at", user)
     assert [float(e["calories"]) for e in entries] == [210, 420]
     assert "420 kcal" in json.dumps(again)
@@ -283,7 +307,7 @@ async def test_second_user_reuses_shared_evidence_but_never_the_first_users_meal
 
     second_agent, seen = scripted_model()
     await _turn(_service(srv, second_agent), second_user, str(uuid4()), "Chick-fil-A chicken sandwich for lunch")
-    assert http.count("exa") == 1 and http.count("firecrawl") == 1  # shared evidence reused
+    assert http.count("exa") == 2 and http.count("firecrawl") == 1  # shared evidence reused
     assert seen[0]["logged_meals"] == []  # the second user never sees the first user's meal
     second_entries = await _rows(url, "SELECT * FROM nutrition_entries WHERE user_id=$1", second_user)
     assert len(second_entries) == 1 and float(second_entries[0]["calories"]) == 420
@@ -317,19 +341,14 @@ async def test_gate_off_keeps_the_previous_path_and_never_calls_official_provide
 @pg
 async def test_versioned_records_are_idempotent_and_the_newest_version_wins(env):
     official, store, url = env["official"], env["store"], env["url"]
-    source = official.REGISTRY["Chick-fil-A"]
-    panel = official.validate(official.Candidate.from_extraction(
-        FIXTURE_PANEL, source_url=CFA_PAGE, page_text=FIXTURE_MARKDOWN,
-        discovered_via="exa", extracted_via="firecrawl"), source, "chicken sandwich")
+    source, panel = _panel(official)
     first = await store.save_official_observation(official.record_for(panel, source))
     replay = await store.save_official_observation(official.record_for(panel, source))
     assert first["observation_id"] == replay["observation_id"]
     assert len(await _rows(url, "SELECT 1 FROM food_nutrition_observations")) == 1
 
     changed_page = FIXTURE_MARKDOWN.replace("Calories\n\n420", "Calories\n\n440").replace("Total Fat\n\n16g", "Total Fat\n\n18g")
-    changed = official.validate(official.Candidate.from_extraction(
-        {**FIXTURE_PANEL, "calories": 440, "fat": 18}, source_url=CFA_PAGE, page_text=changed_page,
-        discovered_via="exa", extracted_via="firecrawl"), source, "chicken sandwich")
+    _source, changed = _panel(official, page=changed_page)
     second = await store.save_official_observation(official.record_for(changed, source))
     assert second["observation_id"] != first["observation_id"]
     assert second["food_item_id"] == first["food_item_id"]  # one identity, two evidence versions
@@ -354,13 +373,15 @@ async def test_stale_record_refreshes_and_a_failed_refresh_keeps_the_stored_vers
         found = await env["srv"].resolve_food("Chick-fil-A chicken sandwich", atomic=True)
         assert found["macros_per_serving"]["calories"] == 420 and http.count("firecrawl") == 1
         env["forget"]()
-        later = official.utcnow() + official.REGISTRY["Chick-fil-A"].max_age + official.timedelta(days=1)
+        later = official.utcnow() + official.MAX_AGE + official.timedelta(days=1)
         monkeypatch.setattr(official, "utcnow", lambda: later)
         http.exa = {"results": []}  # the refresh finds nothing this time
         stale = await env["srv"].resolve_food("Chick-fil-A chicken sandwich", atomic=True)
     finally:
         reset_user(token)
-    assert http.count("exa") == 2  # a stale record is re-checked once
+    # A stale record is re-checked once: the site comes from the stored record,
+    # so only the item search runs again (2 at first sight + 1).
+    assert http.count("exa") == 3
     assert stale["macros_per_serving"]["calories"] == 420  # never dropped for a failed refresh
     assert stale["attribution"]["freshness"] == "stale"
 
@@ -369,12 +390,10 @@ async def test_stale_record_refreshes_and_a_failed_refresh_keeps_the_stored_vers
 # Review round 1: S1 race, revocation, servings, on-then-off, fresh refresh.
 # ---------------------------------------------------------------------------
 
-def _panel(official, **changes):
-    source = official.REGISTRY["Chick-fil-A"]
-    page = changes.pop("page", FIXTURE_MARKDOWN)
-    return source, official.validate(official.Candidate.from_extraction(
-        {**FIXTURE_PANEL, **changes}, source_url=CFA_PAGE, page_text=page,
-        discovered_via="exa", extracted_via="firecrawl"), source, "chicken sandwich")
+def _panel(official, page=FIXTURE_MARKDOWN):
+    site = official.Site(place="Chick-fil-A", domain="chick-fil-a.com")
+    return site, official.validate(official.Candidate(source_url=CFA_PAGE, title=CFA_TITLE, page_text=page),
+                                   site, "chicken sandwich")
 
 
 @pg
@@ -461,7 +480,7 @@ async def test_a_successful_refresh_of_a_stale_record_is_fresh_again(env, monkey
     try:
         await srv.resolve_food("Chick-fil-A chicken sandwich", atomic=True)
         env["forget"]()
-        later = official.utcnow() + official.REGISTRY["Chick-fil-A"].max_age + official.timedelta(days=1)
+        later = official.utcnow() + official.MAX_AGE + official.timedelta(days=1)
         monkeypatch.setattr(official, "utcnow", lambda: later)
         refreshed = await srv.resolve_food("Chick-fil-A chicken sandwich", atomic=True)
         env["forget"]()
@@ -471,3 +490,69 @@ async def test_a_successful_refresh_of_a_stale_record_is_fresh_again(env, monkey
     assert refreshed["attribution"]["freshness"] == "fresh" and http.count("firecrawl") == 2
     assert reused["attribution"]["freshness"] == "fresh" and http.count("firecrawl") == 2
     assert len(await _rows(env["url"], "SELECT 1 FROM food_source_records")) == 2  # one per verification day
+
+
+# ---------------------------------------------------------------------------
+# Any restaurant: a place no list in the code knows.
+# ---------------------------------------------------------------------------
+
+GRILL_SITE = "https://www.joescornergrill.com/"
+GRILL_PAGE = "https://www.joescornergrill.com/menu/double-smash-burger"
+# FIXTURE: a small independent restaurant's own item page (written for this test).
+GRILL_MARKDOWN = (
+    "# Double Smash Burger\nTwo smashed patties, American cheese, house sauce.\n"
+    "## Nutrition Facts\nServing size 1 burger (310 g)\nCalories 820\nTotal Fat 52g\nSaturated Fat 21g\n"
+    "Total Carbohydrates 38g\nDietary Fiber 2g\nSugars 9g\nProtein 48g\n## Order online\n")
+
+
+@pg
+async def test_any_restaurant_the_chat_names_is_found_read_logged_and_reused(env, monkeypatch):
+    """No list knows "Joe's Corner Grill": its own site is found by search, its
+    item page read, the meal logged, and the next meal priced from Postgres."""
+    import meal_intent
+    srv, url, official = env["srv"], env["url"], env["official"]
+    assert meal_intent.chain_in("Joe's Corner Grill double smash burger") is None
+    calls = []
+
+    async def exa(key, payload):
+        calls.append(("exa", payload))
+        if "includeDomains" not in payload:  # the official-site search
+            return httpx.Response(200, json={"results": [
+                {"url": "https://www.yelp.com/biz/joes-corner-grill", "title": "Joe's Corner Grill - Yelp"},
+                {"url": GRILL_SITE, "title": "Joe's Corner Grill | Burgers & Shakes"}]})
+        assert payload["includeDomains"] == ["joescornergrill.com"]
+        return httpx.Response(200, json={"results": [{"url": GRILL_PAGE, "title": "Double Smash Burger"}]})
+
+    async def firecrawl(key, payload):
+        calls.append(("firecrawl", payload))
+        assert payload["url"] == GRILL_PAGE
+        return httpx.Response(200, json={"success": True, "data": {"markdown": GRILL_MARKDOWN, "metadata": {
+            "url": GRILL_PAGE, "statusCode": 200, "title": "Double Smash Burger | Joe's Corner Grill"}}})
+    monkeypatch.setattr(official, "post_exa_search", exa)
+    monkeypatch.setattr(official, "post_firecrawl_scrape", firecrawl)
+
+    async def agent(**kwargs):
+        update = kwargs["handlers"]["update_meal"]
+        result = await update({"meal_type": "Dinner", "add": [
+            {"description": "double smash burger", "source": "restaurant", "place": "Joe's Corner Grill"}]})
+        return result.get("reply") or result.get("confirmation") or "", []
+
+    user = env["users"][0]
+    first = await _turn(_service(srv, agent), user, str(uuid4()), "Double smash burger at Joe's Corner Grill")
+    assert [name for name, _ in calls] == ["exa", "exa", "firecrawl"]
+    entries = await _rows(url, "SELECT calories, protein, component_metadata FROM nutrition_entries WHERE user_id=$1",
+                          user)
+    assert len(entries) == 1 and float(entries[0]["calories"]) == 820 and float(entries[0]["protein"]) == 48
+    source = (await _rows(url, "SELECT * FROM food_source_records WHERE provider='official:joes-corner-grill'"))[0]
+    metadata = json.loads(source["metadata"])
+    assert metadata["official_domain"] == "joescornergrill.com" and source["source_url"] == GRILL_PAGE
+    observation = (await _rows(url, "SELECT serving_text FROM food_nutrition_observations WHERE source_record_id=$1",
+                               source["id"]))[0]
+    assert observation["serving_text"] == "1 burger (310 g)"
+    assert "820 kcal" in json.dumps(first)
+
+    env["forget"]()
+    await _turn(_service(srv, agent), user, str(uuid4()), "Another double smash burger at Joe's Corner Grill")
+    assert len(calls) == 3  # reused from Postgres: no search, no render
+    entries = await _rows(url, "SELECT calories FROM nutrition_entries WHERE user_id=$1", user)
+    assert [float(e["calories"]) for e in entries] == [820, 820]

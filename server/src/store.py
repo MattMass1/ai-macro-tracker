@@ -958,6 +958,15 @@ class Store:
         return {"food_item_id": str(item_id), "source_record_id": str(source_id),
                 "observation_id": str(observation_id)}
 
+    async def fetch_official_domain(self, provider: str) -> str | None:
+        """The official website domain verified for this restaurant by its
+        newest trusted official record (any item), so the site is searched
+        for once per restaurant, not once per item."""
+        pool = await self.connect()
+        return await pool.fetchval(
+            "SELECT metadata->>'official_domain' FROM food_source_records WHERE provider=$1 AND trusted "
+            "AND metadata ? 'official_domain' ORDER BY retrieved_at DESC LIMIT 1", provider)
+
     async def fetch_official_observation(self, provider: str, identity: str) -> dict[str, Any] | None:
         """The newest trusted, unrevoked official per-serving panel for one chain item."""
         import official_nutrition

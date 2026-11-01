@@ -1,114 +1,241 @@
-"""Official restaurant nutrition: validation and provider adapters (no database).
+"""Official restaurant nutrition for any restaurant: site verification, the
+page reader and the provider adapters (no database).
 
-Every provider response here is a FIXTURE built in the test; nothing is a
-live search or extraction.
+Pages under tests/fixtures/*_live_20261101.md are trimmed captures of real
+official pages (labeled in each file). Every other page and every provider
+response is a FIXTURE written here; nothing is a live call.
 """
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
 import pytest
 
 import official_nutrition as official
-from test_official_restaurant_nutrition import CFA_PAGE, FIXTURE_MARKDOWN, FIXTURE_PANEL, fixture_firecrawl
+from test_official_restaurant_nutrition import (CFA_PAGE, CFA_TITLE, FIXTURE_MARKDOWN, MemoryOfficialStore,
+                                                fixture_firecrawl)
 
-CFA = official.REGISTRY["Chick-fil-A"]
+FIXTURES = Path(__file__).parent / "fixtures"
+CFA = official.Site(place="Chick-fil-A", domain="chick-fil-a.com")
+MCD = official.Site(place="McDonald's", domain="mcdonalds.com")
+TACO = official.Site(place="Taco Bell", domain="tacobell.com")
+MCD_PAGE = "https://www.mcdonalds.com/us/en-us/product/big-mac.html"
+MCD_MARKDOWN = (FIXTURES / "mcdonalds_big_mac_live_20261101.md").read_text()
+TACO_TABLE = (FIXTURES / "tacobell_nutrition_table_live_20261101.md").read_text()
 
 
-def candidate(**changes):
-    panel = {**FIXTURE_PANEL, **changes.pop("panel", {})}
-    kwargs = {"source_url": CFA_PAGE, "page_text": FIXTURE_MARKDOWN,
-              "discovered_via": "exa", "extracted_via": "firecrawl", **changes}
-    return official.Candidate.from_extraction(panel, **kwargs)
+def page(url=CFA_PAGE, title=CFA_TITLE, text=FIXTURE_MARKDOWN):
+    return official.Candidate(source_url=url, title=title, page_text=text)
 
 
-def rejection(cand, identity="chicken sandwich"):
+def rejection(candidate, site=CFA, identity="chicken sandwich"):
     with pytest.raises(official.Rejected) as caught:
-        official.validate(cand, CFA, identity)
+        official.validate(candidate, site, identity)
     return caught.value.reason
 
 
-def test_identity_ignores_place_words_articles_and_plurals():
+# --------------------------------------------------------------------------- #
+# Any restaurant: identity and the official site
+# --------------------------------------------------------------------------- #
+
+def test_identity_drops_any_places_name_articles_and_plurals():
     for text in ("Chick-fil-A chicken sandwich", "a chicken sandwich from chick fil a",
                  "CFA chicken sandwiches", "Chick-fil-A® Chicken Sandwich"):
-        assert official.identity_of(text, CFA) == "chicken sandwich"
-    assert official.identity_of("Chick-fil-A spicy chicken sandwich", CFA) == "spicy chicken sandwich"
+        assert official.identity_of(text, "Chick-fil-A") == "chicken sandwich"
+    # A place no list knows: its own name is removed the same way.
+    assert official.identity_of("Joe's Corner Grill double smash burger", "Joe's Corner Grill") == "double smash burger"
+    assert official.identity_of("Big Mac®", "McDonald's") == "big mac"
 
 
-def test_valid_official_panel_is_accepted_with_a_page_hash_not_the_page():
-    panel = official.validate(candidate(), CFA, "chicken sandwich")
+@pytest.mark.parametrize("domain,place", [
+    ("chick-fil-a.com", "Chick-fil-A"), ("panerabread.com", "Panera"), ("dunkindonuts.com", "Dunkin'"),
+    ("chipotle.com", "Chipotle Mexican Grill"), ("raisingcanes.com", "Raising Cane's"),
+    ("in-n-out.com", "In-N-Out"), ("joescornergrill.com", "Joe's Corner Grill"),
+    ("mcdonalds.com", "McDonald's"), ("joespizzanyc.com", "Joe's Pizza"),
+])
+def test_a_restaurants_own_domain_spells_its_name(domain, place):
+    assert official.names_place(domain, place)
+
+
+@pytest.mark.parametrize("domain,place", [
+    ("nutritionix.com", "Chick-fil-A"), ("fastfoodnutrition.org", "Chick-fil-A"),
+    ("chickfilamenu.com", "Chick-fil-A"), ("chick-fil-a-menu-prices.com", "Chick-fil-A"),
+    ("mcdonaldsnutrition.net", "McDonald's"), ("doordash.com", "Joe's Pizza"), ("yelp.com", "Joe's Pizza"),
+])
+def test_aggregators_fan_sites_and_lookalikes_are_not_official(domain, place):
+    assert not official.names_place(domain, place)
+
+
+def test_the_official_site_must_also_title_itself_with_the_place():
+    results = [
+        {"url": "https://www.nutritionix.com/chick-fil-a", "title": "Chick-fil-A Nutrition Facts"},
+        {"url": "https://www.chick-fil-a.com/menu", "title": "Menu | Chick-fil-A"},
+        {"url": "https://www.chick-fil-a.com/nutrition-allergens", "title": "Nutrition | Chick-fil-A"},
+    ]
+    assert official.pick_official_site("Chick-fil-A", results) == CFA
+    untitled = [{"url": "https://www.joespizzanyc.com/", "title": "Home"}]
+    assert official.pick_official_site("Joe's Pizza", untitled) is None
+    assert official.pick_official_site("Joe's Pizza", [{"url": "http://www.joespizzanyc.com/",
+                                                         "title": "Joe's Pizza"}]) is None
+
+
+def test_only_pages_on_the_official_domain_count():
+    assert official.official_host("https://order.chick-fil-a.com/menu/x", CFA) == "order.chick-fil-a.com"
+    assert rejection(page(url="https://www.chick-fil-a.com.evil.example/menu/x")) == "not_official_source"
+    assert rejection(page(url="http://www.chick-fil-a.com/menu/entrees/chick-fil-a-chicken-sandwich")) \
+        == "not_official_source"
+    assert rejection(page(url="https://www.nutritionix.com/chick-fil-a/chicken-sandwich")) == "not_official_source"
+
+
+# --------------------------------------------------------------------------- #
+# The page reader, on real captured pages
+# --------------------------------------------------------------------------- #
+
+def test_chick_fil_a_item_page_label_then_value():
+    panel = official.validate(page(), CFA, "chicken sandwich")
     assert panel.nutrients == {"calories": 420, "protein": 29, "carbs": 41, "fat": 16, "fiber": 1}
+    assert panel.serving_text == "1 menu item as published" and panel.layout == "item_page"
+    assert panel.display_name == "Chick-fil-A Chicken Sandwich"
     record = official.record_for(panel, CFA)
-    assert record["display_name"] == "Chick-fil-A Chicken Sandwich"
-    assert "markdown" not in str(record["metadata"]) and FIXTURE_MARKDOWN not in str(record["metadata"])
-    assert record["metadata"]["page_sha256"] == panel.page_sha256
+    assert FIXTURE_MARKDOWN not in str(record["metadata"]) and record["metadata"]["page_sha256"] == panel.page_sha256
+    assert record["metadata"]["official_domain"] == "chick-fil-a.com"
 
 
-@pytest.mark.parametrize("url", ["https://www.chick-fil-a.com.evil.example/menu/x",
-                                 "http://www.chick-fil-a.com/menu/x",
-                                 "https://www.nutritionix.com/chick-fil-a/sandwich"])
-def test_a_page_off_the_official_domain_is_never_evidence(url):
-    assert rejection(candidate(source_url=url)) == "not_official_source"
+def test_mcdonalds_item_page_value_then_label():
+    panel = official.validate(page(url=MCD_PAGE, title="Big Mac®: McDonald's Special Beef Burger",
+                                   text=MCD_MARKDOWN), MCD, "big mac")
+    assert panel.nutrients == {"calories": 580, "protein": 25, "carbs": 45, "fat": 34, "fiber": 3}
+    assert panel.display_name == "Big Mac"
 
 
-def test_a_different_menu_item_is_not_this_item():
-    spicy = candidate(panel={"item_name": "Spicy Chicken Sandwich"})
-    assert rejection(spicy) == "identity_mismatch"
+def test_taco_bell_nutrition_table_row():
+    candidate = page(url="https://www.tacobell.com/nutrition/info", title="Nutrition Information | Taco Bell®",
+                     text=TACO_TABLE)
+    panel = official.validate(candidate, TACO, "crunchwrap supreme")
+    assert panel.nutrients == {"calories": 530, "protein": 15, "carbs": 74, "fat": 20, "fiber": 6}
+    assert panel.layout == "table_row"
+    assert rejection(candidate, TACO, "black bean crunchwrap") == "no_panel_for_item"
 
 
-def test_a_missing_nutrient_is_rejected_never_stored_as_zero():
-    assert rejection(candidate(panel={"protein": None})) == "incomplete_panel"
-    assert rejection(candidate(panel={"fiber": "n/a"})) == "incomplete_panel"
+def test_a_table_whose_header_cannot_be_mapped_is_never_read_by_position():
+    headerless = ("| MENU ITEM | NUTRITION INFORMATION | | | | | | | |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                  "| Dave's Single | 524 | 29 | 10 | 37 | 8.2 | 1.7 | 28 | 2.2 |\n")
+    wendys = official.Site(place="Wendy's", domain="wendys.com")
+    candidate = page(url="https://www.wendys.com/sites/default/files/core-menu.pdf", title="", text=headerless)
+    assert rejection(candidate, wendys, "daves single") == "no_panel_for_item"
+
+
+def test_a_garbled_pdf_table_is_rejected():
+    # Captured shape of a live PDF render: OCR-garbled headers, no total-fat column.
+    garbled = ("| NUTRITION FACTS | Portion | Calories | Calories from Fat | Saturated Fat (g) | Trans Fat (g) | "
+               "Cholesterol (mg) | Sodium (mg) | Catalysts (g) | Biogas (g) | Protein (g) |\n"
+               "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+               "| Chicken | 2oz | 180 | 60 | 7 | 3 | 0 | 125 | 30 | 0 | 0 |\n")
+    chipotle = official.Site(place="Chipotle", domain="chipotle.com")
+    candidate = page(url="https://www.chipotle.com/content/dam/nutrition.pdf", title="", text=garbled)
+    assert rejection(candidate, chipotle, "chicken") == "no_panel_for_item"
+
+
+def test_a_table_and_an_item_page_that_disagree_are_ambiguous():
+    table = ("\n| Item | Calories | Total Fat (g) | Total Carbohydrates (g) | Dietary Fiber (g) | Protein (g) |\n"
+             "| --- | --- | --- | --- | --- | --- |\n| Chick-fil-A® Chicken Sandwich | 440 | 18 | 41 | 1 | 29 |\n")
+    assert rejection(page(text=FIXTURE_MARKDOWN + table)) == "ambiguous_panel"
+
+
+# --------------------------------------------------------------------------- #
+# The page reader: what must never pass
+# --------------------------------------------------------------------------- #
+
+def test_only_this_items_own_page_is_evidence():
+    spicy_url = "https://www.chick-fil-a.com/menu/entrees/spicy-chicken-sandwich"
+    assert rejection(page(url=spicy_url, title="Spicy Chicken Sandwich | Chick-fil-A")) == "no_panel_for_item"
+    assert rejection(page(title="Spicy Chicken Sandwich | Chick-fil-A")) == "no_panel_for_item"
+    catering = "https://www.chick-fil-a.com/catering/entrees/chick-fil-a-chicken-sandwich"
+    assert rejection(page(url=catering)) == "no_panel_for_item"
+    index = "https://www.chick-fil-a.com/nutrition-allergens"
+    assert rejection(page(url=index, title="Nutrition & Allergens | Chick-fil-A")) == "no_panel_for_item"
+
+
+def test_a_sub_section_about_another_item_never_supplies_the_numbers():
+    other = ("# Chick-fil-A® Chicken Sandwich\nA boneless breast of chicken.\n"
+             "## Spicy Chicken Sandwich\nAmount per serving\nCalories 450\nTotal Fat 19g\n"
+             "Total Carbohydrates 45g\nDietary Fiber 2g\nProtein 28g\n")
+    assert rejection(page(text=other)) == "no_panel_for_item"
+    sauce = (FIXTURE_MARKDOWN.replace("Dietary Fiber\n\n1g", "")
+             + "\n## Chick-fil-A® Sauce\nCalories 140\nDietary Fiber 0g\n")
+    assert rejection(page(text=sauce)) == "nutrient_not_in_page"
+
+
+def test_a_nutrient_the_page_never_labels_is_unknown_never_zero():
+    missing = FIXTURE_MARKDOWN.replace("Dietary Fiber\n\n1g", "Trans Fat\n\n0g")
+    assert rejection(page(text=missing)) == "nutrient_not_in_page"
+
+
+def test_qualified_fats_and_net_carbs_are_never_totals():
+    assert official.labeled_values("Calories 1,020\nPolyunsaturated Fat 2g\nTotal Fat 18g\nNet Carbs 3g\n"
+                                   "Total Carbohydrates 41g\nDietary Fiber 1g\nProtein 29g") == {
+        "calories": 1020, "protein": 29, "carbs": 41, "fat": 18, "fiber": 1}
+    only_saturated = FIXTURE_MARKDOWN.replace("Total Fat\n\n16g", "Saturated Fat\n\n16g")
+    assert rejection(page(text=only_saturated)) == "nutrient_not_in_page"
+
+
+def test_a_daily_value_sentence_is_not_the_calories():
+    assert official.labeled_values(FIXTURE_MARKDOWN)["calories"] == 420
+
+
+def test_duplicate_panels_must_agree():
+    differing = FIXTURE_MARKDOWN.replace("Calories\n\n420", "Calories\n\n440", 1)
+    assert rejection(page(text=differing)) == "ambiguous_panel"
 
 
 def test_numbers_that_cannot_describe_one_food_are_rejected():
-    assert rejection(candidate(panel={"calories": 90})) == "energy_inconsistent"
+    bad = FIXTURE_MARKDOWN.replace("Calories\n\n420", "Calories\n\n90")
+    assert rejection(page(text=bad)) == "energy_inconsistent"
 
 
-def test_values_the_page_does_not_show_are_rejected():
-    page = FIXTURE_MARKDOWN.replace("Protein\n\n29g", "Protein\n\n31g")
-    assert rejection(candidate(page_text=page)) == "values_not_in_page"
-    assert rejection(candidate(page_text="")) == "no_nutrition_panel"
+def test_a_panel_with_no_serving_basis_is_rejected():
+    bare = FIXTURE_MARKDOWN.replace("Amount per serving", "")
+    assert rejection(page(text=bare)) == "serving_undefined"
 
 
-def test_an_undefined_serving_is_rejected():
-    page = FIXTURE_MARKDOWN.replace("Amount per serving", "")
-    assert rejection(candidate(page_text=page, panel={"serving_size": ""})) == "serving_undefined"
-    # The live page prints only "Amount per serving": the menu item as published.
-    assert official.validate(candidate(), CFA, "chicken sandwich").serving_text == "1 menu item as published"
-
+# --------------------------------------------------------------------------- #
+# Providers (FIXTURE transports)
+# --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
 async def test_missing_provider_keys_are_a_stated_blocker_not_a_result(monkeypatch):
     monkeypatch.delenv("EXA_API_KEY", raising=False)
     with pytest.raises(official.ProviderUnavailable) as caught:
-        await official.discover(CFA, "chicken sandwich")
+        await official.find_site("Chick-fil-A")
     assert caught.value.reason == "exa_api_key_not_configured"
     monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
     with pytest.raises(official.ProviderUnavailable) as caught:
-        await official.extract(CFA, CFA_PAGE, "chicken sandwich", discovered_via="exa")
+        await official.render(CFA, CFA_PAGE, discovered_via="exa")
     assert caught.value.reason == "firecrawl_api_key_not_configured"
 
 
 @pytest.mark.asyncio
-async def test_discovery_keeps_only_official_urls(monkeypatch):
+async def test_discovery_searches_only_the_official_site_item_pages_first(monkeypatch):
     monkeypatch.setenv("EXA_API_KEY", "fixture-key")
     sent = {}
 
     async def post(key, payload):
         sent.update(payload)
         return httpx.Response(200, json={"results": [
+            {"url": "https://www.chick-fil-a.com/nutrition-allergens"},
             {"url": "https://www.fastfoodnutrition.org/chick-fil-a/chicken-sandwich"},
             {"url": CFA_PAGE}, {"url": CFA_PAGE}, {"url": "javascript:alert(1)"}]})
     monkeypatch.setattr(official, "post_exa_search", post)
-    assert await official.discover(CFA, "chicken sandwich") == [CFA_PAGE]
-    assert sent["includeDomains"] == ["chick-fil-a.com"] and sent["numResults"] == 3
+    urls = await official.discover(CFA, "chicken sandwich")
+    assert urls == [CFA_PAGE, "https://www.chick-fil-a.com/nutrition-allergens"]
+    assert sent["includeDomains"] == ["chick-fil-a.com"]
 
 
 @pytest.mark.asyncio
-async def test_firecrawl_request_shape_and_errors(monkeypatch):
+async def test_firecrawl_is_asked_for_markdown_only_and_errors_are_outages(monkeypatch):
     monkeypatch.setenv("FIRECRAWL_API_KEY", "fixture-key")
     sent = {}
     status = {"code": 200, "body": fixture_firecrawl()}
@@ -117,68 +244,149 @@ async def test_firecrawl_request_shape_and_errors(monkeypatch):
         sent.update(payload)
         return httpx.Response(status["code"], json=status["body"])
     monkeypatch.setattr(official, "post_firecrawl_scrape", post)
-    found = await official.extract(CFA, CFA_PAGE, "chicken sandwich", discovered_via="exa")
-    assert found.nutrients["calories"] == 420 and found.page_text == FIXTURE_MARKDOWN
-    assert sent["url"] == CFA_PAGE and sent["formats"] == ["markdown"]  # no LLM extraction
-    assert found.name == "Chick-fil-A® Chicken Sandwich" and found.extracted_via == "firecrawl_markdown"
-    # A redirect off the official site is caught by validation, not trusted.
+    found = await official.render(CFA, CFA_PAGE, discovered_via="exa")
+    assert sent["formats"] == ["markdown"]
+    assert found.title == CFA_TITLE and found.page_text == FIXTURE_MARKDOWN
     status["body"] = fixture_firecrawl(final_url="https://example.com/landing")
-    moved = await official.extract(CFA, CFA_PAGE, "chicken sandwich", discovered_via="exa")
-    with pytest.raises(official.Rejected):
-        official.validate(moved, CFA, "chicken sandwich")
+    moved = await official.render(CFA, CFA_PAGE, discovered_via="exa")
+    assert rejection(moved) == "not_official_source"
     for code in (402, 429, 500):
         status.update(code=code, body={"success": False, "error": "fixture"})
         with pytest.raises(official.ProviderUnavailable) as caught:
-            await official.extract(CFA, CFA_PAGE, "chicken sandwich", discovered_via="exa")
+            await official.render(CFA, CFA_PAGE, discovered_via="exa")
         assert caught.value.reason == f"firecrawl_http_{code}"
 
 
-class MemoryOfficialStore:
-    def __init__(self):
-        self.saved = []
+# --------------------------------------------------------------------------- #
+# Resolution: cost, failures, background
+# --------------------------------------------------------------------------- #
 
-    async def fetch_official_observation(self, provider, identity):
-        if not self.saved:
-            return None
-        record, ids = self.saved[-1]
-        return {**ids, "display_name": record["display_name"], "product_identity": record["product_identity"],
-                "serving_text": record["serving_text"], "serving_grams": record["serving_grams"],
-                **record["nutrients"], "source_url": record["source_url"],
-                "retrieved_at": record["retrieved_at"], "cache_allowed": record["cache_allowed"]}
-
-    async def save_official_observation(self, record):
-        ids = {"food_item_id": "item", "observation_id": f"obs{len(self.saved)}", "source_record_id": "src"}
-        self.saved.append((record, ids))
-        return ids
+@pytest.fixture
+def clean_caches():
+    official.clear_process_caches()
+    yield
+    official.clear_process_caches()
 
 
+@pytest.mark.parametrize("query", [
+    "Chick-fil-A chicken sandwich and waffle fries", "Chick-fil-A chicken sandwich, no pickles",
+    "Chick-fil-A chicken sandwich with no pickles", "half a Chick-fil-A chicken sandwich",
+    "large Chick-fil-A waffle fries", "Chick-fil-A 8 count nuggets", "chicken sandwich"])
 @pytest.mark.asyncio
-async def test_an_outage_is_remembered_so_each_meal_does_not_pay_again(monkeypatch):
-    official.clear_process_caches()
-    calls = []
-
-    async def failing_discover(source, identity):
-        calls.append(identity)
-        raise official.ProviderUnavailable("exa_http_503")
-    monkeypatch.setattr(official, "discover", failing_discover)
-    store = MemoryOfficialStore()
-    assert await official.lookup("Chick-fil-A chicken sandwich", store=store) is None
-    assert await official.lookup("chick fil a chicken sandwich", store=store) is None
-    assert calls == ["chicken sandwich"]
-    official.clear_process_caches()
-
-
-@pytest.mark.asyncio
-async def test_unregistered_places_and_counts_never_reach_a_provider(monkeypatch):
-    official.clear_process_caches()
-
+async def test_phrases_that_are_not_one_item_at_a_place_never_pay_for_a_search(monkeypatch, clean_caches, query):
     async def forbidden(*_args, **_kwargs):
         raise AssertionError("no provider call expected")
-    monkeypatch.setattr(official, "discover", forbidden)
-    store = MemoryOfficialStore()
-    assert await official.lookup("Taco Bell crunchy taco", store=store) is None  # not in the registry
-    assert await official.lookup("chicken sandwich", store=store) is None  # no place at all
-    assert await official.lookup("Chick-fil-A 8 count nuggets", store=store) is None  # count-led identity
+    monkeypatch.setattr(official, "find_site", forbidden)
+    monkeypatch.setattr(official, "ingest", forbidden)
+    assert await official.lookup(query, store=MemoryOfficialStore()) is None
+
+
+@pytest.mark.asyncio
+async def test_any_place_the_conversation_names_is_looked_up(monkeypatch, clean_caches):
+    seen = []
+
+    async def find_site(place):
+        seen.append(place)
+        return None  # no official site found: falls back, never guessed
+    monkeypatch.setattr(official, "find_site", find_site)
+    token = official.requested_place.set("Joe's Corner Grill")
+    try:
+        assert await official.lookup("Joe's Corner Grill double smash burger", store=MemoryOfficialStore()) is None
+    finally:
+        official.requested_place.reset(token)
+    assert seen == ["Joe's Corner Grill"]
+
+
+@pytest.mark.asyncio
+async def test_any_failed_ingest_is_remembered_including_store_errors(monkeypatch, clean_caches):
+    calls = []
+
+    async def ok_ingest(site, identity):
+        calls.append(identity)
+        return official.validate(page(), CFA, "chicken sandwich")
+    monkeypatch.setattr(official, "ingest", ok_ingest)
+
+    class BrokenStore(MemoryOfficialStore):
+        async def save_official_observation(self, record):
+            raise RuntimeError("fixture: database unavailable")
+    store = BrokenStore(domain="chick-fil-a.com")
+    with pytest.raises(RuntimeError):
+        await official.lookup("Chick-fil-A chicken sandwich", store=store)
+    assert await official.lookup("Chick-fil-A chicken sandwich", store=store) is None
+    assert calls == ["chicken sandwich"]
+    assert official._inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_a_slow_first_sighting_returns_quickly_and_finishes_in_the_background(monkeypatch, clean_caches):
+    monkeypatch.setattr(official, "INGEST_DEADLINE_SECONDS", 0.05)
+    release = asyncio.Event()
+    calls = []
+
+    async def slow_ingest(site, identity):
+        calls.append(identity)
+        await release.wait()
+        return official.validate(page(), CFA, "chicken sandwich")
+    monkeypatch.setattr(official, "ingest", slow_ingest)
+    store = MemoryOfficialStore(domain="chick-fil-a.com")
+    assert await official.lookup("Chick-fil-A chicken sandwich", store=store) is None
+    assert await official.lookup("Chick-fil-A chicken sandwich", store=store) is None
+    release.set()
+    await official.wait_for_background()
+    found = await official.lookup("Chick-fil-A chicken sandwich", store=store)
+    assert found["macros_per_serving"]["calories"] == 420 and calls == ["chicken sandwich"]
+
+
+@pytest.mark.asyncio
+async def test_a_background_failure_is_consumed_not_left_unretrieved(monkeypatch, clean_caches):
+    monkeypatch.setattr(official, "INGEST_DEADLINE_SECONDS", 0.01)
+    release = asyncio.Event()
+
+    async def late_failure(site, identity):
+        await release.wait()
+        raise RuntimeError("fixture: late failure")
+    monkeypatch.setattr(official, "ingest", late_failure)
+    assert await official.lookup("Chick-fil-A chicken sandwich",
+                                 store=MemoryOfficialStore(domain="chick-fil-a.com")) is None
+    task = next(iter(official._inflight.values()))
+    release.set()
+    await asyncio.wait([task])
+    await asyncio.sleep(0)
+    assert task.done() and task._log_traceback is False
+
+
+@pytest.mark.asyncio
+async def test_a_revoked_panel_is_never_saved_again(monkeypatch, clean_caches):
+    panel = official.validate(page(), CFA, "chicken sandwich")
+
+    async def same_wrong_page(site, identity):
+        return panel
+    monkeypatch.setattr(official, "ingest", same_wrong_page)
+    monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", official.record_for(panel, CFA)["metadata"]["values_digest"])
+    store = MemoryOfficialStore(domain="chick-fil-a.com")
+    assert await official.lookup("Chick-fil-A chicken sandwich", store=store) is None
+    assert store.saved == []
+
+
+def test_revocation_list_fails_closed(monkeypatch):
+    monkeypatch.delenv("OFFICIAL_NUTRITION_REVOKED_IDS", raising=False)
+    assert official.revoked_ids() == []
+    keep = str(uuid4())
+    monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", f" {keep} ,")
+    assert official.revoked_ids() == [keep]
+    monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", "not-a-uuid")
+    assert official.revoked_ids() is None
+
+
+def test_official_ledger_keys_are_only_kept_for_official_evidence():
+    from meal_drafts import _persistable
+    fatsecret = _persistable({"name": "x", "macro_source": "FatSecret: 1", "calories": 1, "attribution": {
+        "provider": "FatSecret", "external_id": "1", "source_url": "https://fatsecret.example/1",
+        "retrieved_at": "2026-11-01", "cache_allowed": True}})
+    assert set(fatsecret["attribution"]) == {"provider", "external_id", "cache_allowed"}
+    cfa = _persistable({"name": "x", "macro_source": "Curated restaurant: x", "calories": 1, "attribution": {
+        "provider": "official:chick-fil-a", "observation_id": "o", "source_url": CFA_PAGE}})
+    assert cfa["attribution"]["observation_id"] == "o"
 
 
 def test_gate_fails_closed(monkeypatch):
@@ -195,240 +403,7 @@ def test_gate_fails_closed(monkeypatch):
         assert release_gates.official_restaurant_nutrition_allowed()
         monkeypatch.setenv("OFFICIAL_RESTAURANT_NUTRITION_USER_IDS", "not-a-uuid")
         assert not release_gates.official_restaurant_nutrition_allowed()
-        monkeypatch.setenv("OFFICIAL_RESTAURANT_NUTRITION_USER_IDS", str(uuid4()))
-        assert not release_gates.official_restaurant_nutrition_allowed()
         monkeypatch.setenv("OFFICIAL_RESTAURANT_NUTRITION_USER_IDS", str(user))
         assert release_gates.official_restaurant_nutrition_allowed()
     finally:
         reset_user(scope)
-
-
-# ---------------------------------------------------------------------------
-# Review round 1 (B1, B2, S2-S5, nits). Pages are FIXTURES written here.
-# ---------------------------------------------------------------------------
-
-TABLE_PAGE = (
-    "# Nutrition & Allergens\n"
-    "| Item | Calories | Fat | Carbohydrates | Fiber | Protein |\n"
-    "| Chick-fil-A® Chicken Sandwich | 420 | 18g | 41g | 1g | 29g |\n"
-    "| Spicy Chicken Sandwich | 450 | 19g | 45g | 2g | 28g |\n"
-)
-
-
-def test_a_multi_item_page_is_never_evidence_for_one_item():
-    # B1: the Spicy row's numbers under the plain sandwich's name.
-    spicy_numbers = candidate(page_text=TABLE_PAGE, panel={"calories": 450, "fat": 19, "carbs": 45,
-                                                         "fiber": 2, "protein": 28})
-    assert rejection(spicy_numbers) == "nutrient_not_in_page"  # a table has no labeled panel
-    index = "https://www.chick-fil-a.com/nutrition-allergens"
-    assert rejection(candidate(page_text=TABLE_PAGE, source_url=index)) == "not_item_page"
-
-
-@pytest.mark.parametrize("url,title", [
-    ("https://www.chick-fil-a.com/catering/entrees/chick-fil-a-chicken-sandwich", ""),  # not a menu item page
-    ("https://www.chick-fil-a.com/menu/entrees/spicy-chicken-sandwich", ""),  # another item's page
-    (CFA_PAGE, "Spicy Chicken Sandwich | Chick-fil-A"),  # title names another item
-])
-def test_only_this_items_own_menu_page_is_evidence(url, title):
-    assert rejection(candidate(source_url=url, title=title)) == "not_item_page"
-
-
-def test_the_live_page_format_passes_and_its_duplicate_panel_must_agree():
-    # FIXTURE captured live 2026-11-01: two identical panels, other items' calories below.
-    accepted = official.validate(candidate(title="Chick-fil-A® Chicken Sandwich | Chick-fil-A"),
-                                 CFA, "chicken sandwich")
-    assert accepted.nutrients == {"calories": 420, "protein": 29, "carbs": 41, "fat": 16, "fiber": 1}
-    differing = FIXTURE_MARKDOWN.replace("Calories\n\n420", "Calories\n\n440", 1)
-    assert rejection(candidate(page_text=differing)) == "ambiguous_panel"
-
-
-def test_values_are_read_from_the_items_own_labels_not_anywhere_on_the_page():
-    # A related-items block lower on the item page must not supply the numbers.
-    page = FIXTURE_MARKDOWN + "\n# You may also like\nSpicy Chicken Sandwich\nCalories 450\nProtein 28g\n"
-    accepted = official.validate(candidate(page_text=page), CFA, "chicken sandwich")
-    assert accepted.nutrients["calories"] == 420
-    model_read_the_wrong_block = candidate(page_text=page, panel={"calories": 450, "protein": 28})
-    assert rejection(model_read_the_wrong_block) == "values_not_in_page"
-
-
-def test_a_nutrient_the_page_never_labels_is_unknown_even_if_the_model_says_zero():
-    # B2: no Fiber line, a "Trans Fat 0g" line, and the model answering fiber 0.
-    page = FIXTURE_MARKDOWN.replace("Dietary Fiber\n\n1g", "Trans Fat\n\n0g")
-    assert rejection(candidate(page_text=page, panel={"fiber": 0})) == "nutrient_not_in_page"
-
-
-def test_trans_and_saturated_fat_are_not_total_fat():
-    page = FIXTURE_MARKDOWN.replace("Total Fat\n\n16g", "Polyunsaturated Fat\n\n2g\n\nTotal Fat\n\n16g")
-    assert official.validate(candidate(page_text=page), CFA, "chicken sandwich").nutrients["fat"] == 16
-    no_total = FIXTURE_MARKDOWN.replace("Total Fat\n\n16g", "Saturated Fat\n\n16g")
-    assert rejection(candidate(page_text=no_total)) == "nutrient_not_in_page"
-
-
-def test_serving_grams_are_kept_only_when_the_page_shows_them():
-    unverified = official.validate(candidate(panel={"serving_grams": 183}), CFA, "chicken sandwich")
-    assert unverified.serving_grams is None
-    page = FIXTURE_MARKDOWN.replace("Amount per serving", "Serving size 1 sandwich (183 g)\n\nAmount per serving")
-    shown = official.validate(candidate(page_text=page, panel={"serving_grams": 183}), CFA, "chicken sandwich")
-    assert shown.serving_grams == 183
-
-
-def test_only_the_official_hosts_count_not_every_subdomain():
-    assert rejection(candidate(source_url="https://careers.chick-fil-a.com/menu/x")) == "not_official_source"
-    assert official.official_host("https://chick-fil-a.com/menu/x", CFA) == "chick-fil-a.com"
-
-
-@pytest.mark.parametrize("query", [
-    "Chick-fil-A chicken sandwich and waffle fries", "Chick-fil-A chicken sandwich, no pickles",
-    "Chick-fil-A chicken sandwich with no pickles", "half a Chick-fil-A chicken sandwich",
-    "large Chick-fil-A waffle fries", "Chick-fil-A chicken sandwich without cheese"])
-@pytest.mark.asyncio
-async def test_a_phrase_that_is_not_one_published_item_name_never_pays_for_a_search(monkeypatch, query):
-    # S4: these can only ever end as identity_mismatch, so they are not searched.
-    official.clear_process_caches()
-
-    async def forbidden(*_args, **_kwargs):
-        raise AssertionError("no provider call expected")
-    monkeypatch.setattr(official, "discover", forbidden)
-    assert await official.lookup(query, store=MemoryOfficialStore()) is None
-
-
-@pytest.mark.asyncio
-async def test_any_failed_ingest_is_remembered_including_store_errors(monkeypatch):
-    # S2: a save failure must not make every later meal pay again.
-    official.clear_process_caches()
-    calls = []
-
-    async def ok_ingest(source, identity):
-        calls.append(identity)
-        return official.validate(candidate(), CFA, "chicken sandwich")
-    monkeypatch.setattr(official, "ingest", ok_ingest)
-
-    class BrokenStore(MemoryOfficialStore):
-        async def save_official_observation(self, record):
-            raise RuntimeError("fixture: database unavailable")
-    store = BrokenStore()
-    with pytest.raises(RuntimeError):
-        await official.lookup("Chick-fil-A chicken sandwich", store=store)
-    assert await official.lookup("Chick-fil-A chicken sandwich", store=store) is None
-    assert calls == ["chicken sandwich"]
-    assert official._inflight == {}  # nit: no per-identity state outlives its ingest
-    official.clear_process_caches()
-
-
-@pytest.mark.asyncio
-async def test_a_slow_first_sighting_returns_quickly_and_finishes_in_the_background(monkeypatch):
-    # S3: the turn never waits past the deadline; the record is saved for next time.
-    official.clear_process_caches()
-    monkeypatch.setattr(official, "INGEST_DEADLINE_SECONDS", 0.05)
-    release = asyncio.Event()
-    calls = []
-
-    async def slow_ingest(source, identity):
-        calls.append(identity)
-        await release.wait()
-        return official.validate(candidate(), CFA, "chicken sandwich")
-    monkeypatch.setattr(official, "ingest", slow_ingest)
-    store = MemoryOfficialStore()
-    assert await official.lookup("Chick-fil-A chicken sandwich", store=store) is None
-    assert await official.lookup("Chick-fil-A chicken sandwich", store=store) is None  # still in flight
-    release.set()
-    await official.wait_for_background()
-    found = await official.lookup("Chick-fil-A chicken sandwich", store=store)
-    assert found["macros_per_serving"]["calories"] == 420 and calls == ["chicken sandwich"]
-    official.clear_process_caches()
-
-
-def test_official_ledger_keys_are_only_kept_for_official_evidence():
-    # S5: gate off (any other provider), the persisted attribution is unchanged.
-    from meal_drafts import _persistable
-    fatsecret = _persistable({"name": "x", "macro_source": "FatSecret: 1", "calories": 1, "attribution": {
-        "provider": "FatSecret", "external_id": "1", "source_url": "https://fatsecret.example/1",
-        "retrieved_at": "2026-11-01", "cache_allowed": True}})
-    assert set(fatsecret["attribution"]) == {"provider", "external_id", "cache_allowed"}
-    cfa = _persistable({"name": "x", "macro_source": "Curated restaurant: x", "calories": 1, "attribution": {
-        "provider": "official:chick-fil-a", "observation_id": "o", "source_url": CFA_PAGE}})
-    assert cfa["attribution"]["observation_id"] == "o" and cfa["attribution"]["source_url"] == CFA_PAGE
-
-
-def test_revocation_list_fails_closed(monkeypatch):
-    monkeypatch.delenv("OFFICIAL_NUTRITION_REVOKED_IDS", raising=False)
-    assert official.revoked_ids() == []
-    keep = str(uuid4())
-    monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", f" {keep} ,")
-    assert official.revoked_ids() == [keep]
-    monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", "not-a-uuid")
-    assert official.revoked_ids() is None  # malformed: serve no official record at all
-
-
-# Review round 2 (N1, N2, N3, N4).
-
-def test_a_sub_section_about_another_item_never_supplies_the_numbers():
-    # N1: values only under "## Spicy Chicken Sandwich" are not the plain sandwich's.
-    page = ("# Chick-fil-A® Chicken Sandwich\nA boneless breast of chicken.\n"
-            "## Spicy Chicken Sandwich\nServing size 1 sandwich\nCalories 450\nFat 19g\n"
-            "Carbohydrates 45g\nFiber 2g\nProtein 28g\n")
-    spicy = candidate(page_text=page, panel={"calories": 450, "fat": 19, "carbs": 45, "fiber": 2, "protein": 28})
-    assert rejection(spicy) == "no_nutrition_panel"
-    # A sauce block's "Fiber 0g" is not the sandwich's missing fiber.
-    sauce = FIXTURE_MARKDOWN.replace("Dietary Fiber\n\n1g", "") + "\n## Chick-fil-A® Sauce\nCalories 140\nFiber 0g\n"
-    assert rejection(candidate(page_text=sauce, panel={"fiber": 0})) == "nutrient_not_in_page"
-    # Generic sub-headings ("## Nutrition Facts") stay part of the item.
-    facts = FIXTURE_MARKDOWN.replace("## Nutrition Information", "## Nutrition Facts")
-    assert official.validate(candidate(page_text=facts), CFA, "chicken sandwich").nutrients["fiber"] == 1
-
-
-def test_thousands_separators_and_other_fats_are_read_correctly():
-    assert official.labeled_values("Calories 1,020\nFat 50g")["calories"] == 1020
-    values = official.labeled_values("Polyunsaturated Fat 2g\nMonounsaturated Fat 3g\nFat 18g")
-    assert values["fat"] == 18
-
-
-def test_a_revoked_values_digest_blocks_the_same_panel_on_any_later_day(monkeypatch):
-    # N2: revocation follows the nutrition version, not one day's record id.
-    panel = official.validate(candidate(), CFA, "chicken sandwich")
-    digest = official.record_for(panel, CFA)["metadata"]["values_digest"]
-    monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", digest)
-    assert official.revoked_ids() == [digest]
-    assert official.is_revoked(official.record_for(panel, CFA))
-
-
-@pytest.mark.asyncio
-async def test_a_revoked_panel_is_never_saved_again(monkeypatch):
-    official.clear_process_caches()
-    panel = official.validate(candidate(), CFA, "chicken sandwich")
-
-    async def same_wrong_page(source, identity):
-        return panel
-    monkeypatch.setattr(official, "ingest", same_wrong_page)
-    monkeypatch.setenv("OFFICIAL_NUTRITION_REVOKED_IDS", official.record_for(panel, CFA)["metadata"]["values_digest"])
-    store = MemoryOfficialStore()
-    assert await official.lookup("Chick-fil-A chicken sandwich", store=store) is None
-    assert store.saved == []
-    official.clear_process_caches()
-
-
-@pytest.mark.asyncio
-async def test_a_background_failure_is_logged_once_not_left_unretrieved(monkeypatch, caplog):
-    # N3: the done-callback consumes the exception of an ingest nobody awaits.
-    official.clear_process_caches()
-    monkeypatch.setattr(official, "INGEST_DEADLINE_SECONDS", 0.01)
-    release = asyncio.Event()
-
-    async def late_failure(source, identity):
-        await release.wait()
-        raise RuntimeError("fixture: late failure")
-    monkeypatch.setattr(official, "ingest", late_failure)
-    task_errors = []
-    loop = asyncio.get_running_loop()
-    loop.set_exception_handler(lambda _loop, context: task_errors.append(context))
-    try:
-        assert await official.lookup("Chick-fil-A chicken sandwich", store=MemoryOfficialStore()) is None
-        task = next(iter(official._inflight.values()))
-        release.set()
-        await asyncio.wait([task])  # waits without retrieving the exception
-        await asyncio.sleep(0)  # let done-callbacks run
-        assert task.done() and task._log_traceback is False
-    finally:
-        loop.set_exception_handler(None)
-        official.clear_process_caches()
-    assert task_errors == []

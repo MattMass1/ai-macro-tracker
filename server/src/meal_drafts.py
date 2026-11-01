@@ -204,6 +204,9 @@ def _food_query(item: Mapping[str, Any]) -> dict[str, Any]:
     if preparation and not _PREP_WORD.search(description):
         description = f"{preparation} {description}"
     component: dict[str, Any] = {"description": description}
+    origins = item.get("field_origins") or {}
+    if origins.get("source_kind") == "restaurant" and origins.get("place"):
+        component["place"] = origins["place"]  # the restaurant whose own site is looked up
     if item.get("unit") or item.get("size"):
         component["portion"] = portion_text(item)
     elif item.get("quantity") is not None:

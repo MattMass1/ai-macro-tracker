@@ -374,7 +374,7 @@ async def resolve_food(query: str, **kwargs):
 async def _official_restaurant_food(query: str, client) -> dict[str, Any] | None:
     """Official chain nutrition for one food text, or None to continue the
     existing chain. A provider or store failure never blocks the meal."""
-    if official_nutrition.source_for(query) is None:
+    if official_nutrition.place_for(query) is None:
         return None
     quantity, unit, identity = food_lookup._clean_component(food_lookup._normalize_query_text(query))
     if quantity is not None and unit not in {"serving", "servings"}:
@@ -4222,9 +4222,13 @@ async def _meal_drafts_engine():
 async def _resolve_draft_component(component: Mapping[str, Any]) -> dict[str, Any] | None:
     """One draft item through the shared verified resolver, once."""
     scope = _turn_presets.set({})
+    # The restaurant the model tagged for this item (any restaurant, not a
+    # known list) reaches the official-nutrition lookup.
+    place = official_nutrition.requested_place.set(component.get("place"))
     try:
         return await _resolve_food_component(component, atomic=True)
     finally:
+        official_nutrition.requested_place.reset(place)
         _turn_presets.reset(scope)
 
 

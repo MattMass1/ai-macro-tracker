@@ -5,10 +5,11 @@ The restaurant is the source of truth. For a registered chain the pipeline is::
     official source registry
       -> direct official data (when the registry names a direct adapter)
       -> Exa discovery, restricted to the chain's official domains
-      -> Firecrawl extraction of one official page (JSON + page text)
-      -> validation: official host, exact item identity, defined serving,
-         complete panel, energy/macro consistency, every value present in
-         the page text
+      -> Firecrawl rendering of one official item page (markdown only; the
+         panel is parsed from its labels in code, never asked of an LLM)
+      -> validation: official host, an item page whose /menu/ URL and title
+         name exactly this item, one unambiguous nutrition panel with every
+         nutrient on its own label, a defined serving, energy consistency
       -> an immutable, versioned Postgres record (food_items /
          food_source_records / food_nutrition_observations)
 
@@ -75,6 +76,8 @@ class OfficialSource:
     storage_allowed: bool            # numeric facts + URL may be stored and reused
     storage_basis: str               # why, in words a reviewer can check
     customization: str               # what the published panel does not cover
+    item_path_prefix: str            # official item pages live under this URL path
+    default_serving: str             # the serving a panel headed "Amount per serving" describes
     direct: str | None = None        # a DIRECT_ADAPTERS key, when one exists
 
     @property
@@ -89,10 +92,13 @@ REGISTRY: dict[str, OfficialSource] = {
         nutrition_url="https://www.chick-fil-a.com/nutrition-allergens",
         max_age=timedelta(days=30), storage_allowed=True,
         storage_basis=("Published numeric nutrition facts with the official page URL and retrieval "
-                       "time; no page text, images or markup are stored. Owner to confirm against "
-                       "the site's terms before live ingestion."),
+                       "time; no page text, images or markup are stored."),
         customization=("Standard build as published by Chick-fil-A. Sauces, substitutions, added or "
                        "removed toppings and size changes are not included."),
+        item_path_prefix="/menu/",
+        # Verified live 2026-11-01: item pages print "Amount per serving" with no
+        # serving-size line; the panel is for the menu item as served.
+        default_serving="1 menu item as published",
         direct=None,  # no documented public nutrition API; discovery + extraction instead
     ),
 }
@@ -187,11 +193,12 @@ class Candidate:
     page_text: str
     discovered_via: str
     extracted_via: str
+    title: str = ""
 
     @classmethod
     def from_extraction(cls, raw: Mapping[str, Any], *, source_url: str, page_text: str,
-                        discovered_via: str, extracted_via: str) -> "Candidate":
-        return cls(
+                        discovered_via: str, extracted_via: str, title: str = "") -> "Candidate":
+        return cls(title=" ".join(str(title or "").split())[:200],
             name=" ".join(str(raw.get("item_name") or "").split())[:160],
             serving_text=" ".join(str(raw.get("serving_size") or "").split())[:80],
             serving_grams=_number(raw.get("serving_grams")),
@@ -246,37 +253,90 @@ _LABELS: dict[str, tuple[re.Pattern[str], frozenset[str]]] = {
 }
 
 
-# Sub-headings that only label part of the item's own panel.
+# Headings that only label the item's own panel ("## Nutrition Information",
+# "### Nutrition & Allergens"). Any other heading ends the panel section.
 _PANEL_HEADINGS = frozenset({"nutrition", "nutrition facts", "nutrition information",
-                             "nutritional information", "nutrition info"})
+                             "nutritional information", "nutrition info", "nutrition allergens",
+                             "nutrition and allergens", "nutrition allergen"})
+_HEADING = re.compile(r"^(#+)\s+(\S.*)$")
 
 
-def item_section(page: str, source: "OfficialSource", identity: str) -> str | None:
-    """The page's own item section: from its first top-level heading, which
-    must name exactly this item, to the next heading of any level that is not
-    a generic panel label ("## Nutrition") or this same item. A page whose
-    main heading is not this item (a menu index, a nutrition table) is not
-    evidence for one item, and a "## Spicy Chicken Sandwich" or "## Sauce"
-    block inside it never supplies its numbers."""
+def _title_item(title: str) -> str:
+    """"Chick-fil-A® Chicken Sandwich | Chick-fil-A" -> the part naming the item."""
+    return re.split(r"\s+[|\u2013\u2014-]\s+", title, maxsplit=1)[0] if title else ""
+
+
+def item_page(candidate: "Candidate", source: "OfficialSource", identity: str) -> bool:
+    """The page is this item's own official page: an item URL under the
+    registry's path whose last segment names exactly this item, a title (when
+    given) naming it, and no earlier top-level heading naming anything else."""
+    path = urlsplit(candidate.source_url).path.rstrip("/")
+    if not path.startswith(source.item_path_prefix.rstrip("/") + "/"):
+        return False
+    if identity_of(path.rsplit("/", 1)[-1].replace("-", " "), source) != identity:
+        return False
+    if candidate.title and identity_of(_title_item(candidate.title), source) != identity:
+        return False
+    for line in candidate.page_text.splitlines():
+        heading = _HEADING.match(line)
+        if not heading:
+            continue
+        text = normalize_food_name(heading.group(2))
+        if text in _PANEL_HEADINGS:
+            break  # the panel starts; later headings are not the page's title
+        if len(heading.group(1)) == 1 and identity_of(heading.group(2), source) != identity:
+            return False
+    return True
+
+
+def panel_blocks(page: str, source: "OfficialSource", identity: str) -> list[str]:
+    """The page's nutrition panel(s): from the first panel heading to the first
+    heading that is neither a panel label nor this item, split at each panel
+    heading. A "## Spicy Chicken Sandwich", "## Sauce" or "Ingredients"
+    heading ends it, so another item's numbers are never read."""
     lines = page.splitlines()
-    for index, line in enumerate(lines):
-        if re.match(r"^#\s+\S", line):
-            if identity_of(line.lstrip("#"), source) != identity:
-                return None
-            rest = lines[index + 1:]
+    blocks: list[list[str]] = []
+    inside = False
+    for line in lines:
+        heading = _HEADING.match(line)
+        if heading:
+            text = normalize_food_name(heading.group(2))
+            if text in _PANEL_HEADINGS:
+                inside = True
+                blocks.append([line])
+                continue
+            if inside and identity_of(heading.group(2), source) != identity:
+                break
+        if inside:
+            blocks[-1].append(line)
+    return ["\n".join(block) for block in blocks]
 
-            def ends(other: str) -> bool:
-                heading = re.match(r"^(#+)\s+(\S.*)$", other)
-                if not heading:
-                    return False
-                if len(heading.group(1)) == 1:
-                    return True
-                text = normalize_food_name(heading.group(2))
-                return text not in _PANEL_HEADINGS and identity_of(heading.group(2), source) != identity
 
-            end = next((i for i, other in enumerate(rest) if ends(other)), len(rest))
-            return "\n".join([line, *rest[:end]])
-    return None
+def page_panel(page: str, source: "OfficialSource", identity: str) -> tuple[dict[str, float | None], str]:
+    """The one panel the page prints for this item, and its section text.
+
+    Several blocks (the same panel rendered for two layouts) must agree on
+    every nutrient they print; differing panels (sizes, variants) are
+    ambiguous. Raises Rejected."""
+    blocks = panel_blocks(page, source, identity)
+    if not blocks:
+        raise Rejected("no_nutrition_panel")
+    parsed = [labeled_values(block) for block in blocks]
+    complete = [values for values in parsed if all(values[k] is not None for k in NUTRIENTS)]
+    if not complete:
+        raise Rejected("nutrient_not_in_page")
+    if any(values != complete[0] for values in complete[1:]):
+        raise Rejected("ambiguous_panel")
+    return complete[0], "\n".join(blocks)
+
+
+def _serving(candidate: "Candidate", source: "OfficialSource", section: str) -> str:
+    text = normalize_food_name(candidate.serving_text)
+    if text and text in normalize_food_name(section):
+        return candidate.serving_text
+    if "amount per serving" in section.casefold():
+        return source.default_serving
+    raise Rejected("serving_undefined")
 
 
 def labeled_values(section: str) -> dict[str, float | None]:
@@ -296,17 +356,16 @@ def labeled_values(section: str) -> dict[str, float | None]:
 
 def validate(candidate: Candidate, source: OfficialSource, identity: str) -> Panel:
     """Accept a candidate only when it is provably this chain's own panel for
-    exactly this item: every value is read again from its own label in the
-    page's item section and must equal what the extractor returned. Raises
-    Rejected with the first failing reason."""
+    exactly this item. The page itself is the evidence: it must be the item's
+    official page, and every value is read again from its own label in the
+    page's one nutrition panel and must equal the candidate's. Raises Rejected
+    with the first failing reason."""
     if official_host(candidate.source_url, source) is None:
         raise Rejected("not_official_source")
-    display = re.sub(r"\s*[®™©]\s*", " ", candidate.name).strip()
+    display = re.sub(r"\s*[®™©]\s*", " ", candidate.name or _title_item(candidate.title)).strip()
     display = " ".join(display.split())
     if not display or identity_of(display, source) != identity:
         raise Rejected("identity_mismatch")
-    if not candidate.serving_text:
-        raise Rejected("serving_undefined")
     if candidate.serving_grams is not None and not 0 < candidate.serving_grams <= 3000:
         raise Rejected("serving_grams_out_of_range")
     nutrients = candidate.nutrients
@@ -320,23 +379,18 @@ def validate(candidate: Candidate, source: OfficialSource, identity: str) -> Pan
     energy = 4 * values["protein"] + 4 * values["carbs"] + 9 * values["fat"]
     if abs(energy - values["calories"]) > max(25.0, 0.2 * values["calories"]):
         raise Rejected("energy_inconsistent")
-    section = item_section(candidate.page_text, source, identity)
-    if section is None:
+    if not item_page(candidate, source, identity):
         raise Rejected("not_item_page")
-    printed = labeled_values(section)
-    if any(printed[key] is None for key in NUTRIENTS):
-        # A nutrient the page never labels is unknown, whatever the extractor said.
-        raise Rejected("nutrient_not_in_page")
+    printed, section = page_panel(candidate.page_text, source, identity)
     if any(printed[key] != values[key] for key in NUTRIENTS):
         raise Rejected("values_not_in_page")
-    if normalize_food_name(candidate.serving_text) not in normalize_food_name(section):
-        raise Rejected("values_not_in_page")
+    serving = _serving(candidate, source, section)
     grams = candidate.serving_grams
     if grams is not None and not re.search(
             rf"serving size[^\n]{{0,40}}(?<![\d.]){re.escape(f'{grams:g}')}\s*g\b", section.casefold()):
         grams = None  # an unshown weight is not kept (unknown, not guessed)
     return Panel(place=source.place, identity=identity, display_name=display,
-                 serving_text=candidate.serving_text, serving_grams=grams,
+                 serving_text=serving, serving_grams=grams,
                  nutrients=values, source_url=candidate.source_url,
                  page_sha256=hashlib.sha256(candidate.page_text.encode("utf-8")).hexdigest(),
                  discovered_via=candidate.discovered_via, extracted_via=candidate.extracted_via,
@@ -401,22 +455,6 @@ async def post_firecrawl_scrape(key: str, payload: dict[str, Any]) -> httpx.Resp
         "authorization": f"Bearer {key}", "content-type": "application/json"}, json=payload)
 
 
-_PANEL_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "item_name": {"type": "string"},
-        "serving_size": {"type": "string"},
-        "serving_grams": {"type": ["number", "null"]},
-        "calories": {"type": ["number", "null"]},
-        "protein": {"type": ["number", "null"]},
-        "carbs": {"type": ["number", "null"]},
-        "fat": {"type": ["number", "null"]},
-        "fiber": {"type": ["number", "null"]},
-    },
-    "required": ["item_name", "serving_size", "serving_grams", *NUTRIENTS],
-}
-
-
 def _key(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -448,21 +486,13 @@ async def discover(source: OfficialSource, identity: str) -> list[str]:
 
 async def extract(source: OfficialSource, url: str, identity: str, *,
                   discovered_via: str) -> Candidate | None:
-    """Read one official page with Firecrawl: a JSON panel plus the page text
-    the panel is checked against. Returns None when the page had no panel."""
+    """Render one official page with Firecrawl (markdown only) and read its
+    nutrition panel from the page's own labels, in code. No LLM extraction:
+    nothing can be invented, and validation re-reads the same page.
+    Returns None when the page has no single complete panel."""
     key = _key("FIRECRAWL_API_KEY")
     response = await post_firecrawl_scrape(key, {
-        "url": url,
-        "formats": ["markdown", {
-            "type": "json", "schema": _PANEL_SCHEMA,
-            "prompt": (f"Extract the published nutrition facts for exactly the {source.place} menu item "
-                       f"'{identity}' as shown on this page: its exact item name, the serving size text, "
-                       "serving weight in grams if shown, calories, protein, total carbohydrates, total fat "
-                       "and dietary fiber in grams. Use null for any value the page does not show. Do not "
-                       "estimate or use other items."),
-        }],
-        "onlyMainContent": True,
-        "timeout": 20000,
+        "url": url, "formats": ["markdown"], "onlyMainContent": True, "timeout": 20000,
     })
     if response.status_code != 200:
         raise ProviderUnavailable(f"firecrawl_http_{response.status_code}")
@@ -473,14 +503,20 @@ async def extract(source: OfficialSource, url: str, identity: str, *,
     data = body.get("data") if isinstance(body, Mapping) else None
     if not isinstance(data, Mapping) or not body.get("success", False):
         raise ProviderUnavailable("firecrawl_unsuccessful")
-    panel = data.get("json")
     metadata = data.get("metadata") if isinstance(data.get("metadata"), Mapping) else {}
     final_url = str(metadata.get("url") or metadata.get("sourceURL") or url)
-    if metadata.get("statusCode") not in (None, 200) or not isinstance(panel, Mapping):
+    page = str(data.get("markdown") or "")
+    if metadata.get("statusCode") not in (None, 200) or not page:
         return None
-    return Candidate.from_extraction(panel, source_url=final_url,
-                                     page_text=str(data.get("markdown") or ""),
-                                     discovered_via=discovered_via, extracted_via="firecrawl")
+    try:
+        printed, _section = page_panel(page, source, identity)
+    except Rejected:
+        return None
+    title = str(metadata.get("title") or metadata.get("ogTitle") or "")
+    return Candidate.from_extraction(
+        {"item_name": _title_item(title), "serving_size": "", "serving_grams": None, **printed},
+        source_url=final_url, page_text=page, title=title,
+        discovered_via=discovered_via, extracted_via="firecrawl_markdown")
 
 
 async def ingest(source: OfficialSource, identity: str) -> Panel | None:

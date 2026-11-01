@@ -39,7 +39,7 @@ def test_identity_ignores_place_words_articles_and_plurals():
 
 def test_valid_official_panel_is_accepted_with_a_page_hash_not_the_page():
     panel = official.validate(candidate(), CFA, "chicken sandwich")
-    assert panel.nutrients == {"calories": 420, "protein": 29, "carbs": 41, "fat": 18, "fiber": 1}
+    assert panel.nutrients == {"calories": 420, "protein": 29, "carbs": 41, "fat": 16, "fiber": 1}
     record = official.record_for(panel, CFA)
     assert record["display_name"] == "Chick-fil-A Chicken Sandwich"
     assert "markdown" not in str(record["metadata"]) and FIXTURE_MARKDOWN not in str(record["metadata"])
@@ -68,13 +68,16 @@ def test_numbers_that_cannot_describe_one_food_are_rejected():
 
 
 def test_values_the_page_does_not_show_are_rejected():
-    page = FIXTURE_MARKDOWN.replace("Protein 29g", "Protein 31g")
+    page = FIXTURE_MARKDOWN.replace("Protein\n\n29g", "Protein\n\n31g")
     assert rejection(candidate(page_text=page)) == "values_not_in_page"
-    assert rejection(candidate(page_text="")) == "not_item_page"
+    assert rejection(candidate(page_text="")) == "no_nutrition_panel"
 
 
 def test_an_undefined_serving_is_rejected():
-    assert rejection(candidate(panel={"serving_size": ""})) == "serving_undefined"
+    page = FIXTURE_MARKDOWN.replace("Amount per serving", "")
+    assert rejection(candidate(page_text=page, panel={"serving_size": ""})) == "serving_undefined"
+    # The live page prints only "Amount per serving": the menu item as published.
+    assert official.validate(candidate(), CFA, "chicken sandwich").serving_text == "1 menu item as published"
 
 
 @pytest.mark.asyncio
@@ -116,8 +119,8 @@ async def test_firecrawl_request_shape_and_errors(monkeypatch):
     monkeypatch.setattr(official, "post_firecrawl_scrape", post)
     found = await official.extract(CFA, CFA_PAGE, "chicken sandwich", discovered_via="exa")
     assert found.nutrients["calories"] == 420 and found.page_text == FIXTURE_MARKDOWN
-    assert sent["url"] == CFA_PAGE and sent["formats"][0] == "markdown"
-    assert sent["formats"][1]["type"] == "json" and "schema" in sent["formats"][1]
+    assert sent["url"] == CFA_PAGE and sent["formats"] == ["markdown"]  # no LLM extraction
+    assert found.name == "Chick-fil-A® Chicken Sandwich" and found.extracted_via == "firecrawl_markdown"
     # A redirect off the official site is caught by validation, not trusted.
     status["body"] = fixture_firecrawl(final_url="https://example.com/landing")
     moved = await official.extract(CFA, CFA_PAGE, "chicken sandwich", discovered_via="exa")
@@ -216,8 +219,27 @@ def test_a_multi_item_page_is_never_evidence_for_one_item():
     # B1: the Spicy row's numbers under the plain sandwich's name.
     spicy_numbers = candidate(page_text=TABLE_PAGE, panel={"calories": 450, "fat": 19, "carbs": 45,
                                                          "fiber": 2, "protein": 28})
-    assert rejection(spicy_numbers) == "not_item_page"
-    assert rejection(candidate(page_text=TABLE_PAGE)) == "not_item_page"
+    assert rejection(spicy_numbers) == "nutrient_not_in_page"  # a table has no labeled panel
+    index = "https://www.chick-fil-a.com/nutrition-allergens"
+    assert rejection(candidate(page_text=TABLE_PAGE, source_url=index)) == "not_item_page"
+
+
+@pytest.mark.parametrize("url,title", [
+    ("https://www.chick-fil-a.com/catering/entrees/chick-fil-a-chicken-sandwich", ""),  # not a menu item page
+    ("https://www.chick-fil-a.com/menu/entrees/spicy-chicken-sandwich", ""),  # another item's page
+    (CFA_PAGE, "Spicy Chicken Sandwich | Chick-fil-A"),  # title names another item
+])
+def test_only_this_items_own_menu_page_is_evidence(url, title):
+    assert rejection(candidate(source_url=url, title=title)) == "not_item_page"
+
+
+def test_the_live_page_format_passes_and_its_duplicate_panel_must_agree():
+    # FIXTURE captured live 2026-11-01: two identical panels, other items' calories below.
+    accepted = official.validate(candidate(title="Chick-fil-A® Chicken Sandwich | Chick-fil-A"),
+                                 CFA, "chicken sandwich")
+    assert accepted.nutrients == {"calories": 420, "protein": 29, "carbs": 41, "fat": 16, "fiber": 1}
+    differing = FIXTURE_MARKDOWN.replace("Calories\n\n420", "Calories\n\n440", 1)
+    assert rejection(candidate(page_text=differing)) == "ambiguous_panel"
 
 
 def test_values_are_read_from_the_items_own_labels_not_anywhere_on_the_page():
@@ -231,21 +253,21 @@ def test_values_are_read_from_the_items_own_labels_not_anywhere_on_the_page():
 
 def test_a_nutrient_the_page_never_labels_is_unknown_even_if_the_model_says_zero():
     # B2: no Fiber line, a "Trans Fat 0g" line, and the model answering fiber 0.
-    page = FIXTURE_MARKDOWN.replace("Fiber 1g\n", "Trans Fat 0g\n")
+    page = FIXTURE_MARKDOWN.replace("Dietary Fiber\n\n1g", "Trans Fat\n\n0g")
     assert rejection(candidate(page_text=page, panel={"fiber": 0})) == "nutrient_not_in_page"
 
 
 def test_trans_and_saturated_fat_are_not_total_fat():
-    page = FIXTURE_MARKDOWN.replace("Fat 18g", "Saturated Fat 3.5g\nTrans Fat 0g\nTotal Fat 18g")
-    assert official.validate(candidate(page_text=page), CFA, "chicken sandwich").nutrients["fat"] == 18
-    no_total = FIXTURE_MARKDOWN.replace("Fat 18g", "Saturated Fat 18g")
+    page = FIXTURE_MARKDOWN.replace("Total Fat\n\n16g", "Polyunsaturated Fat\n\n2g\n\nTotal Fat\n\n16g")
+    assert official.validate(candidate(page_text=page), CFA, "chicken sandwich").nutrients["fat"] == 16
+    no_total = FIXTURE_MARKDOWN.replace("Total Fat\n\n16g", "Saturated Fat\n\n16g")
     assert rejection(candidate(page_text=no_total)) == "nutrient_not_in_page"
 
 
 def test_serving_grams_are_kept_only_when_the_page_shows_them():
     unverified = official.validate(candidate(panel={"serving_grams": 183}), CFA, "chicken sandwich")
     assert unverified.serving_grams is None
-    page = FIXTURE_MARKDOWN.replace("Serving size 1 sandwich", "Serving size 1 sandwich (183 g)")
+    page = FIXTURE_MARKDOWN.replace("Amount per serving", "Serving size 1 sandwich (183 g)\n\nAmount per serving")
     shown = official.validate(candidate(page_text=page, panel={"serving_grams": 183}), CFA, "chicken sandwich")
     assert shown.serving_grams == 183
 
@@ -346,12 +368,12 @@ def test_a_sub_section_about_another_item_never_supplies_the_numbers():
             "## Spicy Chicken Sandwich\nServing size 1 sandwich\nCalories 450\nFat 19g\n"
             "Carbohydrates 45g\nFiber 2g\nProtein 28g\n")
     spicy = candidate(page_text=page, panel={"calories": 450, "fat": 19, "carbs": 45, "fiber": 2, "protein": 28})
-    assert rejection(spicy) == "nutrient_not_in_page"
+    assert rejection(spicy) == "no_nutrition_panel"
     # A sauce block's "Fiber 0g" is not the sandwich's missing fiber.
-    sauce = FIXTURE_MARKDOWN.replace("Fiber 1g\n", "") + "## Chick-fil-A® Sauce\nCalories 140\nFiber 0g\n"
+    sauce = FIXTURE_MARKDOWN.replace("Dietary Fiber\n\n1g", "") + "\n## Chick-fil-A® Sauce\nCalories 140\nFiber 0g\n"
     assert rejection(candidate(page_text=sauce, panel={"fiber": 0})) == "nutrient_not_in_page"
     # Generic sub-headings ("## Nutrition Facts") stay part of the item.
-    facts = FIXTURE_MARKDOWN.replace("## Nutrition", "## Nutrition Facts")
+    facts = FIXTURE_MARKDOWN.replace("## Nutrition Information", "## Nutrition Facts")
     assert official.validate(candidate(page_text=facts), CFA, "chicken sandwich").nutrients["fiber"] == 1
 
 

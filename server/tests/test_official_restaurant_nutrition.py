@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -24,25 +25,23 @@ import pytest
 ADMIN_URL = os.environ.get("MMMACROS_TEST_PG_ADMIN_URL", "")
 pg = pytest.mark.skipif(not ADMIN_URL, reason="set MMMACROS_TEST_PG_ADMIN_URL to a throwaway local PostgreSQL")
 
-CFA_PAGE = "https://www.chick-fil-a.com/menu/chick-fil-a-chicken-sandwich"
+CFA_PAGE = "https://www.chick-fil-a.com/menu/entrees/chick-fil-a-chicken-sandwich"
+CFA_TITLE = "Chick-fil-A® Chicken Sandwich | Chick-fil-A"
 
-# FIXTURE (not live): the shape of a Firecrawl v2 /scrape response with a JSON
-# format. Values mirror restaurant_menu.py's curated Chick-fil-A row.
-FIXTURE_MARKDOWN = (
-    "# Chick-fil-A® Chicken Sandwich\n"
-    "A boneless breast of chicken seasoned to perfection, on a toasted, buttered bun with dill pickle chips.\n"
-    "## Nutrition\nServing size 1 sandwich\nCalories 420\nFat 18g\nSodium 1460mg\n"
-    "Carbohydrates 41g\nFiber 1g\nSugar 6g\nProtein 29g\n"
-)
-FIXTURE_PANEL = {"item_name": "Chick-fil-A® Chicken Sandwich", "serving_size": "1 sandwich",
-                 "serving_grams": None, "calories": 420, "protein": 29, "carbs": 41, "fat": 18, "fiber": 1}
+# FIXTURE (captured, not live at test time): the official page as Firecrawl
+# rendered it on 2026-11-01, trimmed (see the file header). Live values on that
+# day: 420 kcal, 16 g fat, 41 g carbs, 1 g fiber, 29 g protein.
+FIXTURE_MARKDOWN = (Path(__file__).parent / "fixtures" / "cfa_chicken_sandwich_live_20261101.md").read_text()
+FIXTURE_PANEL = {"item_name": "Chick-fil-A® Chicken Sandwich", "serving_size": "",
+                 "serving_grams": None, "calories": 420, "protein": 29, "carbs": 41, "fat": 16, "fiber": 1}
+SERVING = "1 menu item as published"
 
 
-def fixture_firecrawl(panel=None, markdown=FIXTURE_MARKDOWN, final_url=CFA_PAGE):
+def fixture_firecrawl(markdown=FIXTURE_MARKDOWN, final_url=CFA_PAGE, title=CFA_TITLE):
+    """FIXTURE: the shape of a Firecrawl v2 /scrape response (markdown format)."""
     return {"success": True, "data": {
-        "markdown": markdown, "json": dict(panel or FIXTURE_PANEL),
-        "metadata": {"sourceURL": CFA_PAGE, "url": final_url, "statusCode": 200,
-                     "title": "Chick-fil-A® Chicken Sandwich"}}}
+        "markdown": markdown,
+        "metadata": {"sourceURL": CFA_PAGE, "url": final_url, "statusCode": 200, "title": title}}}
 
 
 def fixture_exa(urls=(CFA_PAGE,)):
@@ -222,7 +221,7 @@ async def test_chick_fil_a_ingest_log_half_serving_and_reuse_without_network(env
     source = sources[0]
     assert source["trusted"] and source["source_url"] == CFA_PAGE
     metadata = json.loads(source["metadata"])
-    assert metadata["discovered_via"] == "exa" and metadata["extracted_via"] == "firecrawl"
+    assert metadata["discovered_via"] == "exa" and metadata["extracted_via"] == "firecrawl_markdown"
     assert metadata["customization"]  # the standard-build limitation is preserved
     assert "markdown" not in metadata and "page_sha256" in metadata  # no raw page stored
     observations = await _rows(url, "SELECT * FROM food_nutrition_observations WHERE source_record_id=$1",
@@ -230,8 +229,8 @@ async def test_chick_fil_a_ingest_log_half_serving_and_reuse_without_network(env
     assert len(observations) == 1
     observation = observations[0]
     assert observation["verification_state"] == "official_curated"
-    assert observation["serving_basis"] == "per_serving" and observation["serving_text"] == "1 sandwich"
-    assert [float(observation[k]) for k in ("calories", "protein", "carbs", "fat", "fiber")] == [420, 29, 41, 18, 1]
+    assert observation["serving_basis"] == "per_serving" and observation["serving_text"] == SERVING
+    assert [float(observation[k]) for k in ("calories", "protein", "carbs", "fat", "fiber")] == [420, 29, 41, 16, 1]
     item = (await _rows(url, "SELECT * FROM food_items WHERE id=$1", observation["food_item_id"]))[0]
     assert item["brand"] == "Chick-fil-A" and item["product_identity"] == "official:chick-fil-a:chicken sandwich"
     # Official rows are never exposed through the legacy alias catalog.
@@ -257,7 +256,7 @@ async def test_chick_fil_a_ingest_log_half_serving_and_reuse_without_network(env
     entries = await _rows(url, "SELECT * FROM nutrition_entries WHERE user_id=$1", user)
     assert len(entries) == 1, "a correction never adds a second receipt"
     assert entries[0]["id"] == entry["id"] and entries[0]["entry_revision"] == 2
-    assert [float(entries[0][k]) for k in ("calories", "protein", "carbs", "fat", "fiber")] == [210, 14.5, 20.5, 9, 0.5]
+    assert [float(entries[0][k]) for k in ("calories", "protein", "carbs", "fat", "fiber")] == [210, 14.5, 20.5, 8, 0.5]
     day = await _rows(url, "SELECT calories FROM days WHERE user_id=$1", user)
     assert float(day[0]["calories"]) == 210
     assert "210 kcal" in json.dumps(half)
@@ -327,9 +326,9 @@ async def test_versioned_records_are_idempotent_and_the_newest_version_wins(env)
     assert first["observation_id"] == replay["observation_id"]
     assert len(await _rows(url, "SELECT 1 FROM food_nutrition_observations")) == 1
 
-    changed_page = FIXTURE_MARKDOWN.replace("Calories 420", "Calories 440").replace("Fat 18g", "Fat 20g")
+    changed_page = FIXTURE_MARKDOWN.replace("Calories\n\n420", "Calories\n\n440").replace("Total Fat\n\n16g", "Total Fat\n\n18g")
     changed = official.validate(official.Candidate.from_extraction(
-        {**FIXTURE_PANEL, "calories": 440, "fat": 20}, source_url=CFA_PAGE, page_text=changed_page,
+        {**FIXTURE_PANEL, "calories": 440, "fat": 18}, source_url=CFA_PAGE, page_text=changed_page,
         discovered_via="exa", extracted_via="firecrawl"), source, "chicken sandwich")
     second = await store.save_official_observation(official.record_for(changed, source))
     assert second["observation_id"] != first["observation_id"]

@@ -58,6 +58,8 @@ INGEST_DEADLINE_SECONDS = 8.0
 BACKGROUND_DEADLINE_SECONDS = 90.0
 REVOKED_IDS_FLAG = "OFFICIAL_NUTRITION_REVOKED_IDS"
 MISS_TTL_SECONDS = 6 * 3600
+# A provider rate limit (HTTP 429) is a pause, not an answer: retry soon.
+RATE_LIMIT_RETRY_SECONDS = 120
 SITE_TTL_SECONDS = 24 * 3600
 CACHE_MAX = 512
 SITE_RESULTS = 8
@@ -160,6 +162,9 @@ def identity_of(text: str, place: str) -> str:
         normalized = normalized.replace(f" {words} ", " ")
     normalized = " ".join(normalized.split())
     normalized = _TRAILING_PLACE_GLUE.sub("", _FILLER.sub("", normalized)).strip()
+    if not normalized:
+        # The item is named like its place ("a Whataburger at Whataburger").
+        normalized = _FILLER.sub("", normalize_food_name(str(text).replace("’", "").replace("'", ""))).strip()
     return _singularize(normalized)
 
 
@@ -422,14 +427,39 @@ def _cells(line: str) -> list[str]:
 
 
 _COLUMN = {
-    "calories": lambda h: bool(re.search(r"\b(?:calories|cal|kcal|energy)\b", h)) and "from fat" not in h
+    # "Calories From Fat" / "Fat Calories" are not the item's calories.
+    "calories": lambda h: bool(re.search(r"\b(?:calories|cal|kcal|energy)\b", h)) and "fat" not in h
                           and "%" not in h,
     "protein": lambda h: "protein" in h,
     "carbs": lambda h: bool(re.search(r"carbohydrate|carbs", h)) and "net" not in h,
     "fat": lambda h: bool(re.search(r"\bfat\b", h)) and not re.search(
-        r"saturated|trans|from fat|calories|polyunsat|monounsat", h),
+        r"saturated|\bsat\b|trans|calories|polyunsat|monounsat", h),
     "fiber": lambda h: bool(re.search(r"fib(?:er|re)", h)),
 }
+
+
+# Menu numbering and allergen statements printed inside a name cell.
+_COMBO_NUMBER = re.compile(r"^#\s*\d+\s+")
+_ALLERGEN_TAIL = re.compile(r"\s+(?:contains|allergens?)\s*:.*$", re.I)
+
+
+def _row_name(cell: str) -> str:
+    return _ALLERGEN_TAIL.sub("", _COMBO_NUMBER.sub("", cell)).strip()
+
+
+def _header(lines: list[str], separator: int) -> tuple[list[str], int]:
+    """The header cells above a table separator, merged with a second header
+    row printed just below it (PDF renders split "NUTRITION" / "Calories"),
+    and the index of the first data row."""
+    header = [cell.casefold() for cell in _cells(lines[separator - 1])]
+    first = separator + 1
+    if first < len(lines) and lines[first].startswith("|"):
+        below = [cell.casefold() for cell in _cells(lines[first])]
+        labels = [cell for cell in below[1:] if cell and not re.search(r"\d", cell.replace("(g)", "").replace("(mg)", ""))]
+        if len(below) == len(header) and len(labels) >= 3:
+            header = [" ".join(part for part in pair if part) for pair in zip(header, below)]
+            first += 1
+    return header, first
 
 
 def _table_rows(page: str, place: str, identity: str) -> list[tuple[dict[str, float], str]]:
@@ -441,7 +471,7 @@ def _table_rows(page: str, place: str, identity: str) -> list[tuple[dict[str, fl
     for index, line in enumerate(lines):
         if index == 0 or not re.match(r"^\|\s*:?-{3}", line):
             continue
-        header = [cell.casefold() for cell in _cells(lines[index - 1])]
+        header, first_row = _header(lines, index)
         columns: dict[str, int] = {}
         for key, accepts in _COLUMN.items():
             hits = [i for i, cell in enumerate(header) if i > 0 and accepts(cell)]
@@ -451,16 +481,20 @@ def _table_rows(page: str, place: str, identity: str) -> list[tuple[dict[str, fl
             continue
         serving_col = next((i for i, cell in enumerate(header)
                             if i > 0 and re.search(r"serving|portion", cell)), None)
-        for row in lines[index + 1:]:
+        for row in lines[first_row:]:
             if not row.startswith("|"):
                 break
             cells = _cells(row)
-            if len(cells) != len(header) or identity_of(cells[0], place) != identity:
+            if len(cells) != len(header) or identity_of(_row_name(cells[0]), place) != identity:
                 continue
             values = {key: _number(cells[col]) for key, col in columns.items()}
             if any(value is None for value in values.values()):
                 raise Rejected("nutrient_not_in_page")
-            serving = cells[serving_col] if serving_col is not None and cells[serving_col] else DEFAULT_SERVING
+            serving = DEFAULT_SERVING
+            if serving_col is not None and cells[serving_col]:
+                serving = cells[serving_col]
+                if re.fullmatch(r"\d+(?:\.\d+)?", serving) and "(g)" in header[serving_col]:
+                    serving = f"{serving} g"
             rows.append(({k: float(v) for k, v in values.items()}, serving))
     return rows
 
@@ -740,10 +774,11 @@ def _bounded(cache: OrderedDict, key: Any, value: Any) -> None:
 
 
 def _recent_miss(key: tuple[str, str]) -> bool:
-    at = _misses.get(key)
-    if at is None:
+    """Whether this identity failed recently (the memo holds its expiry time)."""
+    until = _misses.get(key)
+    if until is None:
         return False
-    if _monotonic() - at > MISS_TTL_SECONDS:
+    if _monotonic() >= until:
         _misses.pop(key, None)
         return False
     return True
@@ -795,6 +830,7 @@ async def _ingest_and_save(place: str, identity: str, store, key: tuple[str, str
     a persisted record (no site, rejection, outage, timeout, store error,
     cancel) is remembered, so later meals do not pay for the same search."""
     saved = None
+    retry_after = MISS_TTL_SECONDS
     try:
         site = panel = None
         try:
@@ -805,6 +841,8 @@ async def _ingest_and_save(place: str, identity: str, store, key: tuple[str, str
                 panel = await asyncio.wait_for(ingest(site, identity), BACKGROUND_DEADLINE_SECONDS)
         except ProviderUnavailable as exc:
             logger.info("official nutrition: provider unavailable place=%s reason=%s", key[0], exc.reason)
+            if exc.reason.endswith("_429"):
+                retry_after = RATE_LIMIT_RETRY_SECONDS
         except (TimeoutError, httpx.HTTPError) as exc:
             logger.info("official nutrition: provider failed place=%s error=%s", key[0], type(exc).__name__)
         if site is not None and panel is not None:
@@ -817,7 +855,7 @@ async def _ingest_and_save(place: str, identity: str, store, key: tuple[str, str
         return saved
     finally:
         if saved is None:
-            _bounded(_misses, key, _monotonic())
+            _bounded(_misses, key, _monotonic() + retry_after)
 
 
 async def lookup(query: str, *, store, place: str | None = None) -> dict[str, Any] | None:

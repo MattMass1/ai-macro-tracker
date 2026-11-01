@@ -407,3 +407,69 @@ def test_gate_fails_closed(monkeypatch):
         assert release_gates.official_restaurant_nutrition_allowed()
     finally:
         reset_user(scope)
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limit_is_retried_minutes_later_not_hours(monkeypatch, clean_caches):
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(official, "_monotonic", lambda: clock["now"])
+    calls = []
+
+    async def limited(site, identity):
+        calls.append(identity)
+        raise official.ProviderUnavailable("firecrawl_http_429")
+    monkeypatch.setattr(official, "ingest", limited)
+    store = MemoryOfficialStore(domain="chick-fil-a.com")
+    assert await official.lookup("Chick-fil-A chicken sandwich", store=store) is None
+    assert await official.lookup("Chick-fil-A chicken sandwich", store=store) is None
+    assert len(calls) == 1
+    clock["now"] += official.RATE_LIMIT_RETRY_SECONDS + 1
+    assert await official.lookup("Chick-fil-A chicken sandwich", store=store) is None
+    assert len(calls) == 2
+
+
+# FIXTURE tables: header layouts and name-cell formats copied from live official
+# PDF renders on 2026-11-01. Whataburger #1 and Single ShackBurger use the live
+# values; the other rows' numbers are illustrative.
+
+WHATABURGER_TABLE = (
+    "| | Calories | Fat Calories | Fat (g) | Sat Fat (g) | Trans Fat (g) | Cholesterol (mg) | Sodium (mg) | "
+    "Total Carbs (g) | Dietary Fiber (g) | Sugar (g) | Protein (g) |\n"
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+    "| #1 Whataburger | 590 | 230 | 25 | 8 | 1 | 75 | 1220 | 62 | 4 | 12 | 29 |\n"
+    "| #2 Double Meat Whataburger | 830 | 400 | 44 | 16 | 2.5 | 155 | 1470 | 62 | 3 | 12 | 48 |\n")
+SHAKE_SHACK_TABLE = (
+    "| Burgers | Calories | Total Fat (g) | Sat Fat (g) | Trans Fat (g) | Cholesterol (mg) | Sodium (mg) | "
+    "Total Carbohydrates (g) | Fiber (g) | Sugars (g) | Protein (g) |\n"
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+    "| Single ShackBurger® Contains: Milk, Egg, Wheat, Soy, Sesame | 500 | 30 | 12 | 1 | 110 | 1250 | 26 | 0 | 7 | 29 |\n"
+    "| Double ShackBurger® Contains: Milk, Egg, Wheat, Soy, Sesame | 760 | 48 | 20 | 2 | 205 | 1690 | 26 | 0 | 7 | 51 |\n")
+TWO_ROW_HEADER_TABLE = (
+    "|  | NUTRITION |  |  | Total Fat (g) | Saturated Fat (g) | Carbs (g) | Fiber (g) | Protein (g) |\n"
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+    "|  | Serving Size (g) | Calories | Calories From Fat | Total Fat (g) | Saturated Fat (g) | Carbs (g) | Fiber (g) | Protein (g) |\n"
+    "| Little Hamburger | 212 | 540 | 234 | 26 | 11.5 | 39 | 2 | 23 |\n")
+
+
+def test_fat_calories_and_sat_fat_columns_are_not_totals_and_combo_numbers_are_not_names():
+    site = official.Site(place="Whataburger", domain="whataburger.com")
+    candidate = page(url="https://wbimageserver.whataburger.com/Nutrition.pdf", title="", text=WHATABURGER_TABLE)
+    panel = official.validate(candidate, site, official.identity_of("Whataburger", "Whataburger"))
+    assert panel.nutrients == {"calories": 590, "protein": 29, "carbs": 62, "fat": 25, "fiber": 4}
+    assert official.identity_of("Whataburger", "Whataburger") == "whataburger"  # an item named like its place
+
+
+def test_allergen_text_in_a_name_cell_is_not_part_of_the_name_and_sizes_are_never_guessed():
+    site = official.Site(place="Shake Shack", domain="shakeshack.com")
+    candidate = page(url="https://shakeshack.com/sites/default/files/nutrition.pdf", title="", text=SHAKE_SHACK_TABLE)
+    assert official.validate(candidate, site, "single shackburger").nutrients["calories"] == 500
+    # "ShackBurger" alone is single OR double: no row names exactly that.
+    assert rejection(candidate, site, "shackburger") == "no_panel_for_item"
+
+
+def test_a_header_split_over_two_rows_is_merged():
+    site = official.Site(place="Five Guys", domain="fiveguys.com")
+    candidate = page(url="https://www.fiveguys.com/wp-content/uploads/nutrition.pdf", title="", text=TWO_ROW_HEADER_TABLE)
+    panel = official.validate(candidate, site, "little hamburger")
+    assert panel.nutrients == {"calories": 540, "protein": 23, "carbs": 39, "fat": 26, "fiber": 2}
+    assert panel.serving_text == "212 g"

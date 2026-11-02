@@ -227,7 +227,9 @@ _NEGATIVE_WORDS = frozenset({
     "neither", "none", "skip", "forget", "nothing", "undo", "isnt", "wasnt",
 })
 _INDIFFERENT_RE = re.compile(r"\b(?:i\s+)?don'?t\s+(?:care|mind)\b", re.IGNORECASE)
-_LEADING_NO_RE = re.compile(r"^\s*(?:no|nope|nah)\b[\s,.!]*", re.IGNORECASE)
+# "no, an apple": the no answers the question and other food follows. A no
+# fused to a word ("no eggs", "no way") refuses that word.
+_LEADING_NO_RE = re.compile(r"^\s*(?:no|nope|nah)\s*[,.;:!\u2014-]+\s*", re.IGNORECASE)
 _AFFIRMATIVE_LEAD_RE = re.compile(r"^\s*(?:(?:yes|yeah|yep|yup|ok(?:ay)?|sure)\b[\s,.!]*)+",
                                   re.IGNORECASE)
 
@@ -235,19 +237,25 @@ _AFFIRMATIVE_LEAD_RE = re.compile(r"^\s*(?:(?:yes|yeah|yep|yup|ok(?:ay)?|sure)\b
 def _negated_reply(reply: str, pending: Mapping[str, Any]) -> str | None:
     """Whether a reply holding a no-word declines the open question. The
     server does not parse "no, but ..." sentences: a no-word never reads as a
-    yes, picks nothing and reuses nothing. "decline" when the reply names no
-    food or touches the asked-about food or its options ("dont log it", "no,
-    the deluxe", "not the crunchwrap but a chalupa"); "new" when it names
-    only other food ("burger with no onions"), which is resolved on its own.
-    None when the reply holds no no-word ("I don't mind" is a yes)."""
+    yes, picks nothing and reuses nothing. "new" only for "no, <other food>"
+    ("no, a chalupa"), resolved on its own; every other reply with a no-word
+    declines ("dont log it", "no eggs", "no, the deluxe", "burger with no
+    onions"). None when the reply holds no no-word ("I don't mind" is a yes)."""
     text = _INDIFFERENT_RE.sub(" ", reply or "").casefold().replace("'", "").replace("\u2019", "")
     words = re.findall(r"[a-z0-9/]+", text)
     if not set(words) & _NEGATIVE_WORDS:
         return None
-    food = _reply_tokens(" ".join(word for word in words if word not in _NEGATIVE_WORDS))
     asked_about = set(pending.get("tokens") or ()).union(
         *(food_lookup._canon_food_tokens(option) for option in pending.get("options") or ()))
-    return "decline" if not food or food & asked_about else "new"
+    lead = _LEADING_NO_RE.match(reply or "")
+    if lead is None:
+        return "decline"
+    rest = _INDIFFERENT_RE.sub(" ", reply[lead.end():]).casefold().replace("'", "")
+    rest_words = re.findall(r"[a-z0-9/]+", rest)
+    food = _reply_tokens(" ".join(rest_words))
+    if set(rest_words) & _NEGATIVE_WORDS or not food or food & asked_about:
+        return "decline"
+    return "new"
 
 
 def _reply_amount(reply: str) -> str:

@@ -320,6 +320,11 @@ class AgentSession:
     copy_clarification: dict | None = None
     setup_incomplete: bool = False
     setup_synced_at: float = 0.0
+    # Chat before this moment is not shown to the coach: set when the session
+    # starts (the user's latest food entry) and after each chat turn that
+    # logged food and left no question open. None: the whole day.
+    context_start: Any = None
+    context_started: bool = False
 
     def snapshot(self):
         return {**self.canvas.snapshot(), "receipt": deepcopy(self.receipt),
@@ -328,30 +333,36 @@ class AgentSession:
                              if k in {"id", "title", "detail", "status"}} if self.approval else None}
 
 
-async def _since_last_food_log(store: Any, history: list[dict], day_start: Any) -> list[dict]:
-    """Each logged food starts a fresh conversation (Matt, 2026-11-01): the
-    coach sees only messages after the latest food entry, so an earlier
-    request ("2 ... sliders", "half of ...") never bleeds into the next one.
-    The log's own receipt is dropped too. A question asked after that log
-    keeps its context. Off with COACH_FRESH_CONTEXT_AFTER_LOG=false; any
-    failure reading the boundary keeps the day's history as before."""
-    if os.environ.get("COACH_FRESH_CONTEXT_AFTER_LOG", "true").strip().casefold() == "false":
-        return history
+def _fresh_context_enabled() -> bool:
+    return os.environ.get("COACH_FRESH_CONTEXT_AFTER_LOG", "true").strip().casefold() != "false"
+
+
+async def _session_context_start(store: Any, day_start: Any) -> Any:
+    """Where a NEW session's coach history starts: after the user's latest
+    food entry today (any path), so a fresh session never sees the requests
+    behind earlier logs. A failed read keeps the whole day, as before."""
     latest = getattr(store, "latest_food_log_at", None)
     if latest is None:
-        return history
+        return None
     try:
-        boundary = await latest(day_start)
+        return await latest(day_start)
     except Exception:
         logging.getLogger("agent_canvas").warning(
             "Latest food log time unavailable; keeping the day's chat history")
-        return history
+        return None
+
+
+def _history_after(history: list[dict], boundary: Any) -> list[dict]:
+    """Each logged food starts a fresh conversation (Matt, 2026-11-01): the
+    coach sees only messages after the boundary, so an earlier request ("2
+    ... sliders", "half of ...") never bleeds into the next one. A leading
+    assistant message (the receipt of the log itself) is dropped too."""
     if boundary is None:
         return history
     kept = [message for message in history
             if message.get("created_at") is not None and message["created_at"] > boundary]
     while kept and kept[0].get("role") != "user":
-        kept.pop(0)  # the receipt of the log itself
+        kept.pop(0)
     return kept
 
 
@@ -642,8 +653,13 @@ class CanvasService:
             store = self.store_factory()
             start, _ = effective_day_window()
             await self._sync_setup(session)
-            history = await _since_last_food_log(
-                store, await store.fetch_chat_messages_since(start, 20), start)
+            history = await store.fetch_chat_messages_since(start, 20)
+            if _fresh_context_enabled():
+                if not session.context_started:
+                    session.context_start = await _session_context_start(store, start)
+                    session.context_started = True
+                history = _history_after(history, session.context_start)
+            receipt_before = session.receipt
             await store.insert_user_chat_message(message, daily_cap=50)
             foods = self.food_factory()
             drafts = await self.drafts_factory() if self.drafts_factory is not None else None
@@ -1074,7 +1090,17 @@ class CanvasService:
                 (last_food_result or {}).get("confirmation")
                 or "I couldn't prepare a useful answer."
             )
-            await store.insert_chat_message("assistant", reply)
+            stored_reply = await store.insert_chat_message("assistant", reply)
+            task = session.canvas.surfaces.get("task")
+            question_open = bool(task) and any(
+                item.get("component") == "FoodClarification" for item in task["components"])
+            if (_fresh_context_enabled() and session.receipt is not receipt_before
+                    and not question_open and isinstance(stored_reply, Mapping)
+                    and stored_reply.get("created_at") is not None):
+                # This turn logged food and asked nothing more: the next turn
+                # starts fresh. Only chat logs move it; an entry from another
+                # path or an undo never cuts or restores a live conversation.
+                session.context_start = stored_reply["created_at"]
             # A component request must survive a provider no-tool response.
             if not presented and last_food_result is None and not session.approval and re.search(
                 r"\b(?:make|build|create|show|fake|sample)\b.*\b(?:workout|routine|plan)\b", message, re.I

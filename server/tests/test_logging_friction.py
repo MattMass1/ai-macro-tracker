@@ -538,7 +538,10 @@ def test_a_no_word_with_a_new_food_is_a_new_request():
     srv = importlib.import_module("server")
     pending = {"tokens": srv.food_lookup._canon_food_tokens("Taco Bell Crunchwrap"),
                "options": ["Taco Bell Crunchwrap Supreme"]}
-    assert srv._negated_reply("burger with no onions", pending) == "new"
+    assert srv._negated_reply("burger with no onions", pending) == "decline"
+    assert srv._negated_reply("no eggs", pending) == "decline"
+    assert srv._negated_reply("no, an apple", pending) == "new"
+    assert srv._negated_reply("no, not an apple", pending) == "decline"
     assert srv._negated_reply("dont log it", pending) == "decline"
     assert srv._negated_reply("not the crunchwrap but a chalupa", pending) == "decline"
     assert srv._negated_reply("2 Taco Bell Crunchwraps", pending) is None
@@ -616,7 +619,7 @@ _REFUSALS = ["I don't want the spicy one", "dont want the deluxe", "no way", "no
              "not today", "don't add it", "don't bother", "please don't save that",
              "don't record it", "not hungry anymore", "never happened", "nope, wrong food",
              "no don't log it yet", "not the spicy one", "yes please, nothing else",
-             "yes, no changes"]
+             "yes, no changes", "no eggs", "no avocado", "no butter", "no olive oil"]
 
 
 @pytest.mark.asyncio
@@ -831,3 +834,104 @@ async def test_latest_food_log_time_is_only_ever_the_callers_own(monkeypatch):
             reset_user(token)
     finally:
         await store.aclose()
+
+
+
+class _ClockStore(_DayStore):
+    """Stamps each chat message with an increasing DB-like time and returns
+    the stored row, as the real store does."""
+
+    def __init__(self, logged_at=None):
+        from datetime import datetime, timezone
+        super().__init__([], logged_at)
+        self.clock = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+
+    def _stamp(self, role, text):
+        from datetime import timedelta
+        self.clock += timedelta(seconds=1)
+        row = {"role": role, "content": text, "created_at": self.clock}
+        self.history.append(row)
+        return row
+
+    async def insert_user_chat_message(self, text, *, daily_cap):
+        return self._stamp("user", text)
+
+    async def insert_chat_message(self, role, text, *_):
+        return self._stamp(role, text)
+
+
+async def _session_turns(store, results, messages):
+    """One canvas session; turn i's log_meal returns results[i]. Returns the
+    history the coach saw on each turn."""
+    from agent_canvas import CanvasService
+    seen = []
+    replies = iter(results)
+
+    async def log_meal(_call_id, _args):
+        return next(replies)
+
+    async def agent(**kwargs):
+        seen.append([message["content"] for message in kwargs["history"]])
+        result = await kwargs["handlers"]["log_meal"]({"description": kwargs["message"]})
+        return str(result.get("confirmation") or result.get("question") or "ok"), []
+
+    service = CanvasService(store_factory=lambda: store, food_factory=lambda: {"log_meal": log_meal},
+                            coach_factory=lambda: {}, agent=agent)
+    session = str(uuid4())
+    token = bind_user(uuid4())
+    try:
+        for message in messages:
+            await service.turn(session, str(uuid4()), message, adapter="text")
+    finally:
+        reset_user(token)
+    return seen
+
+
+_COMMITTED = {"status": "committed", "operation_id": "op", "logged": {"id": "r1", "name": "sliders"},
+              "confirmation": "Logged 2 sliders."}
+_QUESTION = {"status": "needs_clarification", "operation_id": "op2",
+             "question": "Did you mean Crunchwrap Supreme?", "confirmation": "Did you mean Crunchwrap Supreme?"}
+
+
+@pytest.mark.asyncio
+async def test_after_a_chat_log_the_next_turn_starts_fresh(monkeypatch):
+    seen = await _session_turns(_ClockStore(), [_COMMITTED, _COMMITTED],
+                                ["2 Taco Bell Crunchwrap sliders", "Taco Bell Crunchwrap supreme"])
+    assert seen[1] == []
+
+
+@pytest.mark.asyncio
+async def test_an_open_question_is_never_cut(monkeypatch):
+    seen = await _session_turns(_ClockStore(), [_QUESTION, _COMMITTED],
+                                ["Taco Bell Crunchwrap", "the supreme"])
+    assert seen[1] == ["Taco Bell Crunchwrap", "Did you mean Crunchwrap Supreme?"]
+
+
+@pytest.mark.asyncio
+async def test_an_entry_from_another_path_or_an_undo_does_not_move_the_cut(monkeypatch):
+    from datetime import datetime, timezone
+    store = _ClockStore(logged_at=None)
+    from agent_canvas import CanvasService
+    seen = []
+    replies = iter([_QUESTION, _COMMITTED])
+
+    async def log_meal(_call_id, _args):
+        return next(replies)
+
+    async def agent(**kwargs):
+        seen.append([message["content"] for message in kwargs["history"]])
+        # Mid-conversation, an entry is added from the Today tab.
+        store.logged_at = datetime(2026, 11, 1, 23, 0, tzinfo=timezone.utc)
+        result = await kwargs["handlers"]["log_meal"]({"description": kwargs["message"]})
+        return str(result.get("question") or result.get("confirmation")), []
+
+    service = CanvasService(store_factory=lambda: store, food_factory=lambda: {"log_meal": log_meal},
+                            coach_factory=lambda: {}, agent=agent)
+    session = str(uuid4())
+    token = bind_user(uuid4())
+    try:
+        for message in ("Taco Bell Crunchwrap", "the supreme"):
+            await service.turn(session, str(uuid4()), message, adapter="text")
+    finally:
+        reset_user(token)
+    assert seen[1] == ["Taco Bell Crunchwrap", "Did you mean Crunchwrap Supreme?"]

@@ -154,6 +154,8 @@ _FOLLOW_UP_FILLER = frozenset(food_lookup._canon_food_token(word) for word in {
     "whichever", "whatever", "either", "any", "yes", "yeah", "yep", "ok", "okay", "sure",
     "fine", "please", "just", "log", "it", "that", "this", "one", "the", "go", "ahead",
     "same", "thing", "first", "option", "default", "correct", "right", "dont", "care",
+    # "it's homemade, just estimate": permission to take the closest match.
+    "its", "estimate", "estimated", "guess", "approximate", "close", "enough",
 })
 
 
@@ -177,12 +179,18 @@ def _strip_meal_slot(text: str) -> tuple[str, str | None]:
 
 
 def _remember_meal_question(user_key: str, session_key: str, description: str,
-                            meal: Any = None) -> None:
+                            meal: Any = None, *, options: Any = None,
+                            shown: Any = None) -> None:
+    """Remember the one question asked, with what it offered: the named
+    options of a pick question, or the resolved foods a "Should I log it?"
+    showed. The answer is bound to those, never re-searched from scratch."""
     _meal_questions[(user_key, session_key)] = {
         "expires": time.monotonic() + _MEAL_QUESTION_TTL_SECONDS,
         "tokens": food_lookup._canon_food_tokens(description),
         "description": description,
         "meal": meal,
+        "options": [str(option) for option in options or [] if str(option).strip()][:3],
+        "shown": [dict(item) for item in shown] if shown else None,
     }
     _meal_questions.move_to_end((user_key, session_key))
     while len(_meal_questions) > 256:
@@ -196,6 +204,34 @@ def _settle_meal_question(user_key: str, session_key: str) -> None:
 def _pending_meal_description(user_key: str, session_key: str) -> str:
     pending = _meal_questions.get((user_key, session_key))
     return str(pending["description"]) if pending else ""
+
+
+def _pending_meal_question(user_key: str, session_key: str) -> dict[str, Any] | None:
+    return _meal_questions.get((user_key, session_key))
+
+
+def _reply_tokens(text: str) -> set[str]:
+    return food_lookup._canon_food_tokens(text) - _FOLLOW_UP_FILLER
+
+
+def _picked_option(pending: Mapping[str, Any], reply: str) -> tuple[str | None, bool]:
+    """(option, named) for a reply to a pick question. A reply naming words of
+    one option picks it; a bare yes or a repeat of the asked-about food takes
+    the first option (the one question is spent), reported as assumed."""
+    options = list(pending.get("options") or [])
+    if not options:
+        return None, False
+    extra = _reply_tokens(reply) - set(pending.get("tokens") or ())
+    if not extra:
+        return options[0], False
+    scored = [(len(extra & food_lookup._canon_food_tokens(option)), -index, option)
+              for index, option in enumerate(options)]
+    best = max(scored)
+    if best[0] == 0:
+        return None, False
+    if sum(1 for score, _index, _option in scored if score == best[0]) > 1:
+        return None, False  # the reply fits two options equally: not a pick
+    return best[2], True
 
 
 def _pending_meal_slot(user_key: str, session_key: str) -> Any:
@@ -216,6 +252,9 @@ def _answering_meal_question(user_key: str, session_key: str, description: str) 
     tokens = food_lookup._canon_food_tokens(description) - _FOLLOW_UP_FILLER
     if not pending["tokens"] or not tokens:
         return True  # "whichever, just log it" names no food: it answers the question
+    if any(tokens <= food_lookup._canon_food_tokens(option)
+           for option in pending.get("options") or ()):
+        return True  # "the bacon breakfast one" answers "did you mean ... Bacon?"
     # Same food if most of the asked-about identity is back ("half bbq sandwich"
     # answers "bbq sandwich"); one shared word ("chicken salad" after a
     # "chicken sandwich" question) is a new request.
@@ -3068,8 +3107,16 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         # asked about the same food is finished, not questioned again.
         finishing = _answering_meal_question(user_key, session_key, " ".join(texts))
 
-        def ask(payload: dict[str, Any]) -> dict[str, Any]:
-            _remember_meal_question(user_key, session_key, " ".join(texts), meal_type_arg)
+        pending = _pending_meal_question(user_key, session_key) if finishing else None
+        asked_about = " ".join(texts)
+        if pending is not None and pending.get("description"):
+            # The follow-up keeps the first message's food (and its amount)
+            # as what is being asked about, so the budget is not reset.
+            asked_about = str(pending["description"])
+
+        def ask(payload: dict[str, Any], shown: Any = None) -> dict[str, Any]:
+            _remember_meal_question(user_key, session_key, asked_about, meal_type_arg,
+                                    options=payload.get("options"), shown=shown)
             return payload
 
         if calorie_matches and not await _calorie_only_writes_open():
@@ -3151,6 +3198,39 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             atomic = len(components) > 1
         if finishing and not meal_type_arg:
             meal_type_arg = _pending_meal_slot(user_key, session_key)  # "for lunch" came with the question
+        reply = " ".join(texts)
+        shown_again: list[dict[str, Any]] | None = None
+        fallback_option: str | None = None
+        original_amount = ""
+        if pending is not None and calorie_values is None and not isinstance(raw_components, list):
+            restates = _reply_tokens(reply) <= set(pending.get("tokens") or ())
+            original_amount = food_lookup.leading_amount(_strip_meal_slot(str(pending["description"]))[0])
+            if pending.get("shown") and restates:
+                # "Yes" to "Closest I found ...: should I log it?" logs exactly
+                # what was shown; a second web search may not find it again.
+                shown_again = [dict(item) for item in pending["shown"]]
+            else:
+                option, named = _picked_option(pending, reply)
+                if option is not None and named:
+                    # "the bacon breakfast one" picks that option outright.
+                    amount = food_lookup.leading_amount(reply) or original_amount
+                    components = [{"description": f"{amount} {option}".strip()}]
+                    whole_found = None
+                    atomic = False
+                else:
+                    # A bare yes or a repeat goes through the usual follow-up
+                    # first; the first option is the last resort below.
+                    fallback_option = option
+                    if (len(components) == 1 and original_amount and _reply_tokens(reply)
+                            and not food_lookup.leading_amount(
+                                str(components[0].get("description") or ""))
+                            and all(components[0].get(key) is None
+                                    for key in ("grams", "portion", "quantity"))):
+                        # "Quarter pounder with cheese" answering "Half of a
+                        # McDonald's quarter pounder: which one?" is still half.
+                        components = [{**components[0], "description":
+                                       f"{original_amount} {components[0]['description']}"}]
+                        whole_found = None
 
         semaphore = asyncio.Semaphore(4)
 
@@ -3182,7 +3262,11 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                     )
                     return None
 
-        resolved = await asyncio.gather(*(bounded(component) for component in components))
+        if shown_again is not None:
+            resolved = shown_again
+            components = [{"description": str(item.get("name") or "food")} for item in resolved]
+        else:
+            resolved = await asyncio.gather(*(bounded(component) for component in components))
         unresolved = [str(component.get("description") or "food")
                       for component, result in zip(components, resolved) if result is None]
         bad_portions = [str(component.get("description") or "food")
@@ -3201,6 +3285,18 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                                                     assume_variant=True)
                 except Exception:
                     retry = None
+            if (retry is None or retry.get("portion_error")) and fallback_option:
+                # "Yes" to "Did you mean X?": log X, keeping the first
+                # message's amount, and say it was assumed.
+                amount = food_lookup.leading_amount(reply) or original_amount
+                try:
+                    retry = await resolve_component(
+                        {"description": f"{amount} {fallback_option}".strip()},
+                        atomic=False, assume_variant=True)
+                except Exception:
+                    retry = None
+                if retry is not None and not retry.get("portion_error"):
+                    retry = {**retry, "assumption": f"assumed {fallback_option}"}
             if retry is not None and not retry.get("portion_error"):
                 resolved = [retry]
                 unresolved, bad_portions = [], []
@@ -3330,7 +3426,8 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                             + ". Should I log it?")
                 return ask({"status": "needs_clarification", "reason": "web_estimate_confirmation",
                             "operation_id": operation_id, "confirm_ref": ref,
-                            "question": question, "confirmation": question})
+                            "question": question, "confirmation": question},
+                           shown=resolved_components)
             _web_estimate_confirmations.pop((user_key, confirm_ref), None)
         try:
             stored = await store_client().insert_meal_idempotent(

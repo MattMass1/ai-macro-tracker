@@ -111,6 +111,14 @@ _SPOKEN_NUMBER = (
 )
 _LEADING_PORTION_RE = re.compile(
     rf"^\s*({_SPOKEN_NUMBER})\s+({_UNIT_TOKEN})\b\.?\s*(?:of\s+)?", re.IGNORECASE)
+# A fraction of one item with no unit: "half of a", "half a", "half", "1/2".
+# Never part of a name: "half and half" (a cream), "half chicken" (a whole
+# menu item), "Quarter Pounder" or "half pound burger" (a patty size).
+_LEADING_FRACTION_RE = re.compile(
+    r"^\s*(half|a\s+half|one\s+half|a\s+quarter|quarter|1/2|1/4|3/4)"
+    r"(?:\s+of)?(?:\s+(?:a|an|the|my))?\s+"
+    r"(?!and\b)(?!(?:chicken|rack|dozen|pounders?|pound|lb|lbs|oz|ounce)\b)(?=\S)",
+    re.IGNORECASE)
 _TRAILING_PORTION_RE = re.compile(
     rf"\s*({_SPOKEN_NUMBER})\s+({_UNIT_TOKEN})\b\.?\s*$", re.IGNORECASE)
 _COMPONENT_SPLIT_RE = re.compile(r"(\(|\)|\band\b|,|\+)", re.IGNORECASE)
@@ -312,7 +320,8 @@ def _canon_food_token(token: str) -> str:
 
 def _canon_food_tokens(text: Any) -> set[str]:
     """Meaningful, synonym/plural-canonical identity tokens of a food string."""
-    return {_canon_food_token(word) for word in normalize_food_name(str(text or "")).split()
+    return {_canon_food_token(word)
+            for word in normalize_food_name(_one_word_names(str(text or ""))).split()
             if word not in _UNIT_WORDS and word not in _CONNECTIVES and len(word) > 1}
 
 
@@ -721,6 +730,10 @@ def _extract_quantity(text: str) -> tuple[float | None, str | None, str]:
     match = _LEADING_PORTION_RE.match(text)
     if match:
         return _quantity_value(match.group(1)), match.group(2).casefold(), text[match.end():].strip()
+    match = _LEADING_FRACTION_RE.match(text)
+    if match:
+        # "half of a Quarter Pounder": a fraction of one serving of the item.
+        return _quantity_value(match.group(1)), "servings", text[match.end():].strip()
     match = _TRAILING_PORTION_RE.search(text)
     if match:
         remainder = (text[:match.start()] + text[match.end():]).strip()
@@ -728,9 +741,43 @@ def _extract_quantity(text: str) -> tuple[float | None, str | None, str]:
     return None, None, text
 
 
+# Spellings a typed or dictated message splits into two words.
+_SPLIT_WORD_SPELLINGS = (
+    (re.compile(r"\btable\s+spoon(s?)\b", re.IGNORECASE), r"tablespoon\1"),
+    (re.compile(r"\btea\s+spoon(s?)\b", re.IGNORECASE), r"teaspoon\1"),
+    (re.compile(r"\bhome\s+made\b", re.IGNORECASE), "homemade"),
+    (re.compile(r"\bsour\s+dough\b", re.IGNORECASE), "sourdough"),
+)
+# "M&Ms" is one candy, however it is typed; its "and" is not a food boundary.
+_M_AND_MS_RE = re.compile(r"\bm\s*(?:&|and|n)\s*m(?:'?s)?\b", re.IGNORECASE)
+
+
+def _one_word_names(text: str) -> str:
+    text = _M_AND_MS_RE.sub("M&Ms", text)
+    for pattern, replacement in _SPLIT_WORD_SPELLINGS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+_LEADING_COUNT_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|twelve)\s+(?=\S)",
+    re.IGNORECASE)
+
+
+def leading_amount(text: str) -> str:
+    """The amount a food phrase starts with, as written ("half of a", "6 oz",
+    "2"), or "". A follow-up that names the food without repeating it keeps it."""
+    text = _one_word_names(" ".join(str(text or "").split()))
+    for pattern in (_LEADING_PORTION_RE, _LEADING_FRACTION_RE, _LEADING_COUNT_RE):
+        match = pattern.match(text)
+        if match:
+            return text[:match.end()].strip()
+    return ""
+
+
 def _normalize_query_text(text: str) -> str:
     """Canonicalize spoken numbers and common meat lean/fat ratios."""
-    words = re.sub(r"(?<=[A-Za-z])-(?=[A-Za-z])", " ", text)
+    words = re.sub(r"(?<=[A-Za-z])-(?=[A-Za-z])", " ", _one_word_names(text))
     # Explicit speech spellings of this brand, not fuzzy product matching.
     # Whole-token boundaries retain distinct names such as BearBellsFit, while
     # every flavor, product-line and portion token remains in the query.
@@ -910,8 +957,11 @@ def resolve_generic_whole_food(query: str) -> dict[str, Any] | None:
     if quantified is None:
         return None
     macros, label = quantified
-    return {**found, "macros_per_serving": macros, "serving_size": label,
-            "applied_quantity": quantity, "applied_unit": unit}
+    result = {**found, "macros_per_serving": macros, "serving_size": label,
+              "applied_quantity": quantity, "applied_unit": unit}
+    if unit is not None and str(result.get("assumption") or "").startswith("assumed"):
+        result.pop("assumption")  # the amount was stated, not assumed
+    return result
 
 
 def _bounded_generic_fallback(query: str) -> dict[str, Any] | None:
@@ -931,7 +981,7 @@ def _split_components(query: str) -> list[str]:
     parts: list[str] = []
     current: list[str] = []
     depth = 0
-    for token in _COMPONENT_SPLIT_RE.split(query):
+    for token in _COMPONENT_SPLIT_RE.split(_M_AND_MS_RE.sub("M&Ms", query)):
         if not token:
             continue
         if token == "(":

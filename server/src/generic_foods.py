@@ -14,6 +14,12 @@ COFID = (
 )
 USDA_SR = "USDA FoodData Central SR Legacy https://fdc.nal.usda.gov"
 
+
+def _SPOON_KEYS(*, tbsp: float, tsp: float) -> dict[str, float]:
+    """Every spelling the quantity parser yields for a spoon unit."""
+    return {unit: tbsp for unit in ("tbsp", "tablespoon", "tablespoons")} | {
+        unit: tsp for unit in ("tsp", "teaspoon", "teaspoons")}
+
 FOODS: dict[str, dict[str, Any]] = {
     "93 7 ground beef": {"name":"93/7 ground beef","basis":"raw","grams":100,
         "macros":(152,20.54,0,7.14,0),"source":"OpenFoodFacts 0710178008028 (unbranded generic record)"},
@@ -104,14 +110,27 @@ FOODS: dict[str, dict[str, Any]] = {
         "macros":(16,2.6,.2,.6,1),"source":f"{COFID}, food 13-521"},
     "avocado": {"name":"Hass avocado","basis":"as-sold flesh","grams":100,
         "macros":(171,1.8,1.8,17.4,3.1),"source":f"{COFID}, food 14-386"},
-    "olive oil": {"name":"olive oil","basis":"as-sold","grams":100,
-        "macros":(899,0,0,99.9,0),"source":f"{COFID}, food 17-038"},
-    "butter": {"name":"butter","basis":"as-sold unsalted","grams":100,
-        "macros":(744,.6,.6,82.2,0),"source":f"{COFID}, food 17-661"},
+    # Cooking fats are measured by the spoon. A bare "olive oil" or "1 serving
+    # of butter" is one tablespoon, never 100 g (about 7 tablespoons, which
+    # logged 1,106 kcal for three eggs in production on 2026-11-01). Spoon
+    # weights are USDA SR Legacy household portions for the same food.
+    "olive oil": {"name":"olive oil","basis":"as-sold","grams":13.5,
+        "unit_grams":{**_SPOON_KEYS(tbsp=13.5, tsp=4.5), "cup":216, "cups":216},
+        "macros":(899,0,0,99.9,0),
+        "source":f"{COFID}, food 17-038; {USDA_SR} FDC 171413 portion weights",
+        "assumption":"assumed 1 tablespoon (13.5 g)"},
+    "butter": {"name":"butter","basis":"as-sold unsalted","grams":14.2,
+        "unit_grams":_SPOON_KEYS(tbsp=14.2, tsp=4.7),
+        "macros":(744,.6,.6,82.2,0),
+        "source":f"{COFID}, food 17-661; {USDA_SR} FDC 173430 portion weights",
+        "assumption":"assumed 1 tablespoon (14.2 g)"},
     "whole milk": {"name":"whole milk","basis":"as-sold pasteurised","grams":100,
         "macros":(63,3.4,4.6,3.6,0),"source":f"{COFID}, food 12-596"},
     "greek yogurt": {"name":"Greek yogurt","basis":"as-sold plain, whole milk","grams":100,
         "macros":(133,5.7,4.8,10.2,0),"source":f"{COFID}, food 12-555"},
-    "peanut butter": {"name":"peanut butter","basis":"as-sold smooth","grams":100,
-        "macros":(607,22.8,13.1,51.8,6.6),"source":f"{COFID}, food 14-892"},
+    "peanut butter": {"name":"peanut butter","basis":"as-sold smooth","grams":32,
+        "unit_grams":_SPOON_KEYS(tbsp=16, tsp=5.3),
+        "macros":(607,22.8,13.1,51.8,6.6),
+        "source":f"{COFID}, food 14-892; {USDA_SR} FDC 172470 portion weights",
+        "assumption":"assumed 2 tablespoons (32 g)"},
 }

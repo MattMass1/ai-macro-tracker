@@ -6,6 +6,7 @@ A surface holds references, not client-supplied nutrition or persistence code.
 from __future__ import annotations
 
 import math
+import os
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -327,6 +328,33 @@ class AgentSession:
                              if k in {"id", "title", "detail", "status"}} if self.approval else None}
 
 
+async def _since_last_food_log(store: Any, history: list[dict], day_start: Any) -> list[dict]:
+    """Each logged food starts a fresh conversation (Matt, 2026-11-01): the
+    coach sees only messages after the latest food entry, so an earlier
+    request ("2 ... sliders", "half of ...") never bleeds into the next one.
+    The log's own receipt is dropped too. A question asked after that log
+    keeps its context. Off with COACH_FRESH_CONTEXT_AFTER_LOG=false; any
+    failure reading the boundary keeps the day's history as before."""
+    if os.environ.get("COACH_FRESH_CONTEXT_AFTER_LOG", "true").strip().casefold() == "false":
+        return history
+    latest = getattr(store, "latest_food_log_at", None)
+    if latest is None:
+        return history
+    try:
+        boundary = await latest(day_start)
+    except Exception:
+        logging.getLogger("agent_canvas").warning(
+            "Latest food log time unavailable; keeping the day's chat history")
+        return history
+    if boundary is None:
+        return history
+    kept = [message for message in history
+            if message.get("created_at") is not None and message["created_at"] > boundary]
+    while kept and kept[0].get("role") != "user":
+        kept.pop(0)  # the receipt of the log itself
+    return kept
+
+
 class CanvasService:
     """One tenant/session gateway for both text and GPT Live adapters.
 
@@ -614,7 +642,8 @@ class CanvasService:
             store = self.store_factory()
             start, _ = effective_day_window()
             await self._sync_setup(session)
-            history = await store.fetch_chat_messages_since(start, 20)
+            history = await _since_last_food_log(
+                store, await store.fetch_chat_messages_since(start, 20), start)
             await store.insert_user_chat_message(message, daily_cap=50)
             foods = self.food_factory()
             drafts = await self.drafts_factory() if self.drafts_factory is not None else None

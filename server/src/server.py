@@ -226,80 +226,28 @@ _NEGATIVE_WORDS = frozenset({
     "no", "nope", "nah", "not", "dont", "never", "cancel", "stop", "wrong",
     "neither", "none", "skip", "forget", "nothing", "undo", "isnt", "wasnt",
 })
-# "no"/"nope"/"nah"/"nothing" negate only a content word that follows at once
-# ("no fries", "nothing else"); "not"/"dont"/"never" negate everything up to
-# the next comma ("not the breakfast bacon one", "I don't want the spicy
-# one"); "cancel"/"skip"/"neither"/... refuse outright.
-_INTERJECTIONS = frozenset({"no", "nope", "nah", "nothing"})
 _INDIFFERENT_RE = re.compile(r"\b(?:i\s+)?don'?t\s+(?:care|mind)\b", re.IGNORECASE)
+_LEADING_NO_RE = re.compile(r"^\s*(?:no|nope|nah)\b[\s,.!]*", re.IGNORECASE)
 _AFFIRMATIVE_LEAD_RE = re.compile(r"^\s*(?:(?:yes|yeah|yep|yup|ok(?:ay)?|sure)\b[\s,.!]*)+",
                                   re.IGNORECASE)
-_REPLY_SCAFFOLD = frozenset({"those", "these", "them", "thank", "thanks", "actually",
-                             "wait", "of", "to", "do", "i", "im", "only", "please",
-                             "thats", "sure", "fine", "mind", "ok", "okay", "with", "want"})
-_ARTICLES = frozenset({"a", "an", "the", "my", "that", "this"})
 
 
-def _negated_reply(reply: str, pending: Mapping[str, Any]) -> tuple[str, str | None] | None:
-    """How a reply holding a no-word answers the open question, or None when it
-    holds none. ("detail", None) is a yes that negates a side detail ("yes, no
-    changes", "nothing else"). A no-word
-    aimed at the question never reads as a yes: it picks an option it names
-    and did not negate ("not the deluxe, the spicy"), declines ("dont log
-    it", "not the breakfast bacon one"), or is a new request ("burger with no
-    onions")."""
+def _negated_reply(reply: str, pending: Mapping[str, Any]) -> str | None:
+    """Whether a reply holding a no-word declines the open question. The
+    server does not parse "no, but ..." sentences: a no-word never reads as a
+    yes, picks nothing and reuses nothing. "decline" when the reply names no
+    food or touches the asked-about food or its options ("dont log it", "no,
+    the deluxe", "not the crunchwrap but a chalupa"); "new" when it names
+    only other food ("burger with no onions"), which is resolved on its own.
+    None when the reply holds no no-word ("I don't mind" is a yes)."""
     text = _INDIFFERENT_RE.sub(" ", reply or "").casefold().replace("'", "").replace("\u2019", "")
-    words = re.findall(r"[a-z0-9/]+|[,.;:!?]", text)
+    words = re.findall(r"[a-z0-9/]+", text)
     if not set(words) & _NEGATIVE_WORDS:
         return None
-    soft = ({food_lookup._canon_food_token(word) for word in _FOLLOW_UP_FILLER}
-            | _REPLY_SCAFFOLD | _ARTICLES)
-    kept: list[str] = []
-    negated: list[str] = []
-    span = False        # inside a "not ..." span, up to the next comma
-    next_word = False   # the next content word after "no"
-    for word in words:
-        if word in ",.;:!?":
-            span = next_word = False
-            continue
-        if word in _NEGATIVE_WORDS:
-            if word in _INTERJECTIONS:
-                next_word = True
-            else:
-                span = True
-            continue
-        if span:
-            negated.append(word)
-            continue
-        if next_word:
-            next_word = False
-            if word not in soft:
-                negated.append(word)
-                continue
-        kept.append(word)
-    negated_food = _reply_tokens(" ".join(negated)) - _REPLY_SCAFFOLD
-    kept_food = _reply_tokens(" ".join(kept)) - _REPLY_SCAFFOLD
-    pending_tokens = set(pending.get("tokens") or ())
-    options = list(pending.get("options") or [])
-    asked_about = pending_tokens.union(
-        *(food_lookup._canon_food_tokens(option) for option in options))
-    if negated_food and not negated_food & asked_about:
-        # Negates a detail, not the question: "yes, no changes", "nothing
-        # else", "chicken sandwich with no pickles".
-        return ("new", None) if kept_food - asked_about else ("detail", None)
-    refused = negated_food - pending_tokens
-    extra = kept_food - pending_tokens
-    if extra and options:
-        scored = [(len(extra & food_lookup._canon_food_tokens(option)), option)
-                  for option in options
-                  if not refused & food_lookup._canon_food_tokens(option)]
-        best = max((score for score, _option in scored), default=0)
-        picks = [option for score, option in scored if score == best]
-        if best > 0 and len(picks) == 1:
-            return "pick", picks[0]
-    if kept_food <= asked_about:
-        return "decline", None
-    return "new", None
+    food = _reply_tokens(" ".join(word for word in words if word not in _NEGATIVE_WORDS))
+    asked_about = set(pending.get("tokens") or ()).union(
+        *(food_lookup._canon_food_tokens(option) for option in pending.get("options") or ()))
+    return "decline" if not food or food & asked_about else "new"
 
 
 def _reply_amount(reply: str) -> str:
@@ -350,7 +298,9 @@ def _scaled_item(item: Mapping[str, Any], factor: float, reply: str) -> dict[str
                 scaled[key] = round(float(scaled[key]) * factor, 2)
         scaled["macro_source"] = f"{scaled.get('macro_source')} x{factor:g}"
         amount = _reply_amount(reply) or f"{factor:g} x"
-        scaled["name"] = domain.validate_name(f"{amount} {item.get('name') or 'food'}")
+        name = str(item.get("name") or "food")
+        base = name[len(food_lookup.leading_amount(name)):].strip() or name
+        scaled["name"] = domain.validate_name(f"{amount} {base}")
     return scaled
 
 
@@ -3239,18 +3189,20 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         open_question = _pending_meal_question(user_key, session_key)
         negated = (_negated_reply(" ".join(texts), open_question)
                    if open_question is not None and calorie_values is None else None)
-        negated_pick = None
-        if negated is not None:
-            kind, negated_pick = negated
-            if kind == "decline":
-                # "No" to the one question: nothing is logged and the question is closed.
-                _settle_meal_question(user_key, session_key)
-                return {"status": "failed", "operation_id": operation_id,
-                        "confirmation": "Okay, I didn't log it. Tell me what to log instead."}
-            # A pick ("no, the deluxe") or a yes with a side note ("yes, no
-            # changes") finishes the question; anything else with a no-word
-            # is a new request, never a yes to what was shown.
-            finishing = kind in ("pick", "detail")
+        if negated == "decline":
+            # "No" to the one question: nothing is logged and the question is closed.
+            _settle_meal_question(user_key, session_key)
+            return {"status": "failed", "operation_id": operation_id,
+                    "confirmation": "Okay, I didn't log it. Tell me what to log instead."}
+        if negated == "new":
+            # Other food with a no-word ("burger with no onions", "no, a
+            # chalupa"): a new request, never an answer to what was asked or
+            # shown. A leading "no," is the answer's, not the food's.
+            finishing = False
+            texts = [_LEADING_NO_RE.sub("", text) or text for text in texts]
+            if not isinstance(raw_components, list) and args.get("description"):
+                args = {**args, "description": _LEADING_NO_RE.sub("", str(args["description"]))
+                        or args["description"]}
         pending = _pending_meal_question(user_key, session_key) if finishing else None
         asked_about = " ".join(texts)
         if pending is not None and pending.get("description"):
@@ -3342,8 +3294,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             atomic = len(components) > 1
         if finishing and not meal_type_arg:
             meal_type_arg = _pending_meal_slot(user_key, session_key)  # "for lunch" came with the question
-        # A yes with a side note answers like a bare yes.
-        reply = "" if negated is not None and negated[0] == "detail" else " ".join(texts)
+        reply = " ".join(texts)
         shown_again: list[dict[str, Any]] | None = None
         fallback_option: str | None = None
         original_amount = ""
@@ -3352,7 +3303,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             original_amount = food_lookup.leading_amount(_strip_meal_slot(str(pending["description"]))[0])
             reply_amount = _reply_amount(reply)
             shown_factor = None
-            if pending.get("shown") and restates and negated_pick is None:
+            if pending.get("shown") and restates:
                 shown_factor = (1.0 if reply_amount.casefold() in ("", original_amount.casefold())
                                 else _shown_scale(reply_amount, original_amount)
                                 if len(pending["shown"]) == 1 else None)
@@ -3364,8 +3315,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                 shown_again = [_scaled_item(item, shown_factor, reply)
                                for item in pending["shown"]]
             else:
-                option, named = ((negated_pick, True) if negated_pick
-                                 else _picked_option(pending, reply))
+                option, named = _picked_option(pending, reply)
                 if option is not None and named:
                     # "the bacon breakfast one" picks that option outright.
                     amount = _follow_up_amount(reply, original_amount)

@@ -505,16 +505,31 @@ _CFA = [
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("answer", ["no, the deluxe", "not spicy, the deluxe one", "no the deluxe one"])
-async def test_no_plus_an_option_picks_that_option(monkeypatch, answer):
+@pytest.mark.parametrize("answer", ["no, the deluxe", "not spicy, the deluxe one", "no the deluxe one",
+                                    "not the deluxe, the spicy", "not the spicy one but the deluxe",
+                                    "yes the deluxe, no pickles", "no problem, the deluxe"])
+async def test_a_no_word_about_the_options_logs_nothing(monkeypatch, answer):
+    """The server does not parse "no, but ..." sentences (five review rounds of
+    phrase rules each let a refusal or a wrong option through). A no-word that
+    touches the question declines; the user names the pick plainly."""
     srv, fake = _fresh(monkeypatch)
     _provider(monkeypatch, srv, _CFA)
     _no_web(monkeypatch, srv)
     first, second = await _turns(
         srv, "R3-3", {"description": "Chick-fil-A chicken sandwich"}, {"description": answer})
     assert first["status"] == "needs_clarification" and len(first["options"]) == 2, first
-    assert second["status"] == "committed", second
-    assert second["logged"]["calories"] == 500
+    assert second["status"] != "committed", second
+    assert fake.insert_count == 0
+
+
+@pytest.mark.asyncio
+async def test_naming_the_option_plainly_picks_it(monkeypatch):
+    srv, fake = _fresh(monkeypatch)
+    _provider(monkeypatch, srv, _CFA)
+    _no_web(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R3-3b", {"description": "Chick-fil-A chicken sandwich"}, {"description": "the deluxe"})
+    assert second["status"] == "committed" and second["logged"]["calories"] == 500, second
 
 
 def test_a_no_word_with_a_new_food_is_a_new_request():
@@ -523,8 +538,9 @@ def test_a_no_word_with_a_new_food_is_a_new_request():
     srv = importlib.import_module("server")
     pending = {"tokens": srv.food_lookup._canon_food_tokens("Taco Bell Crunchwrap"),
                "options": ["Taco Bell Crunchwrap Supreme"]}
-    assert srv._negated_reply("burger with no onions", pending) == ("new", None)
-    assert srv._negated_reply("dont log it", pending) == ("decline", None)
+    assert srv._negated_reply("burger with no onions", pending) == "new"
+    assert srv._negated_reply("dont log it", pending) == "decline"
+    assert srv._negated_reply("not the crunchwrap but a chalupa", pending) == "decline"
     assert srv._negated_reply("2 Taco Bell Crunchwraps", pending) is None
     assert srv._negated_reply("I don't care", pending) is None
 
@@ -596,31 +612,55 @@ async def test_a_negated_multi_word_option_is_never_logged(monkeypatch, answer):
     assert second["status"] != "committed", second
 
 
+_REFUSALS = ["I don't want the spicy one", "dont want the deluxe", "no way", "not now",
+             "not today", "don't add it", "don't bother", "please don't save that",
+             "don't record it", "not hungry anymore", "never happened", "nope, wrong food",
+             "no don't log it yet", "not the spicy one", "yes please, nothing else",
+             "yes, no changes"]
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("answer, calories", [
-    ("I don't want the spicy one", None), ("dont want the deluxe", None),
-    ("not the deluxe, the spicy", 450)])
-async def test_dont_want_x_never_logs_x(monkeypatch, answer, calories):
+@pytest.mark.parametrize("answer", _REFUSALS)
+async def test_no_word_replies_never_log_the_option(monkeypatch, answer):
     srv, fake = _fresh(monkeypatch)
     _provider(monkeypatch, srv, _CFA)
     _no_web(monkeypatch, srv)
     _first, second = await _turns(
         srv, "R4-2", {"description": "Chick-fil-A chicken sandwich"}, {"description": answer})
-    if calories is None:
-        assert second["status"] != "committed", second
-    else:
-        assert second["status"] == "committed" and second["logged"]["calories"] == calories, second
+    assert second["status"] != "committed", second
+    assert fake.insert_count == 0
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("answer", ["yes please, nothing else", "yes, no changes"])
-async def test_a_yes_that_negates_something_else_still_logs(monkeypatch, answer):
+@pytest.mark.parametrize("answer", _REFUSALS)
+async def test_no_word_replies_never_log_the_shown_estimate(monkeypatch, answer):
     srv, fake = _fresh(monkeypatch)
-    _web_once(monkeypatch, srv)
+    calls = _no_web(monkeypatch, srv)
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_provider_mode", lambda: None)
+
+    async def once(query, **_kwargs):
+        calls.append(query)
+        # Only the first message's food has an estimate; nothing else does.
+        return (_web_estimate(query=query, basis_unit="serving", food_name=query)
+                if query == "Taco Bell Crunchwrap" else None)
+
+    monkeypatch.setattr(srv.food_lookup.web_nutrition_lookup, "lookup", once)
     _first, second = await _turns(
         srv, "R4-3", {"description": "Taco Bell Crunchwrap"}, {"description": answer})
+    assert second["status"] != "committed", second
+    assert fake.insert_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_new_food_after_a_no_word_is_its_own_request(monkeypatch):
+    srv, fake = _fresh(monkeypatch)
+    _provider(monkeypatch, srv, _CFA + _CRUNCHWRAP)
+    _no_web(monkeypatch, srv)
+    first, second = await _turns(
+        srv, "R4-6", {"description": "Chick-fil-A chicken sandwich"},
+        {"description": "no, a Taco Bell Crunchwrap Supreme"})
     assert second["status"] == "committed", second
-    assert second["logged"]["calories"] == 120
+    assert second["logged"]["calories"] == 530
 
 
 @pytest.mark.asyncio
@@ -630,8 +670,14 @@ async def test_a_scaled_estimate_is_named_after_the_food(monkeypatch):
     _first, second = await _turns(
         srv, "R4-4", {"description": "Taco Bell Crunchwrap"}, {"description": "yes, half"})
     assert second["status"] == "committed", second
-    assert "Taco Bell Crunchwrap" in second["logged"]["name"]
-    assert "yes" not in second["logged"]["name"].casefold()
+    assert second["logged"]["name"] == "half a Taco Bell Crunchwrap"
+    srv2, fake2 = _fresh(monkeypatch)
+    _web_once(monkeypatch, srv2)
+    _first, again = await _turns(
+        srv2, "R4-4b", {"description": "half a Taco Bell Crunchwrap"}, {"description": "yes 2"})
+    assert again["status"] == "committed", again
+    assert again["logged"]["calories"] == 240
+    assert again["logged"]["name"] == "2 Taco Bell Crunchwrap"
 
 
 @pytest.mark.asyncio
@@ -643,3 +689,145 @@ async def test_ok_half_on_a_pick_question_logs_half_the_first_option(monkeypatch
         srv, "R4-5", {"description": "Taco Bell Crunchwrap"}, {"description": "ok half"})
     assert second["status"] == "committed", second
     assert second["logged"]["calories"] == 265
+
+
+# Each log starts a fresh conversation (Matt, 2026-11-01) ------------------------
+
+class _DayStore:
+    """Chat history for the day plus the time of the latest food entry."""
+
+    def __init__(self, history, logged_at):
+        self.history = list(history)
+        self.logged_at = logged_at
+
+    async def fetch_chat_messages_since(self, *_):
+        return list(self.history)
+
+    async def latest_food_log_at(self, _since):
+        return self.logged_at
+
+    async def insert_user_chat_message(self, text, *, daily_cap):
+        self.history.append({"role": "user", "content": text})
+
+    async def insert_chat_message(self, role, text, *_):
+        self.history.append({"role": role, "content": text})
+
+    async def insert_coach_usage(self, *_):
+        pass
+
+
+async def _history_seen_by_coach(store, monkeypatch, enabled=None):
+    from agent_canvas import CanvasService
+    if enabled is not None:
+        monkeypatch.setenv("COACH_FRESH_CONTEXT_AFTER_LOG", enabled)
+    seen = {}
+
+    async def agent(**kwargs):
+        seen["history"] = kwargs["history"]
+        return "ok", []
+
+    service = CanvasService(store_factory=lambda: store, food_factory=lambda: {},
+                            coach_factory=lambda: {}, agent=agent)
+    token = bind_user(uuid4())
+    try:
+        await service.turn(str(uuid4()), str(uuid4()), "Taco Bell Crunchwrap supreme", adapter="text")
+    finally:
+        reset_user(token)
+    return [message["content"] for message in seen["history"]]
+
+
+def _crunchwrap_day():
+    from datetime import datetime, timedelta, timezone
+    t0 = datetime(2026, 11, 1, 6, 19, tzinfo=timezone.utc)
+    history = [
+        {"role": "user", "content": "2 Taco Bell Crunchwrap sliders", "created_at": t0},
+        {"role": "assistant", "content": "Did you mean ...?", "created_at": t0 + timedelta(seconds=5)},
+        {"role": "user", "content": "Creamy Chipotle chicken Crunchwrap slider",
+         "created_at": t0 + timedelta(seconds=30)},
+        {"role": "assistant", "content": "Logged 2 Creamy Chipotle sliders.",
+         "created_at": t0 + timedelta(seconds=40)},
+    ]
+    return history, t0 + timedelta(seconds=38)
+
+
+@pytest.mark.asyncio
+async def test_the_message_after_a_log_does_not_see_the_earlier_food_requests(monkeypatch):
+    """Production 2026-11-01: after logging sliders, 'Taco Bell Crunchwrap
+    supreme' became '2 Taco Bell Crunchwrap Supreme sliders' from the earlier
+    messages. After a log the coach starts fresh, receipt included."""
+    history, logged_at = _crunchwrap_day()
+    seen = await _history_seen_by_coach(_DayStore(history, logged_at), monkeypatch)
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_question_still_open_after_the_last_log_keeps_its_context(monkeypatch):
+    from datetime import timedelta
+    history, logged_at = _crunchwrap_day()
+    later = logged_at + timedelta(minutes=5)
+    history += [{"role": "user", "content": "One Choco Laka Smoothie", "created_at": later},
+                {"role": "assistant", "content": "Did you mean Choc-A-Laka 12oz?",
+                 "created_at": later + timedelta(seconds=4)}]
+    seen = await _history_seen_by_coach(_DayStore(history, logged_at), monkeypatch)
+    assert seen == ["One Choco Laka Smoothie", "Did you mean Choc-A-Laka 12oz?"]
+
+
+@pytest.mark.asyncio
+async def test_fresh_context_after_a_log_can_be_switched_off(monkeypatch):
+    history, logged_at = _crunchwrap_day()
+    seen = await _history_seen_by_coach(_DayStore(history, logged_at), monkeypatch, enabled="false")
+    assert len(seen) == 4
+
+
+_ADMIN_URL = __import__("os").environ.get("MMMACROS_TEST_PG_ADMIN_URL", "")
+
+
+@pytest.mark.skipif(not _ADMIN_URL, reason="set MMMACROS_TEST_PG_ADMIN_URL to a throwaway local PostgreSQL")
+@pytest.mark.asyncio
+async def test_latest_food_log_time_is_only_ever_the_callers_own(monkeypatch):
+    import asyncpg
+    from datetime import datetime, timezone
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fixture.invalid/macro_tracker")
+    monkeypatch.setenv("APP_SHARED_TOKEN", "fixture-shared-token")
+    import migrations
+    from store import Store
+    name = "mmm_fresh_" + uuid4().hex[:12]
+    admin = await asyncpg.connect(_ADMIN_URL)
+    await admin.execute(f'CREATE DATABASE "{name}"')
+    await admin.close()
+    base, _, query = _ADMIN_URL.partition("?")
+    url = f"{base.rsplit('/', 1)[0]}/{name}" + (f"?{query}" if query else "")
+    await migrations.apply_migrations(url)
+    mine, other = uuid4(), uuid4()
+    conn = await asyncpg.connect(url)
+    for user in (mine, other):
+        await conn.execute("INSERT INTO users(id, display_name) VALUES($1, 'Synthetic test user')", user)
+    early = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+    late = datetime(2026, 11, 1, 18, 0, tzinfo=timezone.utc)
+    await conn.execute("INSERT INTO nutrition_entries(id,user_id,name,day,created_at) "
+                       "VALUES('a',$1,'eggs','2026-11-01',$2)", mine, early)
+    await conn.execute("INSERT INTO nutrition_entries(id,user_id,name,day,created_at) "
+                       "VALUES('b',$1,'eggs','2026-11-01',$2)", other, late)
+    await conn.close()
+    store = Store(url)
+
+    async def connect(self):
+        if self.pool is None:
+            self.pool = await asyncpg.create_pool(url, min_size=1, max_size=2)
+        return self.pool
+    monkeypatch.setattr(Store, "connect", connect)
+    since = datetime(2026, 11, 1, 8, 0, tzinfo=timezone.utc)
+    try:
+        token = bind_user(mine)
+        try:
+            assert await store.latest_food_log_at(since) == early
+            assert await store.latest_food_log_at(late) is None
+        finally:
+            reset_user(token)
+        token = bind_user(uuid4())
+        try:
+            assert await store.latest_food_log_at(since) is None
+        finally:
+            reset_user(token)
+    finally:
+        await store.aclose()

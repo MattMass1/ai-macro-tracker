@@ -1360,6 +1360,14 @@ class Store:
         )
         return [_dict(row) or {} for row in rows]
 
+    async def latest_food_log_at(self, since: datetime) -> datetime | None:
+        """When this user's newest food entry since ``since`` was written."""
+        pool = await self.connect()
+        return await pool.fetchval(
+            "SELECT max(created_at) FROM nutrition_entries WHERE user_id=$1 AND created_at >= $2",
+            current_user_id(), since,
+        )
+
     async def fetch_chat_messages_since(
         self, day_start: datetime, limit: int = 20
     ) -> list[dict[str, Any]]:

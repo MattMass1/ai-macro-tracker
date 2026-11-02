@@ -114,10 +114,17 @@ _LEADING_PORTION_RE = re.compile(
 # A fraction of one item with no unit: "half of a", "half a", "half", "1/2".
 # Never part of a name: "half and half" (a cream), "half chicken" (a whole
 # menu item), "Quarter Pounder" or "half pound burger" (a patty size).
+_FRACTION_NAME_WORDS = r"(?!(?:and|&|n|chicken|rack|dozen|pounders?|pound|lb|lbs|oz|ounce)\b)"
 _LEADING_FRACTION_RE = re.compile(
-    r"^\s*(half|a\s+half|one\s+half|a\s+quarter|quarter|1/2|1/4|3/4)"
-    r"(?:\s+of)?(?:\s+(?:a|an|the|my))?\s+"
-    r"(?!and\b)(?!(?:chicken|rack|dozen|pounders?|pound|lb|lbs|oz|ounce)\b)(?=\S)",
+    r"^\s*(?:"
+    # "1/2 X", "1/2 of a X"
+    r"(1/2|1/4|3/4)\s+(?:of\s+)?(?:(?:a|an|the|my)\s+)?"
+    # "a half X", "one half X", "a quarter X", each optionally "of a"
+    r"|((?:a|one|1)\s+half|(?:a|one|1)\s+quarter)\s+(?:of\s+)?(?:(?:a|an|the|my)\s+)?"
+    # bare "half"/"quarter" only with "of" or an article: "half of the X",
+    # "half a X". A bare "Half Moon cookie" or "half & half" is a name.
+    r"|(half|quarter)\s+(?:of\s+(?:(?:a|an|the|my)\s+)?|(?:a|an)\s+)"
+    r")" + _FRACTION_NAME_WORDS + r"(?=\S)",
     re.IGNORECASE)
 _TRAILING_PORTION_RE = re.compile(
     rf"\s*({_SPOKEN_NUMBER})\s+({_UNIT_TOKEN})\b\.?\s*$", re.IGNORECASE)
@@ -321,7 +328,7 @@ def _canon_food_token(token: str) -> str:
 def _canon_food_tokens(text: Any) -> set[str]:
     """Meaningful, synonym/plural-canonical identity tokens of a food string."""
     return {_canon_food_token(word)
-            for word in normalize_food_name(_one_word_names(str(text or ""))).split()
+            for word in _match_name(text).split()
             if word not in _UNIT_WORDS and word not in _CONNECTIVES and len(word) > 1}
 
 
@@ -338,12 +345,12 @@ def _identity_tokens(words) -> set[str]:
 
 def _query_identity_tokens(query: str) -> set[str]:
     _quantity, _unit, identity = _clean_component(query)
-    return _identity_tokens(normalize_food_name(identity or query).split())
+    return _identity_tokens(_match_name(identity or query).split())
 
 
 def _name_identity_tokens(food: Mapping[str, Any]) -> set[str]:
     return _identity_tokens(
-        normalize_food_name(str(food.get("food_name") or "")).split()) - _STATE_WORDS
+        _match_name(food.get("food_name")).split()) - _STATE_WORDS
 
 
 def _exact_name_match(query: str, food: Mapping[str, Any]) -> bool:
@@ -354,8 +361,7 @@ def _exact_name_match(query: str, food: Mapping[str, Any]) -> bool:
     if not tokens:
         return False
     name_tokens = _name_identity_tokens(food)
-    brand_tokens = _identity_tokens(normalize_food_name(
-        str(food.get("brand_name") or "")).split()) - _BRAND_FILLER
+    brand_tokens = _identity_tokens(_match_name(food.get("brand_name")).split()) - _BRAND_FILLER
     # An explicit leading item count is not a product variant. Retain numbers
     # present in the provider identity (3 Musketeers, Flavor 2, etc.).
     _quantity, _unit, identity = _clean_component(query)
@@ -416,8 +422,8 @@ def _full_query_relevant(query: str, food: Mapping[str, Any]) -> bool:
     _quantity, _unit, query_identity = _clean_component(query)
     if _quantity is not None and not query_identity:
         return False  # a bare amount ("6 oz") names no food
-    query_words = normalize_food_name(query_identity or query).split()
-    candidate_words = normalize_food_name(" ".join(
+    query_words = _match_name(query_identity or query).split()
+    candidate_words = _match_name(" ".join(
         str(food.get(key) or "") for key in ("food_name", "brand_name", "food_description")
     )).split()
 
@@ -728,12 +734,15 @@ def _extract_quantity(text: str) -> tuple[float | None, str | None, str]:
     ground beef` and `ground beef, 200 g` both give up their quantity.
     """
     match = _LEADING_PORTION_RE.match(text)
-    if match:
+    if match and match.group(2).casefold() not in {"half", "whole"}:
         return _quantity_value(match.group(1)), match.group(2).casefold(), text[match.end():].strip()
     match = _LEADING_FRACTION_RE.match(text)
     if match:
         # "half of a Quarter Pounder": a fraction of one serving of the item.
-        return _quantity_value(match.group(1)), "servings", text[match.end():].strip()
+        return _fraction_value(match), "servings", text[match.end():].strip()
+    portion = _LEADING_PORTION_RE.match(text)
+    if portion:  # "a half ..." / "a whole ..." with no item fraction: as before
+        return _quantity_value(portion.group(1)), portion.group(2).casefold(), text[portion.end():].strip()
     match = _TRAILING_PORTION_RE.search(text)
     if match:
         remainder = (text[:match.start()] + text[match.end():]).strip()
@@ -741,10 +750,16 @@ def _extract_quantity(text: str) -> tuple[float | None, str | None, str]:
     return None, None, text
 
 
-# Spellings a typed or dictated message splits into two words.
-_SPLIT_WORD_SPELLINGS = (
+# Unit spellings a typed or dictated message splits into two words. These
+# rewrite the query: a unit is never part of a provider's food name.
+_SPLIT_UNIT_SPELLINGS = (
     (re.compile(r"\btable\s+spoon(s?)\b", re.IGNORECASE), r"tablespoon\1"),
     (re.compile(r"\btea\s+spoon(s?)\b", re.IGNORECASE), r"teaspoon\1"),
+)
+# Name spellings that differ only in spacing or punctuation. Applied to BOTH
+# sides of a comparison, never to the searched text, so a provider's own
+# "Sour Dough Bread" or "Peanut M&M's" still matches exactly.
+_SPLIT_NAME_SPELLINGS = (
     (re.compile(r"\bhome\s+made\b", re.IGNORECASE), "homemade"),
     (re.compile(r"\bsour\s+dough\b", re.IGNORECASE), "sourdough"),
 )
@@ -752,11 +767,22 @@ _SPLIT_WORD_SPELLINGS = (
 _M_AND_MS_RE = re.compile(r"\bm\s*(?:&|and|n)\s*m(?:'?s)?\b", re.IGNORECASE)
 
 
-def _one_word_names(text: str) -> str:
-    text = _M_AND_MS_RE.sub("M&Ms", text)
-    for pattern, replacement in _SPLIT_WORD_SPELLINGS:
+def _unit_spellings(text: str) -> str:
+    for pattern, replacement in _SPLIT_UNIT_SPELLINGS:
         text = pattern.sub(replacement, text)
     return text
+
+
+def _one_word_names(text: str) -> str:
+    text = _M_AND_MS_RE.sub("M&Ms", _unit_spellings(text))
+    for pattern, replacement in _SPLIT_NAME_SPELLINGS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _match_name(text: Any) -> str:
+    """normalize_food_name for comparisons, spelling-insensitive on both sides."""
+    return normalize_food_name(_one_word_names(str(text or "")))
 
 
 _LEADING_COUNT_RE = re.compile(
@@ -764,11 +790,40 @@ _LEADING_COUNT_RE = re.compile(
     re.IGNORECASE)
 
 
+def _fraction_value(match: re.Match) -> float:
+    word = " ".join(next(group for group in match.groups() if group).split()).casefold()
+    return _quantity_value(re.sub(r"^(?:one|1)\s+", "a ", word))
+
+
+def serving_factor(amount: str) -> float | None:
+    """Servings an amount phrase stands for when it is a count or a fraction
+    of the item ("" -> 1, "2" -> 2, "half a" -> 0.5); None for a measured
+    amount ("6 oz"), which needs the food's own weights."""
+    text = _normalize_query_text(" ".join(str(amount or "").split()))
+    if not text or _WHOLE_AMOUNT_RE.match(f"{text} x"):
+        return 1.0
+    match = _LEADING_FRACTION_RE.match(f"{text} x")
+    if match and match.end() == len(text) + 1:
+        return _fraction_value(match)
+    count = re.fullmatch(r"(\d+(?:\.\d+)?)", text)
+    if count and 0 < float(count[1]) <= 100:
+        return float(count[1])
+    return None
+
+
+_WHOLE_AMOUNT_RE = re.compile(r"^\s*(?:(?:the|a)\s+)?(?:whole|full|entire)\s+(?=\S)", re.IGNORECASE)
+
+
+def is_whole_amount(amount: str) -> bool:
+    return bool(_WHOLE_AMOUNT_RE.match(f"{amount} x"))
+
+
 def leading_amount(text: str) -> str:
     """The amount a food phrase starts with, as written ("half of a", "6 oz",
-    "2"), or "". A follow-up that names the food without repeating it keeps it."""
-    text = _one_word_names(" ".join(str(text or "").split()))
-    for pattern in (_LEADING_PORTION_RE, _LEADING_FRACTION_RE, _LEADING_COUNT_RE):
+    "2", "the whole"), or "". A follow-up that names the food without
+    repeating it keeps it."""
+    text = _unit_spellings(" ".join(str(text or "").split()))
+    for pattern in (_LEADING_FRACTION_RE, _LEADING_PORTION_RE, _WHOLE_AMOUNT_RE, _LEADING_COUNT_RE):
         match = pattern.match(text)
         if match:
             return text[:match.end()].strip()
@@ -777,7 +832,7 @@ def leading_amount(text: str) -> str:
 
 def _normalize_query_text(text: str) -> str:
     """Canonicalize spoken numbers and common meat lean/fat ratios."""
-    words = re.sub(r"(?<=[A-Za-z])-(?=[A-Za-z])", " ", _one_word_names(text))
+    words = re.sub(r"(?<=[A-Za-z])-(?=[A-Za-z])", " ", _unit_spellings(text))
     # Explicit speech spellings of this brand, not fuzzy product matching.
     # Whole-token boundaries retain distinct names such as BearBellsFit, while
     # every flavor, product-line and portion token remains in the query.
@@ -959,7 +1014,8 @@ def resolve_generic_whole_food(query: str) -> dict[str, Any] | None:
     macros, label = quantified
     result = {**found, "macros_per_serving": macros, "serving_size": label,
               "applied_quantity": quantity, "applied_unit": unit}
-    if unit is not None and str(result.get("assumption") or "").startswith("assumed"):
+    if (unit not in (None, "serving", "servings")
+            and str(result.get("assumption") or "").startswith("assumed")):
         result.pop("assumption")  # the amount was stated, not assumed
     return result
 
@@ -981,7 +1037,9 @@ def _split_components(query: str) -> list[str]:
     parts: list[str] = []
     current: list[str] = []
     depth = 0
-    for token in _COMPONENT_SPLIT_RE.split(_M_AND_MS_RE.sub("M&Ms", query)):
+    protected = [match.group(0) for match in _M_AND_MS_RE.finditer(query)]
+    marked = _M_AND_MS_RE.sub(lambda match: f"\x00{protected.index(match.group(0))}\x00", query)
+    for token in _COMPONENT_SPLIT_RE.split(marked):
         if not token:
             continue
         if token == "(":
@@ -993,7 +1051,9 @@ def _split_components(query: str) -> list[str]:
         else:
             current.append(token)
     parts.append("".join(current))
-    return [part.strip() for part in parts if part.strip()]
+    restored = [re.sub(r"\x00(\d+)\x00", lambda match: protected[int(match.group(1))], part)
+                for part in parts]
+    return [part.strip() for part in restored if part.strip()]
 
 
 async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,

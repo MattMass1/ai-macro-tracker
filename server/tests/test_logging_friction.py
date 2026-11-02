@@ -146,7 +146,7 @@ _QPC = [
 def test_leading_fraction_words_parse_as_a_serving_quantity():
     from food_lookup import _clean_component
     for text in ("Half of a McDonald's quarter pounder", "half a McDonald's quarter pounder",
-                 "half McDonald's quarter pounder", "1/2 McDonald's quarter pounder"):
+                 "1/2 McDonald's quarter pounder"):
         quantity, unit, identity = _clean_component(text)
         assert (quantity, unit) == (0.5, "servings"), text
         assert identity == "McDonald's quarter pounder", text
@@ -154,6 +154,9 @@ def test_leading_fraction_words_parse_as_a_serving_quantity():
     # Not fractions of something else.
     assert _clean_component("half and half")[0] is None
     assert _clean_component("half chicken") == (None, None, "half chicken")
+    # A bare leading "half" is part of many names (Half Moon cookie, half &
+    # half); only "half a", "half of", "a half" and "1/2" are fractions.
+    assert _clean_component("half McDonald's quarter pounder")[0] is None
     for name in ("Quarter Pounder with Cheese", "quarter pounder", "a quarter pounder",
                  "half pound burger", "Half lb burger"):
         assert _clean_component(name)[0] is None, name
@@ -357,3 +360,84 @@ async def test_just_estimate_takes_the_first_option(monkeypatch, answer):
     assert first["options"][0] == "Sourdough Bread"
     assert second["status"] == "committed", second
     assert second["logged"]["calories"] == 144
+
+
+# Review round 1 (independent reviewer, 2026-11-01) ------------------------------
+
+def _web_once(monkeypatch, srv):
+    monkeypatch.setattr(srv.food_lookup, "_fatsecret_provider_mode", lambda: None)
+    calls = []
+
+    async def lookup(query, **_kwargs):
+        calls.append(query)
+        return _web_estimate(query=query, basis_unit="serving", food_name=query)
+
+    monkeypatch.setattr(srv.food_lookup.web_nutrition_lookup, "lookup", lookup)
+    return calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, calories", [
+    ("2 Taco Bell Crunchwraps", 240), ("half a Taco Bell Crunchwrap", 60),
+    ("1/2 taco bell crunchwrap", 60)])
+async def test_a_new_amount_in_the_yes_is_not_dropped(monkeypatch, answer, calories):
+    srv, fake = _fresh(monkeypatch)
+    _web_once(monkeypatch, srv)
+    first, second = await _turns(
+        srv, "R1", {"description": "Taco Bell Crunchwrap"}, {"description": answer})
+    assert first["reason"] == "web_estimate_confirmation", first
+    assert second.get("logged", {}).get("calories") in (None, calories), second
+    assert not (second["status"] == "committed" and second["logged"]["calories"] != calories)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["dont log that one", "no don't", "cancel that", "never mind"])
+async def test_a_negative_reply_to_a_shown_estimate_logs_nothing(monkeypatch, answer):
+    srv, fake = _fresh(monkeypatch)
+    _web_once(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R7", {"description": "Taco Bell Crunchwrap"}, {"description": answer})
+    assert second["status"] != "committed", second
+    assert fake.insert_count == 0
+
+
+def test_fraction_words_inside_food_names_stay_names():
+    from food_lookup import _clean_component
+    for name in ("half & half", "half n half", "Half Moon cookie", "half baked ice cream",
+                 "Half Smoke", "half sour pickle", "quarter dark chicken",
+                 "half a dozen eggs", "half a chicken", "half a rack of ribs"):
+        assert _clean_component(name)[1] != "servings", name
+
+
+def test_a_half_and_one_half_are_halves():
+    from food_lookup import _clean_component
+    for text in ("a half McDonald's Quarter Pounder with Cheese",
+                 "one half McDonald's Quarter Pounder with Cheese"):
+        assert _clean_component(text) == (0.5, "servings", "McDonald's Quarter Pounder with Cheese"), text
+    # A spoken half of a unit is still that unit.
+    assert _clean_component("half a tablespoon of olive oil") == (0.5, "tablespoon", "olive oil")
+
+
+def test_split_spellings_still_match_provider_names_exactly():
+    from food_lookup import _exact_name_match
+    assert _exact_name_match("peanut m&m's", {"food_name": "Peanut M&M's"})
+    assert _exact_name_match("sour dough bread", {"food_name": "Sour Dough Bread"})
+    assert _exact_name_match("home made chili", {"food_name": "Home Made Chili"})
+
+
+@pytest.mark.asyncio
+async def test_the_whole_one_overrides_the_first_half(monkeypatch):
+    srv, fake = _fresh(monkeypatch)
+    _provider(monkeypatch, srv, _CRUNCHWRAP)
+    _no_web(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R5", {"description": "half a Taco Bell Crunchwrap"},
+        {"description": "the whole Taco Bell Crunchwrap Supreme"})
+    assert second["status"] == "committed", second
+    assert second["logged"]["calories"] == 530
+
+
+def test_a_serving_of_butter_says_what_a_serving_is():
+    from food_lookup import resolve_generic_whole_food
+    assert "1 tablespoon" in resolve_generic_whole_food("1 serving butter")["assumption"]
+    assert "assumption" not in resolve_generic_whole_food("2 tsp butter")

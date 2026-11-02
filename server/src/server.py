@@ -214,6 +214,23 @@ def _reply_tokens(text: str) -> set[str]:
     return food_lookup._canon_food_tokens(text) - _FOLLOW_UP_FILLER
 
 
+_NEGATIVE_WORDS = frozenset({
+    "no", "nope", "nah", "not", "dont", "never", "mind", "cancel", "stop", "wrong",
+    "neither", "none", "skip", "forget", "nothing", "undo",
+})
+
+
+def _declines(reply: str) -> bool:
+    """A reply that only says no ("dont log that one", "never mind", "cancel
+    that"). "No onions" names a food change, and "I don't care" is a yes."""
+    words = set(re.findall(r"[a-z]+", reply.casefold().replace("'", "")))
+    if not words & _NEGATIVE_WORDS or re.search(r"\bdon'?t\s+care\b", reply, re.IGNORECASE):
+        return False
+    remaining = {food_lookup._canon_food_token(word) for word in words - _NEGATIVE_WORDS}
+    return not (remaining - _FOLLOW_UP_FILLER - {"those", "these", "them", "thank", "thanks",
+                                                  "actually", "wait", "of", "to", "do", "i"})
+
+
 def _picked_option(pending: Mapping[str, Any], reply: str) -> tuple[str | None, bool]:
     """(option, named) for a reply to a pick question. A reply naming words of
     one option picks it; a bare yes or a repeat of the asked-about food takes
@@ -232,6 +249,34 @@ def _picked_option(pending: Mapping[str, Any], reply: str) -> tuple[str | None, 
     if sum(1 for score, _index, _option in scored if score == best[0]) > 1:
         return None, False  # the reply fits two options equally: not a pick
     return best[2], True
+
+
+def _shown_scale(reply_amount: str, original_amount: str) -> float | None:
+    new = food_lookup.serving_factor(reply_amount)
+    old = food_lookup.serving_factor(original_amount)
+    if new is None or not old:
+        return None
+    return new / old
+
+
+def _scaled_item(item: Mapping[str, Any], factor: float, reply: str) -> dict[str, Any]:
+    scaled = dict(item)
+    if factor != 1.0:
+        for key in domain.MACRO_KEYS:
+            if scaled.get(key) is not None:
+                scaled[key] = round(float(scaled[key]) * factor, 2)
+        scaled["macro_source"] = f"{scaled.get('macro_source')} x{factor:g}"
+        scaled["name"] = domain.validate_name(reply)
+    return scaled
+
+
+def _follow_up_amount(reply: str, original_amount: str) -> str:
+    """The amount for a follow-up: its own, else the first message's. "The
+    whole one" overrides an earlier half with one serving."""
+    amount = food_lookup.leading_amount(reply)
+    if food_lookup.is_whole_amount(amount):
+        return ""
+    return amount or original_amount
 
 
 def _pending_meal_slot(user_key: str, session_key: str) -> Any:
@@ -3107,6 +3152,12 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         # asked about the same food is finished, not questioned again.
         finishing = _answering_meal_question(user_key, session_key, " ".join(texts))
 
+        if (_pending_meal_question(user_key, session_key) is not None
+                and calorie_values is None and _declines(" ".join(texts))):
+            # "No" to the one question: nothing is logged and the question is closed.
+            _settle_meal_question(user_key, session_key)
+            return {"status": "failed", "operation_id": operation_id,
+                    "confirmation": "Okay, I didn't log it."}
         pending = _pending_meal_question(user_key, session_key) if finishing else None
         asked_about = " ".join(texts)
         if pending is not None and pending.get("description"):
@@ -3205,15 +3256,23 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         if pending is not None and calorie_values is None and not isinstance(raw_components, list):
             restates = _reply_tokens(reply) <= set(pending.get("tokens") or ())
             original_amount = food_lookup.leading_amount(_strip_meal_slot(str(pending["description"]))[0])
+            reply_amount = food_lookup.leading_amount(reply)
+            shown_factor = None
             if pending.get("shown") and restates:
+                shown_factor = (1.0 if reply_amount.casefold() in ("", original_amount.casefold())
+                                else _shown_scale(reply_amount, original_amount))
+            if shown_factor is not None:
                 # "Yes" to "Closest I found ...: should I log it?" logs exactly
-                # what was shown; a second web search may not find it again.
-                shown_again = [dict(item) for item in pending["shown"]]
+                # what was shown (a second web search may not find it again);
+                # "2 of them" or "half a ..." scales it. A measured amount
+                # ("6 oz") is resolved again with that amount instead.
+                shown_again = [_scaled_item(item, shown_factor, reply)
+                               for item in pending["shown"]]
             else:
                 option, named = _picked_option(pending, reply)
                 if option is not None and named:
                     # "the bacon breakfast one" picks that option outright.
-                    amount = food_lookup.leading_amount(reply) or original_amount
+                    amount = _follow_up_amount(reply, original_amount)
                     components = [{"description": f"{amount} {option}".strip()}]
                     whole_found = None
                     atomic = False
@@ -3288,7 +3347,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             if (retry is None or retry.get("portion_error")) and fallback_option:
                 # "Yes" to "Did you mean X?": log X, keeping the first
                 # message's amount, and say it was assumed.
-                amount = food_lookup.leading_amount(reply) or original_amount
+                amount = _follow_up_amount(reply, original_amount)
                 try:
                     retry = await resolve_component(
                         {"description": f"{amount} {fallback_option}".strip()},

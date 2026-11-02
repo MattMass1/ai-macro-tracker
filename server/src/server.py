@@ -226,69 +226,91 @@ _NEGATIVE_WORDS = frozenset({
     "no", "nope", "nah", "not", "dont", "never", "cancel", "stop", "wrong",
     "neither", "none", "skip", "forget", "nothing", "undo", "isnt", "wasnt",
 })
-# "no"/"nope"/"nah" are interjections unless a word follows at once ("no
-# fries"); "not"/"dont"/"never" negate the next content word across articles
-# and filler ("not the spicy one", "dont log the crunchwrap").
-_INTERJECTIONS = frozenset({"no", "nope", "nah"})
+# "no"/"nope"/"nah"/"nothing" negate only a content word that follows at once
+# ("no fries", "nothing else"); "not"/"dont"/"never" negate everything up to
+# the next comma ("not the breakfast bacon one", "I don't want the spicy
+# one"); "cancel"/"skip"/"neither"/... refuse outright.
+_INTERJECTIONS = frozenset({"no", "nope", "nah", "nothing"})
 _INDIFFERENT_RE = re.compile(r"\b(?:i\s+)?don'?t\s+(?:care|mind)\b", re.IGNORECASE)
 _AFFIRMATIVE_LEAD_RE = re.compile(r"^\s*(?:(?:yes|yeah|yep|yup|ok(?:ay)?|sure)\b[\s,.!]*)+",
                                   re.IGNORECASE)
 _REPLY_SCAFFOLD = frozenset({"those", "these", "them", "thank", "thanks", "actually",
                              "wait", "of", "to", "do", "i", "im", "only", "please",
-                             "thats", "sure", "fine", "mind", "ok", "okay", "with"})
+                             "thats", "sure", "fine", "mind", "ok", "okay", "with", "want"})
+_ARTICLES = frozenset({"a", "an", "the", "my", "that", "this"})
 
 
 def _negated_reply(reply: str, pending: Mapping[str, Any]) -> tuple[str, str | None] | None:
     """How a reply holding a no-word answers the open question, or None when it
-    holds none. A no-word never reads as a yes: it picks an option it names
-    ("no, the deluxe"), declines ("dont log it", "not the supreme", "that's
-    not fine"), or starts a new request ("burger with no onions")."""
+    holds none. ("detail", None) is a yes that negates a side detail ("yes, no
+    changes", "nothing else"). A no-word
+    aimed at the question never reads as a yes: it picks an option it names
+    and did not negate ("not the deluxe, the spicy"), declines ("dont log
+    it", "not the breakfast bacon one"), or is a new request ("burger with no
+    onions")."""
     text = _INDIFFERENT_RE.sub(" ", reply or "").casefold().replace("'", "").replace("\u2019", "")
     words = re.findall(r"[a-z0-9/]+|[,.;:!?]", text)
     if not set(words) & _NEGATIVE_WORDS:
         return None
-    soft = {food_lookup._canon_food_token(word) for word in _FOLLOW_UP_FILLER} | _REPLY_SCAFFOLD
+    soft = ({food_lookup._canon_food_token(word) for word in _FOLLOW_UP_FILLER}
+            | _REPLY_SCAFFOLD | _ARTICLES)
     kept: list[str] = []
-    negating: str | None = None
+    negated: list[str] = []
+    span = False        # inside a "not ..." span, up to the next comma
+    next_word = False   # the next content word after "no"
     for word in words:
         if word in ",.;:!?":
-            negating = None
+            span = next_word = False
             continue
         if word in _NEGATIVE_WORDS:
-            negating = word
+            if word in _INTERJECTIONS:
+                next_word = True
+            else:
+                span = True
             continue
-        if negating is not None:
-            if word in soft or word in {"a", "an", "the", "my", "that", "this"}:
-                if negating in _INTERJECTIONS:
-                    negating = None
-                    kept.append(word)
+        if span:
+            negated.append(word)
+            continue
+        if next_word:
+            next_word = False
+            if word not in soft:
+                negated.append(word)
                 continue
-            negating = None
-            continue  # the negated word: "not spicy", "no fries"
         kept.append(word)
-    food = _reply_tokens(" ".join(kept)) - _REPLY_SCAFFOLD
+    negated_food = _reply_tokens(" ".join(negated)) - _REPLY_SCAFFOLD
+    kept_food = _reply_tokens(" ".join(kept)) - _REPLY_SCAFFOLD
     pending_tokens = set(pending.get("tokens") or ())
     options = list(pending.get("options") or [])
-    extra = food - pending_tokens
+    asked_about = pending_tokens.union(
+        *(food_lookup._canon_food_tokens(option) for option in options))
+    if negated_food and not negated_food & asked_about:
+        # Negates a detail, not the question: "yes, no changes", "nothing
+        # else", "chicken sandwich with no pickles".
+        return ("new", None) if kept_food - asked_about else ("detail", None)
+    refused = negated_food - pending_tokens
+    extra = kept_food - pending_tokens
     if extra and options:
-        scored = [(len(extra & food_lookup._canon_food_tokens(option)), option) for option in options]
-        best = max(score for score, _option in scored)
+        scored = [(len(extra & food_lookup._canon_food_tokens(option)), option)
+                  for option in options
+                  if not refused & food_lookup._canon_food_tokens(option)]
+        best = max((score for score, _option in scored), default=0)
         picks = [option for score, option in scored if score == best]
         if best > 0 and len(picks) == 1:
             return "pick", picks[0]
-    asked_about = pending_tokens.union(
-        *(food_lookup._canon_food_tokens(option) for option in options))
-    if food <= asked_about:
+    if kept_food <= asked_about:
         return "decline", None
     return "new", None
 
 
 def _reply_amount(reply: str) -> str:
-    """The amount a follow-up states, after any "yes": "yes 2" -> "2"."""
-    body = _AFFIRMATIVE_LEAD_RE.sub("", reply or "").strip()
+    """The amount a follow-up states, after any "yes": "yes 2" -> "2", "ok
+    half" -> "half a" (a bare "half" before a name is part of the name)."""
+    body = _AFFIRMATIVE_LEAD_RE.sub("", reply or "").strip(" ,.!")
     amount = food_lookup.leading_amount(body)
     if not amount and food_lookup.serving_factor(body) not in (None, 1.0):
         amount = body  # the whole reply is an amount: "2", "half"
+        if amount.casefold() in ("half", "quarter"):
+            amount += " a"
     return amount
 
 
@@ -327,7 +349,8 @@ def _scaled_item(item: Mapping[str, Any], factor: float, reply: str) -> dict[str
             if scaled.get(key) is not None:
                 scaled[key] = round(float(scaled[key]) * factor, 2)
         scaled["macro_source"] = f"{scaled.get('macro_source')} x{factor:g}"
-        scaled["name"] = domain.validate_name(reply)
+        amount = _reply_amount(reply) or f"{factor:g} x"
+        scaled["name"] = domain.validate_name(f"{amount} {item.get('name') or 'food'}")
     return scaled
 
 
@@ -3224,9 +3247,10 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                 _settle_meal_question(user_key, session_key)
                 return {"status": "failed", "operation_id": operation_id,
                         "confirmation": "Okay, I didn't log it. Tell me what to log instead."}
-            # A pick ("no, the deluxe") finishes the question; anything else
-            # with a no-word is a new request, never a yes to what was shown.
-            finishing = kind == "pick"
+            # A pick ("no, the deluxe") or a yes with a side note ("yes, no
+            # changes") finishes the question; anything else with a no-word
+            # is a new request, never a yes to what was shown.
+            finishing = kind in ("pick", "detail")
         pending = _pending_meal_question(user_key, session_key) if finishing else None
         asked_about = " ".join(texts)
         if pending is not None and pending.get("description"):
@@ -3318,7 +3342,8 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             atomic = len(components) > 1
         if finishing and not meal_type_arg:
             meal_type_arg = _pending_meal_slot(user_key, session_key)  # "for lunch" came with the question
-        reply = " ".join(texts)
+        # A yes with a side note answers like a bare yes.
+        reply = "" if negated is not None and negated[0] == "detail" else " ".join(texts)
         shown_again: list[dict[str, Any]] | None = None
         fallback_option: str | None = None
         original_amount = ""

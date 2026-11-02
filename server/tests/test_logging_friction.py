@@ -581,3 +581,65 @@ def test_fraction_exclusions_cannot_be_skipped_past_the_article():
                            ("half a rack of ribs", "rack of ribs")):
         assert _clean_component(text) == (0.5, "servings", identity), text
     assert _clean_component("one half cup of rice") == (0.5, "cup", "rice")
+
+
+# Review round 4: "not"/"dont" negate to the next comma --------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["not the breakfast bacon one", "not the Breakfast Crunchwrap Bacon"])
+async def test_a_negated_multi_word_option_is_never_logged(monkeypatch, answer):
+    srv, fake = _fresh(monkeypatch)
+    _provider(monkeypatch, srv, _CRUNCHWRAP)
+    _no_web(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R4-1", {"description": "Taco Bell Crunchwrap"}, {"description": answer})
+    assert second["status"] != "committed", second
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, calories", [
+    ("I don't want the spicy one", None), ("dont want the deluxe", None),
+    ("not the deluxe, the spicy", 450)])
+async def test_dont_want_x_never_logs_x(monkeypatch, answer, calories):
+    srv, fake = _fresh(monkeypatch)
+    _provider(monkeypatch, srv, _CFA)
+    _no_web(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R4-2", {"description": "Chick-fil-A chicken sandwich"}, {"description": answer})
+    if calories is None:
+        assert second["status"] != "committed", second
+    else:
+        assert second["status"] == "committed" and second["logged"]["calories"] == calories, second
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["yes please, nothing else", "yes, no changes"])
+async def test_a_yes_that_negates_something_else_still_logs(monkeypatch, answer):
+    srv, fake = _fresh(monkeypatch)
+    _web_once(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R4-3", {"description": "Taco Bell Crunchwrap"}, {"description": answer})
+    assert second["status"] == "committed", second
+    assert second["logged"]["calories"] == 120
+
+
+@pytest.mark.asyncio
+async def test_a_scaled_estimate_is_named_after_the_food(monkeypatch):
+    srv, fake = _fresh(monkeypatch)
+    _web_once(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R4-4", {"description": "Taco Bell Crunchwrap"}, {"description": "yes, half"})
+    assert second["status"] == "committed", second
+    assert "Taco Bell Crunchwrap" in second["logged"]["name"]
+    assert "yes" not in second["logged"]["name"].casefold()
+
+
+@pytest.mark.asyncio
+async def test_ok_half_on_a_pick_question_logs_half_the_first_option(monkeypatch):
+    srv, fake = _fresh(monkeypatch)
+    _provider(monkeypatch, srv, _CRUNCHWRAP)
+    _no_web(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R4-5", {"description": "Taco Bell Crunchwrap"}, {"description": "ok half"})
+    assert second["status"] == "committed", second
+    assert second["logged"]["calories"] == 265

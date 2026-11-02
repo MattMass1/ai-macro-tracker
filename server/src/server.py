@@ -210,8 +210,19 @@ def _pending_meal_question(user_key: str, session_key: str) -> dict[str, Any] | 
     return _meal_questions.get((user_key, session_key))
 
 
+_AGREEMENT_WORDS = frozenset(food_lookup._canon_food_token(word) for word in {
+    "no", "nope", "nah", "not", "never", "mind", "sure", "thats", "fine", "good",
+    "sounds", "ok", "okay", "yeah", "yup", "dont", "don", "i",
+})
+
+
 def _reply_tokens(text: str) -> set[str]:
-    return food_lookup._canon_food_tokens(text) - _FOLLOW_UP_FILLER
+    """Food words of a follow-up. In an agreeing reply ("no, just log it",
+    "never mind, just log it") the no-words are not food either."""
+    tokens = food_lookup._canon_food_tokens(text) - _FOLLOW_UP_FILLER
+    if _AGREES_RE.search(text or ""):
+        tokens -= _AGREEMENT_WORDS
+    return tokens
 
 
 _NEGATIVE_WORDS = frozenset({
@@ -220,15 +231,36 @@ _NEGATIVE_WORDS = frozenset({
 })
 
 
-def _declines(reply: str) -> bool:
-    """A reply that only says no ("dont log that one", "never mind", "cancel
-    that"). "No onions" names a food change, and "I don't care" is a yes."""
+_AGREES_RE = re.compile(
+    r"\b(?:just\s+log|log\s+it|go\s+ahead|(?:that'?s|thats|it'?s|its)\s+(?:fine|ok|okay|good)"
+    r"|don'?t\s+(?:care|mind)|not\s+sure|the\s+first\s+one|sounds\s+good"
+    r"|yes|yeah|yep|yup|sure|fine)\b", re.IGNORECASE)
+_AFFIRMATIVE_LEAD_RE = re.compile(r"^\s*(?:(?:yes|yeah|yep|yup|ok(?:ay)?|sure)\b[\s,.!]*)+",
+                                  re.IGNORECASE)
+
+
+def _declines(reply: str, pending: Mapping[str, Any]) -> bool:
+    """A reply that only says no to the question: "dont log that one", "never
+    mind", "no not the taco bell crunchwrap". "No onions" names a change, and
+    "never mind, just log it" or "I don't mind" is a yes."""
     words = set(re.findall(r"[a-z]+", reply.casefold().replace("'", "")))
-    if not words & _NEGATIVE_WORDS or re.search(r"\bdon'?t\s+care\b", reply, re.IGNORECASE):
+    if not words & _NEGATIVE_WORDS or _AGREES_RE.search(reply):
         return False
+    asked_about = set(pending.get("tokens") or ()).union(
+        *(food_lookup._canon_food_tokens(option) for option in pending.get("options") or ()))
     remaining = {food_lookup._canon_food_token(word) for word in words - _NEGATIVE_WORDS}
-    return not (remaining - _FOLLOW_UP_FILLER - {"those", "these", "them", "thank", "thanks",
-                                                  "actually", "wait", "of", "to", "do", "i"})
+    return not (remaining - _FOLLOW_UP_FILLER - asked_about
+                - {"those", "these", "them", "thank", "thanks", "actually", "wait",
+                   "of", "to", "do", "i"})
+
+
+def _reply_amount(reply: str) -> str:
+    """The amount a follow-up states, after any "yes": "yes 2" -> "2"."""
+    body = _AFFIRMATIVE_LEAD_RE.sub("", reply or "").strip()
+    amount = food_lookup.leading_amount(body)
+    if not amount and food_lookup.serving_factor(body) not in (None, 1.0):
+        amount = body  # the whole reply is an amount: "2", "half"
+    return amount
 
 
 def _picked_option(pending: Mapping[str, Any], reply: str) -> tuple[str | None, bool]:
@@ -273,7 +305,7 @@ def _scaled_item(item: Mapping[str, Any], factor: float, reply: str) -> dict[str
 def _follow_up_amount(reply: str, original_amount: str) -> str:
     """The amount for a follow-up: its own, else the first message's. "The
     whole one" overrides an earlier half with one serving."""
-    amount = food_lookup.leading_amount(reply)
+    amount = _reply_amount(reply)
     if food_lookup.is_whole_amount(amount):
         return ""
     return amount or original_amount
@@ -294,7 +326,7 @@ def _answering_meal_question(user_key: str, session_key: str, description: str) 
     pending = _meal_questions.get((user_key, session_key))
     if pending is None:
         return False
-    tokens = food_lookup._canon_food_tokens(description) - _FOLLOW_UP_FILLER
+    tokens = _reply_tokens(description)
     if not pending["tokens"] or not tokens:
         return True  # "whichever, just log it" names no food: it answers the question
     if any(tokens <= food_lookup._canon_food_tokens(option)
@@ -3152,8 +3184,9 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         # asked about the same food is finished, not questioned again.
         finishing = _answering_meal_question(user_key, session_key, " ".join(texts))
 
-        if (_pending_meal_question(user_key, session_key) is not None
-                and calorie_values is None and _declines(" ".join(texts))):
+        open_question = _pending_meal_question(user_key, session_key)
+        if (open_question is not None and calorie_values is None
+                and _declines(" ".join(texts), open_question)):
             # "No" to the one question: nothing is logged and the question is closed.
             _settle_meal_question(user_key, session_key)
             return {"status": "failed", "operation_id": operation_id,
@@ -3256,11 +3289,12 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         if pending is not None and calorie_values is None and not isinstance(raw_components, list):
             restates = _reply_tokens(reply) <= set(pending.get("tokens") or ())
             original_amount = food_lookup.leading_amount(_strip_meal_slot(str(pending["description"]))[0])
-            reply_amount = food_lookup.leading_amount(reply)
+            reply_amount = _reply_amount(reply)
             shown_factor = None
             if pending.get("shown") and restates:
                 shown_factor = (1.0 if reply_amount.casefold() in ("", original_amount.casefold())
-                                else _shown_scale(reply_amount, original_amount))
+                                else _shown_scale(reply_amount, original_amount)
+                                if len(pending["shown"]) == 1 else None)
             if shown_factor is not None:
                 # "Yes" to "Closest I found ...: should I log it?" logs exactly
                 # what was shown (a second web search may not find it again);

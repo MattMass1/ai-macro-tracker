@@ -111,10 +111,14 @@ _SPOKEN_NUMBER = (
 )
 _LEADING_PORTION_RE = re.compile(
     rf"^\s*({_SPOKEN_NUMBER})\s+({_UNIT_TOKEN})\b\.?\s*(?:of\s+)?", re.IGNORECASE)
-# A fraction of one item with no unit: "half of a", "half a", "half", "1/2".
-# Never part of a name: "half and half" (a cream), "half chicken" (a whole
-# menu item), "Quarter Pounder" or "half pound burger" (a patty size).
-_FRACTION_NAME_WORDS = r"(?!(?:and|&|n|chicken|rack|dozen|pounders?|pound|lb|lbs|oz|ounce)\b)"
+# A fraction of one item with no unit: "half of a", "half a", "a half", "1/2".
+# Never part of a name: "half and half" (a cream), "half a chicken" (a menu
+# item), "half a dozen", "Quarter Pounder" or "half pound burger" (a patty
+# size). Checked in code after the whole prefix, articles included, so an
+# optional article can never be skipped to dodge the check.
+_FRACTION_BLOCKED_RE = re.compile(
+    r"^(?:(?:and|&|n|dozen|pounders?|pound|lb|lbs|oz|ounce)\b|(?:chicken|rack)\s*$)",
+    re.IGNORECASE)
 _LEADING_FRACTION_RE = re.compile(
     r"^\s*(?:"
     # "1/2 X", "1/2 of a X"
@@ -123,8 +127,8 @@ _LEADING_FRACTION_RE = re.compile(
     r"|((?:a|one|1)\s+half|(?:a|one|1)\s+quarter)\s+(?:of\s+)?(?:(?:a|an|the|my)\s+)?"
     # bare "half"/"quarter" only with "of" or an article: "half of the X",
     # "half a X". A bare "Half Moon cookie" or "half & half" is a name.
-    r"|(half|quarter)\s+(?:of\s+(?:(?:a|an|the|my)\s+)?|(?:a|an)\s+)"
-    r")" + _FRACTION_NAME_WORDS + r"(?=\S)",
+    r"|(half|quarter)\s+(?:of\s+(?:(?:a|an|the|my)\s+)?|(?:a|an|the|my)\s+)"
+    r")(?:(?:a|an|the|my)\s+)?(?=\S)",
     re.IGNORECASE)
 _TRAILING_PORTION_RE = re.compile(
     rf"\s*({_SPOKEN_NUMBER})\s+({_UNIT_TOKEN})\b\.?\s*$", re.IGNORECASE)
@@ -733,16 +737,10 @@ def _extract_quantity(text: str) -> tuple[float | None, str | None, str]:
     `93/7 ground beef` keeps its fat ratio (no unit word follows it); `6 oz
     ground beef` and `ground beef, 200 g` both give up their quantity.
     """
-    match = _LEADING_PORTION_RE.match(text)
-    if match and match.group(2).casefold() not in {"half", "whole"}:
-        return _quantity_value(match.group(1)), match.group(2).casefold(), text[match.end():].strip()
-    match = _LEADING_FRACTION_RE.match(text)
-    if match:
-        # "half of a Quarter Pounder": a fraction of one serving of the item.
-        return _fraction_value(match), "servings", text[match.end():].strip()
-    portion = _LEADING_PORTION_RE.match(text)
-    if portion:  # "a half ..." / "a whole ..." with no item fraction: as before
-        return _quantity_value(portion.group(1)), portion.group(2).casefold(), text[portion.end():].strip()
+    leading = _leading_quantity(text)
+    if leading is not None:
+        quantity, unit, end = leading
+        return quantity, unit, text[end:].strip()
     match = _TRAILING_PORTION_RE.search(text)
     if match:
         remainder = (text[:match.start()] + text[match.end():]).strip()
@@ -790,6 +788,25 @@ _LEADING_COUNT_RE = re.compile(
     re.IGNORECASE)
 
 
+def _leading_quantity(text: str) -> tuple[float, str, int] | None:
+    """(quantity, unit, end of the amount) for the amount a phrase starts with."""
+    match = _LEADING_PORTION_RE.match(text)
+    if match and match.group(2).casefold() not in {"half", "whole"}:
+        return _quantity_value(match.group(1)), match.group(2).casefold(), match.end()
+    fraction = _LEADING_FRACTION_RE.match(text)
+    if fraction and not _FRACTION_BLOCKED_RE.match(text[fraction.end():]):
+        value, end = _fraction_value(fraction), fraction.end()
+        unit = re.match(rf"({_UNIT_TOKEN})\b\.?\s*(?:of\s+)?", text[end:], re.IGNORECASE)
+        if unit and unit.group(1).casefold() not in {"half", "whole"}:
+            # "one half cup of rice": half of the unit, not of a serving.
+            return value, unit.group(1).casefold(), end + unit.end()
+        # "half of a Quarter Pounder": a fraction of one serving of the item.
+        return value, "servings", end
+    if match:  # "a half ..." / "a whole ..." with no item fraction: as before
+        return _quantity_value(match.group(1)), match.group(2).casefold(), match.end()
+    return None
+
+
 def _fraction_value(match: re.Match) -> float:
     word = " ".join(next(group for group in match.groups() if group).split()).casefold()
     return _quantity_value(re.sub(r"^(?:one|1)\s+", "a ", word))
@@ -802,9 +819,9 @@ def serving_factor(amount: str) -> float | None:
     text = _normalize_query_text(" ".join(str(amount or "").split()))
     if not text or _WHOLE_AMOUNT_RE.match(f"{text} x"):
         return 1.0
-    match = _LEADING_FRACTION_RE.match(f"{text} x")
-    if match and match.end() == len(text) + 1:
-        return _fraction_value(match)
+    fraction = _leading_quantity(f"{text} x")
+    if fraction is not None and fraction[1] == "servings" and fraction[2] == len(text) + 1:
+        return fraction[0]
     count = re.fullmatch(r"(\d+(?:\.\d+)?)", text)
     if count and 0 < float(count[1]) <= 100:
         return float(count[1])
@@ -823,7 +840,10 @@ def leading_amount(text: str) -> str:
     "2", "the whole"), or "". A follow-up that names the food without
     repeating it keeps it."""
     text = _unit_spellings(" ".join(str(text or "").split()))
-    for pattern in (_LEADING_FRACTION_RE, _LEADING_PORTION_RE, _WHOLE_AMOUNT_RE, _LEADING_COUNT_RE):
+    leading = _leading_quantity(text)
+    if leading is not None:
+        return text[:leading[2]].strip()
+    for pattern in (_WHOLE_AMOUNT_RE, _LEADING_COUNT_RE):
         match = pattern.match(text)
         if match:
             return text[:match.end()].strip()

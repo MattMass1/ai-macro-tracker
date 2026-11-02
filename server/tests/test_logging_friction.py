@@ -405,7 +405,7 @@ def test_fraction_words_inside_food_names_stay_names():
     from food_lookup import _clean_component
     for name in ("half & half", "half n half", "Half Moon cookie", "half baked ice cream",
                  "Half Smoke", "half sour pickle", "quarter dark chicken",
-                 "half a dozen eggs", "half a chicken", "half a rack of ribs"):
+                 "half a dozen eggs", "half a chicken"):
         assert _clean_component(name)[1] != "servings", name
 
 
@@ -441,3 +441,67 @@ def test_a_serving_of_butter_says_what_a_serving_is():
     from food_lookup import resolve_generic_whole_food
     assert "1 tablespoon" in resolve_generic_whole_food("1 serving butter")["assumption"]
     assert "assumption" not in resolve_generic_whole_food("2 tsp butter")
+
+
+# Review round 2 ---------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["dont log the taco bell crunchwrap",
+                                    "no not the taco bell crunchwrap"])
+async def test_a_refusal_that_names_the_food_logs_nothing(monkeypatch, answer):
+    srv, fake = _fresh(monkeypatch)
+    _web_once(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R2-1", {"description": "Taco Bell Crunchwrap"}, {"description": answer})
+    assert second["status"] != "committed", second
+    assert fake.insert_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["never mind, just log it", "no, just log it",
+                                    "not sure, just log it", "nah thats fine", "I don't mind"])
+async def test_an_agreeing_reply_with_a_no_word_still_logs(monkeypatch, answer):
+    srv, fake = _fresh(monkeypatch)
+    _web_once(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R2-4", {"description": "Taco Bell Crunchwrap"}, {"description": answer})
+    assert second["status"] == "committed", second
+    assert second["logged"]["calories"] == 120
+
+
+@pytest.mark.asyncio
+async def test_yes_with_a_count_after_it_scales(monkeypatch):
+    srv, fake = _fresh(monkeypatch)
+    _web_once(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R2-5", {"description": "Taco Bell Crunchwrap"}, {"description": "yes 2"})
+    assert second["status"] == "committed", second
+    assert second["logged"]["calories"] == 240
+
+
+@pytest.mark.asyncio
+async def test_a_shown_meal_of_several_foods_is_not_scaled_as_one(monkeypatch):
+    srv, fake = _fresh(monkeypatch)
+    _web_once(monkeypatch, srv)
+    first, second = await _turns(
+        srv, "R2-2", {"description": "Taco Bell Crunchwrap and Baja Blast"},
+        {"description": "2 Taco Bell Crunchwraps and Baja Blast"})
+    assert first["reason"] == "web_estimate_confirmation", first
+    # Several shown foods are never scaled together; the reply is resolved again.
+    assert not (second["status"] == "committed" and second["logged"]["calories"] == 480), second
+    if second["status"] == "committed":
+        assert " + 2 Taco Bell Crunchwraps and Baja Blast + " not in second["logged"]["name"]
+
+
+def test_fraction_exclusions_cannot_be_skipped_past_the_article():
+    from food_lookup import _clean_component
+    for name in ("half of a chicken", "1/2 a chicken", "a half a chicken",
+                 "half of a dozen eggs", "1/2 of a dozen donuts"):
+        assert _clean_component(name)[1] != "servings", name
+    for text, identity in (("half a chicken breast", "chicken breast"),
+                           ("half a chicken sandwich", "chicken sandwich"),
+                           ("half of a chicken breast", "chicken breast"),
+                           ("half the pizza", "pizza"), ("half my sandwich", "sandwich"),
+                           ("half a rack of ribs", "rack of ribs")):
+        assert _clean_component(text) == (0.5, "servings", identity), text
+    assert _clean_component("one half cup of rice") == (0.5, "cup", "rice")

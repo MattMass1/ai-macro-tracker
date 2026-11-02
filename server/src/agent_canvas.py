@@ -23,7 +23,7 @@ from meal_drafts import MEAL_DRAFT_INSTRUCTIONS, MEAL_DRAFT_TOOL
 from domain import (WORKOUT_TYPES, effective_day_window, effective_date,
                     validate_workout_plan, workout_type_from_muscle)
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from copy import deepcopy
 from uuid import UUID, uuid4, uuid5
 
@@ -357,13 +357,32 @@ def _history_after(history: list[dict], boundary: Any) -> list[dict]:
     coach sees only messages after the boundary, so an earlier request ("2
     ... sliders", "half of ...") never bleeds into the next one. A leading
     assistant message (the receipt of the log itself) is dropped too."""
+    boundary = _as_time(boundary)
     if boundary is None:
         return history
-    kept = [message for message in history
-            if message.get("created_at") is not None and message["created_at"] > boundary]
+    try:
+        kept = [message for message in history
+                if (stamp := _as_time(message.get("created_at"))) is not None and stamp > boundary]
+    except Exception:
+        # Never fail a turn over the cut: keep the day's history, as before.
+        logging.getLogger("agent_canvas").warning("Chat history cut failed; keeping the day's history")
+        return history
     while kept and kept[0].get("role") != "user":
         kept.pop(0)
     return kept
+
+
+def _as_time(value: Any) -> datetime | None:
+    """A stored timestamp as an aware datetime. The store returns chat rows
+    with ISO-8601 strings and scalar reads as datetimes; both compare here."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value:
+        try:
+            return _as_time(datetime.fromisoformat(value))
+        except ValueError:
+            return None
+    return None
 
 
 class CanvasService:

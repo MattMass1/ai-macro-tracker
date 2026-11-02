@@ -991,3 +991,80 @@ async def test_a_draft_question_after_a_commit_in_the_same_turn_keeps_the_histor
     finally:
         reset_user(token)
     assert seen[1] == ["log 2 eggs and a burrito", "Logged 2 eggs. Which burrito?"]
+
+
+def test_history_cut_compares_store_strings_with_datetimes():
+    """Production 500 on 2026-11-02: chat rows come back from the store with
+    ISO strings while latest_food_log_at returns a datetime."""
+    from datetime import datetime, timezone
+    from agent_canvas import _history_after
+    boundary = datetime(2026, 11, 1, 12, 0, 30, tzinfo=timezone.utc)
+    history = [
+        {"role": "user", "content": "before", "created_at": "2026-11-01T12:00:00+00:00"},
+        {"role": "assistant", "content": "receipt", "created_at": "2026-11-01T12:00:40+00:00"},
+        {"role": "user", "content": "after", "created_at": "2026-11-01T12:01:00+00:00"},
+    ]
+    assert [m["content"] for m in _history_after(history, boundary)] == ["after"]
+    assert [m["content"] for m in _history_after(history, boundary.isoformat())] == ["after"]
+    assert _history_after(history, "not a time") == history
+
+
+@pytest.mark.skipif(not _ADMIN_URL, reason="set MMMACROS_TEST_PG_ADMIN_URL to a throwaway local PostgreSQL")
+@pytest.mark.asyncio
+async def test_two_coach_turns_against_the_real_store(monkeypatch):
+    """The canvas turn with the real Store (real row shapes), twice: the
+    first logs, the second starts fresh. No fake timestamps anywhere."""
+    import asyncpg
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fixture.invalid/macro_tracker")
+    monkeypatch.setenv("APP_SHARED_TOKEN", "fixture-shared-token")
+    import migrations
+    from agent_canvas import CanvasService
+    from store import Store
+    name = "mmm_turns_" + uuid4().hex[:12]
+    admin = await asyncpg.connect(_ADMIN_URL)
+    await admin.execute(f'CREATE DATABASE "{name}"')
+    await admin.close()
+    base, _, query = _ADMIN_URL.partition("?")
+    url = f"{base.rsplit('/', 1)[0]}/{name}" + (f"?{query}" if query else "")
+    await migrations.apply_migrations(url)
+    user = uuid4()
+    conn = await asyncpg.connect(url)
+    await conn.execute("INSERT INTO users(id, display_name) VALUES($1, 'Synthetic test user')", user)
+    # Earlier today: a chat about eggs, then the eggs entry, then more chat;
+    # all before this session opens.
+    await conn.execute("INSERT INTO chat_messages(user_id,role,content,created_at) "
+                       "VALUES($1,'user','3 eggs',now() - interval '3 minutes')", user)
+    await conn.execute("INSERT INTO nutrition_entries(id,user_id,name,day,created_at) "
+                       "VALUES('e0',$1,'eggs',CURRENT_DATE,now() - interval '2 minutes')", user)
+    await conn.execute("INSERT INTO chat_messages(user_id,role,content,created_at) "
+                       "VALUES($1,'assistant','Logged 3 eggs.',now() - interval '119 seconds')", user)
+    await conn.close()
+
+    async def connect(self):
+        if self.pool is None:
+            self.pool = await asyncpg.create_pool(url, min_size=1, max_size=2)
+        return self.pool
+    monkeypatch.setattr(Store, "connect", connect)
+    store = Store(url)
+    seen = []
+    replies = iter([_COMMITTED, _COMMITTED, _COMMITTED])
+
+    async def log_meal(_call_id, _args):
+        return next(replies)
+
+    async def agent(**kwargs):
+        seen.append([message["content"] for message in kwargs["history"]])
+        result = await kwargs["handlers"]["log_meal"]({"description": kwargs["message"]})
+        return str(result.get("confirmation")), []
+
+    service = CanvasService(store_factory=lambda: store, food_factory=lambda: {"log_meal": log_meal},
+                            coach_factory=lambda: {}, agent=agent)
+    session = str(uuid4())
+    token = bind_user(user)
+    try:
+        for message in ("2 sliders", "Crunchwrap supreme", "an apple"):
+            await service.turn(session, str(uuid4()), message, adapter="text")
+    finally:
+        reset_user(token)
+        await store.aclose()
+    assert seen == [[], [], []]

@@ -802,7 +802,9 @@ def _leading_quantity(text: str) -> tuple[float, str, int] | None:
             return value, unit.group(1).casefold(), end + unit.end()
         # "half of a Quarter Pounder": a fraction of one serving of the item.
         return value, "servings", end
-    if match:  # "a half ..." / "a whole ..." with no item fraction: as before
+    if match and not (fraction and match.group(2).casefold() == "half"):
+        # "a whole ..." with no item fraction: as before. A blocked fraction
+        # ("a half a chicken") is no quantity at all, never one serving.
         return _quantity_value(match.group(1)), match.group(2).casefold(), match.end()
     return None
 
@@ -819,6 +821,9 @@ def serving_factor(amount: str) -> float | None:
     text = _normalize_query_text(" ".join(str(amount or "").split()))
     if not text or _WHOLE_AMOUNT_RE.match(f"{text} x"):
         return 1.0
+    bare = {"half": 0.5, "a half": 0.5, "quarter": 0.25, "a quarter": 0.25}
+    if text.casefold() in bare:
+        return bare[text.casefold()]
     fraction = _leading_quantity(f"{text} x")
     if fraction is not None and fraction[1] == "servings" and fraction[2] == len(text) + 1:
         return fraction[0]

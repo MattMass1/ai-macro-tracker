@@ -458,15 +458,91 @@ async def test_a_refusal_that_names_the_food_logs_nothing(monkeypatch, answer):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("answer", ["never mind, just log it", "no, just log it",
-                                    "not sure, just log it", "nah thats fine", "I don't mind"])
-async def test_an_agreeing_reply_with_a_no_word_still_logs(monkeypatch, answer):
+@pytest.mark.parametrize("answer", ["I don't mind", "I don't care, log it", "dont care"])
+async def test_dont_care_and_dont_mind_are_a_yes(monkeypatch, answer):
     srv, fake = _fresh(monkeypatch)
     _web_once(monkeypatch, srv)
     _first, second = await _turns(
         srv, "R2-4", {"description": "Taco Bell Crunchwrap"}, {"description": answer})
     assert second["status"] == "committed", second
     assert second["logged"]["calories"] == 120
+
+
+# Review round 3: any no-word blocks the yes shortcuts -------------------------
+
+_NO_REPLIES = ["don't log it", "dont log it", "no, don't log it", "please don't log it",
+               "that's not fine", "no, I'm not sure", "never mind, just log it",
+               "no, just log it", "nah thats fine"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", _NO_REPLIES)
+async def test_a_reply_with_a_no_word_never_logs_a_shown_estimate(monkeypatch, answer):
+    srv, fake = _fresh(monkeypatch)
+    _web_once(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R3-1", {"description": "Taco Bell Crunchwrap"}, {"description": answer})
+    assert second["status"] != "committed", second
+    assert fake.insert_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", _NO_REPLIES + ["not the supreme"])
+async def test_a_reply_with_a_no_word_never_takes_the_first_option(monkeypatch, answer):
+    srv, fake = _fresh(monkeypatch)
+    _provider(monkeypatch, srv, _CRUNCHWRAP)
+    _no_web(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R3-2", {"description": "Taco Bell Crunchwrap"}, {"description": answer})
+    assert second["status"] != "committed", second
+    assert fake.insert_count == 0
+
+
+_CFA = [
+    ("spicy", "Spicy Chicken Sandwich", "Chick-fil-A", "1 sandwich", 214, 450, 28, 45, 18, 2),
+    ("deluxe", "Deluxe Chicken Sandwich", "Chick-fil-A", "1 sandwich", 240, 500, 30, 46, 22, 2),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["no, the deluxe", "not spicy, the deluxe one", "no the deluxe one"])
+async def test_no_plus_an_option_picks_that_option(monkeypatch, answer):
+    srv, fake = _fresh(monkeypatch)
+    _provider(monkeypatch, srv, _CFA)
+    _no_web(monkeypatch, srv)
+    first, second = await _turns(
+        srv, "R3-3", {"description": "Chick-fil-A chicken sandwich"}, {"description": answer})
+    assert first["status"] == "needs_clarification" and len(first["options"]) == 2, first
+    assert second["status"] == "committed", second
+    assert second["logged"]["calories"] == 500
+
+
+def test_a_no_word_with_a_new_food_is_a_new_request():
+    from test_live_coach import _import_server
+    import importlib
+    srv = importlib.import_module("server")
+    pending = {"tokens": srv.food_lookup._canon_food_tokens("Taco Bell Crunchwrap"),
+               "options": ["Taco Bell Crunchwrap Supreme"]}
+    assert srv._negated_reply("burger with no onions", pending) == ("new", None)
+    assert srv._negated_reply("dont log it", pending) == ("decline", None)
+    assert srv._negated_reply("2 Taco Bell Crunchwraps", pending) is None
+    assert srv._negated_reply("I don't care", pending) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, calories", [("yes, half", 60), ("ok half", 60), ("yes, two", 240)])
+async def test_an_amount_word_after_yes_scales(monkeypatch, answer, calories):
+    srv, fake = _fresh(monkeypatch)
+    _web_once(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R3-4", {"description": "Taco Bell Crunchwrap"}, {"description": answer})
+    assert second["status"] == "committed", second
+    assert second["logged"]["calories"] == calories
+
+
+def test_a_blocked_fraction_is_no_quantity_at_all():
+    from food_lookup import _clean_component
+    assert _clean_component("a half a chicken")[0] is None
 
 
 @pytest.mark.asyncio

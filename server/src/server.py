@@ -210,48 +210,77 @@ def _pending_meal_question(user_key: str, session_key: str) -> dict[str, Any] | 
     return _meal_questions.get((user_key, session_key))
 
 
-_AGREEMENT_WORDS = frozenset(food_lookup._canon_food_token(word) for word in {
-    "no", "nope", "nah", "not", "never", "mind", "sure", "thats", "fine", "good",
-    "sounds", "ok", "okay", "yeah", "yup", "dont", "don", "i",
+_AMOUNT_WORDS = frozenset(food_lookup._canon_food_token(word) for word in {
+    "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "twelve",
+    "half", "quarter", "whole",
 })
 
 
 def _reply_tokens(text: str) -> set[str]:
-    """Food words of a follow-up. In an agreeing reply ("no, just log it",
-    "never mind, just log it") the no-words are not food either."""
-    tokens = food_lookup._canon_food_tokens(text) - _FOLLOW_UP_FILLER
-    if _AGREES_RE.search(text or ""):
-        tokens -= _AGREEMENT_WORDS
-    return tokens
+    """Food words of a follow-up: no filler, no amount words, no "I don't mind"."""
+    text = _INDIFFERENT_RE.sub(" ", text or "")
+    return food_lookup._canon_food_tokens(text) - _FOLLOW_UP_FILLER - _AMOUNT_WORDS
 
 
 _NEGATIVE_WORDS = frozenset({
-    "no", "nope", "nah", "not", "dont", "never", "mind", "cancel", "stop", "wrong",
-    "neither", "none", "skip", "forget", "nothing", "undo",
+    "no", "nope", "nah", "not", "dont", "never", "cancel", "stop", "wrong",
+    "neither", "none", "skip", "forget", "nothing", "undo", "isnt", "wasnt",
 })
-
-
-_AGREES_RE = re.compile(
-    r"\b(?:just\s+log|log\s+it|go\s+ahead|(?:that'?s|thats|it'?s|its)\s+(?:fine|ok|okay|good)"
-    r"|don'?t\s+(?:care|mind)|not\s+sure|the\s+first\s+one|sounds\s+good"
-    r"|yes|yeah|yep|yup|sure|fine)\b", re.IGNORECASE)
+# "no"/"nope"/"nah" are interjections unless a word follows at once ("no
+# fries"); "not"/"dont"/"never" negate the next content word across articles
+# and filler ("not the spicy one", "dont log the crunchwrap").
+_INTERJECTIONS = frozenset({"no", "nope", "nah"})
+_INDIFFERENT_RE = re.compile(r"\b(?:i\s+)?don'?t\s+(?:care|mind)\b", re.IGNORECASE)
 _AFFIRMATIVE_LEAD_RE = re.compile(r"^\s*(?:(?:yes|yeah|yep|yup|ok(?:ay)?|sure)\b[\s,.!]*)+",
                                   re.IGNORECASE)
+_REPLY_SCAFFOLD = frozenset({"those", "these", "them", "thank", "thanks", "actually",
+                             "wait", "of", "to", "do", "i", "im", "only", "please",
+                             "thats", "sure", "fine", "mind", "ok", "okay", "with"})
 
 
-def _declines(reply: str, pending: Mapping[str, Any]) -> bool:
-    """A reply that only says no to the question: "dont log that one", "never
-    mind", "no not the taco bell crunchwrap". "No onions" names a change, and
-    "never mind, just log it" or "I don't mind" is a yes."""
-    words = set(re.findall(r"[a-z]+", reply.casefold().replace("'", "")))
-    if not words & _NEGATIVE_WORDS or _AGREES_RE.search(reply):
-        return False
-    asked_about = set(pending.get("tokens") or ()).union(
-        *(food_lookup._canon_food_tokens(option) for option in pending.get("options") or ()))
-    remaining = {food_lookup._canon_food_token(word) for word in words - _NEGATIVE_WORDS}
-    return not (remaining - _FOLLOW_UP_FILLER - asked_about
-                - {"those", "these", "them", "thank", "thanks", "actually", "wait",
-                   "of", "to", "do", "i"})
+def _negated_reply(reply: str, pending: Mapping[str, Any]) -> tuple[str, str | None] | None:
+    """How a reply holding a no-word answers the open question, or None when it
+    holds none. A no-word never reads as a yes: it picks an option it names
+    ("no, the deluxe"), declines ("dont log it", "not the supreme", "that's
+    not fine"), or starts a new request ("burger with no onions")."""
+    text = _INDIFFERENT_RE.sub(" ", reply or "").casefold().replace("'", "").replace("\u2019", "")
+    words = re.findall(r"[a-z0-9/]+|[,.;:!?]", text)
+    if not set(words) & _NEGATIVE_WORDS:
+        return None
+    soft = {food_lookup._canon_food_token(word) for word in _FOLLOW_UP_FILLER} | _REPLY_SCAFFOLD
+    kept: list[str] = []
+    negating: str | None = None
+    for word in words:
+        if word in ",.;:!?":
+            negating = None
+            continue
+        if word in _NEGATIVE_WORDS:
+            negating = word
+            continue
+        if negating is not None:
+            if word in soft or word in {"a", "an", "the", "my", "that", "this"}:
+                if negating in _INTERJECTIONS:
+                    negating = None
+                    kept.append(word)
+                continue
+            negating = None
+            continue  # the negated word: "not spicy", "no fries"
+        kept.append(word)
+    food = _reply_tokens(" ".join(kept)) - _REPLY_SCAFFOLD
+    pending_tokens = set(pending.get("tokens") or ())
+    options = list(pending.get("options") or [])
+    extra = food - pending_tokens
+    if extra and options:
+        scored = [(len(extra & food_lookup._canon_food_tokens(option)), option) for option in options]
+        best = max(score for score, _option in scored)
+        picks = [option for score, option in scored if score == best]
+        if best > 0 and len(picks) == 1:
+            return "pick", picks[0]
+    asked_about = pending_tokens.union(
+        *(food_lookup._canon_food_tokens(option) for option in options))
+    if food <= asked_about:
+        return "decline", None
+    return "new", None
 
 
 def _reply_amount(reply: str) -> str:
@@ -3185,12 +3214,19 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
         finishing = _answering_meal_question(user_key, session_key, " ".join(texts))
 
         open_question = _pending_meal_question(user_key, session_key)
-        if (open_question is not None and calorie_values is None
-                and _declines(" ".join(texts), open_question)):
-            # "No" to the one question: nothing is logged and the question is closed.
-            _settle_meal_question(user_key, session_key)
-            return {"status": "failed", "operation_id": operation_id,
-                    "confirmation": "Okay, I didn't log it."}
+        negated = (_negated_reply(" ".join(texts), open_question)
+                   if open_question is not None and calorie_values is None else None)
+        negated_pick = None
+        if negated is not None:
+            kind, negated_pick = negated
+            if kind == "decline":
+                # "No" to the one question: nothing is logged and the question is closed.
+                _settle_meal_question(user_key, session_key)
+                return {"status": "failed", "operation_id": operation_id,
+                        "confirmation": "Okay, I didn't log it. Tell me what to log instead."}
+            # A pick ("no, the deluxe") finishes the question; anything else
+            # with a no-word is a new request, never a yes to what was shown.
+            finishing = kind == "pick"
         pending = _pending_meal_question(user_key, session_key) if finishing else None
         asked_about = " ".join(texts)
         if pending is not None and pending.get("description"):
@@ -3291,7 +3327,7 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             original_amount = food_lookup.leading_amount(_strip_meal_slot(str(pending["description"]))[0])
             reply_amount = _reply_amount(reply)
             shown_factor = None
-            if pending.get("shown") and restates:
+            if pending.get("shown") and restates and negated_pick is None:
                 shown_factor = (1.0 if reply_amount.casefold() in ("", original_amount.casefold())
                                 else _shown_scale(reply_amount, original_amount)
                                 if len(pending["shown"]) == 1 else None)
@@ -3303,7 +3339,8 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
                 shown_again = [_scaled_item(item, shown_factor, reply)
                                for item in pending["shown"]]
             else:
-                option, named = _picked_option(pending, reply)
+                option, named = ((negated_pick, True) if negated_pick
+                                 else _picked_option(pending, reply))
                 if option is not None and named:
                     # "the bacon breakfast one" picks that option outright.
                     amount = _follow_up_amount(reply, original_amount)

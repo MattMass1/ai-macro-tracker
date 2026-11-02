@@ -3393,6 +3393,11 @@ def _voice_tool_handlers() -> dict[str, Callable[[str, Mapping[str, Any]], Await
             retry = None
             if original and (food_lookup.normalize_food_name(original)
                              != food_lookup.normalize_food_name(" ".join(texts))):
+                reply_amount = _reply_amount(" ".join(texts))
+                if reply_amount and not food_lookup.is_whole_amount(reply_amount):
+                    # "ok half" keeps its half on the asked-about food.
+                    base = original[len(food_lookup.leading_amount(original)):].strip() or original
+                    original = f"{reply_amount} {base}"
                 try:
                     retry = await resolve_component({"description": original}, atomic=False,
                                                     assume_variant=True)

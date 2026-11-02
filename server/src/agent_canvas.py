@@ -1092,8 +1092,10 @@ class CanvasService:
             )
             stored_reply = await store.insert_chat_message("assistant", reply)
             task = session.canvas.surfaces.get("task")
-            question_open = bool(task) and any(
+            question_open = (bool(task) and any(
                 item.get("component") == "FoodClarification" for item in task["components"])
+            ) or any(str(result.get("status")) in {"needs_detail", "needs_clarification", "conflict"}
+                     for result in turn_drafts.values())
             if (_fresh_context_enabled() and session.receipt is not receipt_before
                     and not question_open and isinstance(stored_reply, Mapping)
                     and stored_reply.get("created_at") is not None):

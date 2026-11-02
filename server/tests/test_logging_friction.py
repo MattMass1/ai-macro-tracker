@@ -935,3 +935,59 @@ async def test_an_entry_from_another_path_or_an_undo_does_not_move_the_cut(monke
     finally:
         reset_user(token)
     assert seen[1] == ["Taco Bell Crunchwrap", "Did you mean Crunchwrap Supreme?"]
+
+
+
+@pytest.mark.asyncio
+async def test_ok_half_after_a_pick_question_logs_half(monkeypatch):
+    srv, fake = _fresh(monkeypatch)
+    _provider(monkeypatch, srv, _CFA)
+    _no_web(monkeypatch, srv)
+    _first, second = await _turns(
+        srv, "R7-1", {"description": "Chick-fil-A chicken sandwich"}, {"description": "ok half"})
+    assert second["status"] == "committed", second
+    assert second["logged"]["calories"] == 225
+
+
+@pytest.mark.asyncio
+async def test_a_draft_question_after_a_commit_in_the_same_turn_keeps_the_history(monkeypatch):
+    """Drafts path (gated): 'log 2 eggs and a burrito' commits the eggs, then
+    asks which burrito in the same turn. The next turn keeps that question."""
+    from agent_canvas import CanvasService
+    store = _ClockStore()
+    seen = []
+
+    class Drafts:
+        async def handle(self, call, **_kwargs):
+            if call["add"][0]["description"] == "2 eggs":
+                return {"status": "committed", "draft_ref": "d1", "confirmation": "Logged 2 eggs.",
+                        "logged": {"id": "r1", "name": "2 eggs"}}
+            return {"status": "needs_detail", "draft_ref": "d2", "question": "Which burrito?"}
+
+        async def context(self):
+            return {}
+
+        async def settle(self, *_a, **_k):
+            return None
+
+    async def agent(**kwargs):
+        seen.append([message["content"] for message in kwargs["history"]])
+        if len(seen) == 1:
+            await kwargs["handlers"]["update_meal"]({"add": [{"description": "2 eggs"}]})
+            await kwargs["handlers"]["update_meal"]({"add": [{"description": "burrito"}]})
+            return "Logged 2 eggs. Which burrito?", []
+        return "ok", []
+
+    async def drafts_factory():
+        return Drafts()
+
+    service = CanvasService(store_factory=lambda: store, food_factory=lambda: {},
+                            coach_factory=lambda: {}, agent=agent, drafts_factory=drafts_factory)
+    session = str(uuid4())
+    token = bind_user(uuid4())
+    try:
+        for message in ("log 2 eggs and a burrito", "chipotle"):
+            await service.turn(session, str(uuid4()), message, adapter="text")
+    finally:
+        reset_user(token)
+    assert seen[1] == ["log 2 eggs and a burrito", "Logged 2 eggs. Which burrito?"]

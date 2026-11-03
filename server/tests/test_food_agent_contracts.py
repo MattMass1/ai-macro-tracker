@@ -438,6 +438,48 @@ def test_bench_piece_is_the_serving_unit_for_a_countable_serving():
     assert p.multiplier(_p("count", 1, text="1"), p.parse_serving_text("2 slices"), _ident("string cheese")) is None
 
 
+def test_review_c1b_inner_count_in_the_foods_own_noun():
+    """Re-check 4, C-1b: 2 tacos of "1 order (3 tacos)" is 2/3 of an order, not 2 orders."""
+    order = p.parse_serving_text("1 order (3 tacos)")
+    tacos = _ident("street tacos", kind="restaurant")
+    assert p.multiplier(_p("count", 2, text="2 tacos"), order, tacos) == Decimal("0.6667")
+    assert p.multiplier(_p("count", 2, text="2"), order, tacos) == Decimal("0.6667")
+    assert p.multiplier(_p("count", 3, text="3 tacos"), order) == Decimal("1")
+    assert p.multiplier(_p("count", 1, text="1 order"), order, tacos) == Decimal("1")
+
+
+def test_review_c2_whole_food_count_against_a_measured_serving_asks():
+    """Re-check 4, C-2: a count of a food against a gram/oz/cup serving is not n servings."""
+    assert p.multiplier(_p("count", 2, text="2 eggs"), p.parse_serving_text("100 g"), _ident("eggs")) is None
+    assert p.multiplier(_p("count", 2, text="2"), p.parse_serving_text("3 oz"), _ident("chicken breasts")) is None
+    assert p.multiplier(_p("count", 2, text="2"), p.parse_serving_text("1 cup"), _ident("banana")) is None
+    assert p.multiplier(_p("count", 2, text="2 cookies"), p.parse_serving_text("1 serving (30 g)"),
+                        _ident("cookies")) is None
+    # The serving text names the item with a count: countable.
+    assert p.multiplier(_p("count", 2, text="2"), p.parse_serving_text("2 large eggs (100 g)"),
+                        _ident("eggs")) == Decimal("1")
+    assert p.multiplier(_p("count", 2, text="2"), p.parse_serving_text("1 smoothie (12 fl oz)"),
+                        _ident("smoothie")) == Decimal("2")
+    # A plain "1 serving" (or an undescribed preset serving) is one of the item.
+    assert p.multiplier(_p("count", 2, text="2"), p.parse_serving_text("1 serving"),
+                        _ident("cookies")) == Decimal("2")
+    assert p.multiplier(_p("count", 1, text="1"), p.parse_serving_text(""), _ident("morning oats")) == Decimal("1")
+    assert p.multiplier(_p("count", 1, text="1"), p.parse_serving_text("1 serving (215 g)"),
+                        _ident("grilled chicken sandwich")) == Decimal("1")
+    # Drinks are served by fluid volume: n drinks are n servings.
+    assert p.multiplier(_p("count", 2, text="2 smoothies"), SMOOTHIE, _ident("strawberry smoothie")) \
+        == Decimal("2")
+
+
+def test_review_recheck4_nit_half_in_a_count_is_a_fraction():
+    sandwich = p.parse_serving_text("1 sandwich (200 g)")
+    assert p.multiplier(_p("count", 1, text="1 half"), sandwich, _ident("turkey sandwich")) == Decimal("0.5")
+    assert p.multiplier(_p("count", 1, text="1 half"), sandwich) == Decimal("0.5")
+    assert p.multiplier(_p("count", 1, text="a quarter"), sandwich, _ident("turkey sandwich")) == Decimal("0.25")
+    assert p.multiplier(_p("count", 1, text="half"), p.parse_serving_text("1 pizza (8 slices)"),
+                        _ident("pepperoni pizza")) == Decimal("0.5")
+
+
 def test_review_c1_one_unit_serving_wins_still_hold():
     sandwich = p.parse_serving_text("1 sandwich (215 g)")
     big_mac = _ident("Big Mac", kind="restaurant")

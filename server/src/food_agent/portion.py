@@ -266,6 +266,13 @@ def _canonical_units(tokens: set[str]) -> set[str]:
 _UNIT_WORDS = frozenset(_UNIT_EQUIVALENTS) | _CONTAINERS | frozenset(
     {"loaf", "bar", "stick", "cube", "scoop", "link", "patty", "wedge", "square", "sheet"})
 _UNCLEAR = object()
+_SUB_UNITS = frozenset(_UNIT_EQUIVALENTS)  # slice, piece: parts of a whole item
+_FLUID_UNITS = frozenset({"fl_oz", "ml", "l"})
+_GENERIC_PIECE = frozenset({"piece", "pc"})
+_FRACTION_WORDS: dict[str, Decimal] = {
+    "half": Decimal("0.5"), "halve": Decimal("0.5"), "quarter": Decimal("0.25"),
+}
+_NO_MATCH = object()
 
 
 def _inner_counts(text: str) -> list[tuple[Decimal, set[str]]]:
@@ -288,7 +295,7 @@ def _identity_units(identity: FoodIdentity | None) -> Any:
     """Count unit implied by the HEAD noun of the food name.
 
     Returns ``None`` (no identity), ``_UNCLEAR`` (the name states a pack size
-    like "10 piece" or a container like "bowl"), or ``(units, unit_bearing)``.
+    like "10 piece"), or ``(units, unit_bearing)``.
     ``unit_bearing`` is True when the head is itself counted in a unit word
     (slice, piece, McNugget, bacon), so a mismatch must ask. A whole item
     ("pepperoni pizza", "toast sandwich", "string cheese") is counted as itself.
@@ -296,7 +303,7 @@ def _identity_units(identity: FoodIdentity | None) -> Any:
     if identity is None:
         return None
     named = " ".join(part for part in (identity.name, identity.variant) if part)
-    if re.search(r"\d", named) or _noun_tokens(named) & _CONTAINERS:
+    if re.search(r"\d", named):
         return _UNCLEAR
     head = _head_noun(identity.name)
     if head is None:
@@ -311,58 +318,105 @@ def _identity_units(identity: FoodIdentity | None) -> Any:
 
 def _count_multiplier(portion: Portion, basis: ServingBasis, amount: Decimal,
                       identity: FoodIdentity | None) -> Decimal | None:
-    """Servings for a count. Never mis-scales: when units differ and the serving
-    states no piece count in the user's unit, return None so the agent asks.
+    """Servings for a count, by one rule. ``None`` means ask; it never guesses.
 
-    * The user's own unit words decide ("2 slices", "6 nuggets", "1 box").
-    * Otherwise the unit comes from the head noun of the food name ("2" eggs,
-      "three" bacon, "6" McNuggets); a whole item counts as itself.
-    * Same unit as the serving: count / serving count ("6 nuggets" of "4 pieces").
-    * Unit stated inside the serving: count / that number ("2 slices" of
-      "1 pizza (8 slices)" = 0.25).
-    * A food named with no unit against a one-unit serving ("2 Big Macs" of
-      "1 sandwich") is that many servings.
+    1. **Fractions first.** "half", "halves", "a quarter" in the portion words
+       scale the count (``1 half`` = 0.5, ``2 bacon halves`` = 1) and are then
+       matched like any other count.
+    2. **The user's unit U.** The portion words' nouns when they match the
+       serving or name a unit word ("2 slices", "6 nuggets", "1 box");
+       otherwise the HEAD noun of the food name ("2" eggs, "three" bacon -> slice,
+       "6" McNuggets -> piece, "pepperoni pizza" -> pizza). Plurals and
+       synonyms are normalised (pc/nugget/wing/tender -> piece; rasher -> slice).
+    3. **The serving's units.** Parsed from its text, before and inside
+       parentheses: outer (n, noun) as in "2 large eggs", "1 pizza", "1 order";
+       inner (n, noun) as in "(8 slices)", "(3 tacos)", "(6 pieces)".
+    4. **Match.** U equals an inner noun: count / inner n ("2 slices" of
+       "1 pizza (8 slices)" = 0.25; "2 tacos" of "1 order (3 tacos)" = 0.667).
+       U equals the outer noun: count / outer n ("6 nuggets" of "4 pieces" =
+       1.5; "1" pizza of "1 pizza (8 slices)" = 1).
+    5. **Generic piece.** "piece"/"pc" said against a single countable unit with
+       no inner count ("1 slice (47 g)", "1 bar") is that unit.
+    6. **The food itself.** When U is the food (not a unit word like slice,
+       piece, bar, box) and the serving is one countable whole item with no
+       inner count ("2 Big Macs" of "1 sandwich"), the count is servings. Drinks
+       served by fluid volume ("2 smoothies" of "12 fl oz") are servings too, and
+       so is a plain "1 serving" with no weight. "1 serving (30 g)" is one item
+       only for a whole item or a restaurant/remembered/homemade dish.
+    7. **Otherwise ask.** A different unit ("2 slices" of "1 loaf"), a whole
+       item against a part ("1 pizza" of "2 slices"), or a food count against a
+       mass or cup serving ("2 eggs" of "100 g") returns ``None``. So does a
+       bare "1" of a piece food against a multi-piece serving (one McNugget, or
+       one box?) and any name that states its own pack size ("10 piece").
     """
-    per = _dec(basis.amount) if basis.unit == "count" and basis.amount is not None else None
-    serving = _canonical_units(_noun_tokens(basis.count_noun)) if per is not None else set()
-    inner = _inner_counts(basis.text)
-    said = _noun_tokens(portion.text)
+    words = [_stem(word) for word in re.findall(r"[a-z]+", (portion.text or "").lower())]
+    fraction = next((_FRACTION_WORDS[word] for word in words if word in _FRACTION_WORDS), None)
+    if fraction is not None:
+        amount = amount * fraction
+    said = _noun_tokens(portion.text) - set(_FRACTION_WORDS)
     said_units = _canonical_units(said)
 
-    if (said & _CONTAINERS) - serving:  # "1 box" of "10 pieces"; "2 boxes" of "3 boxes" is fine
-        return None
-    countable = per is not None and bool(serving) and not (serving & _CONTAINERS)
-    if "halve" in said:  # "2 bacon halves" of "1 slice" is 1 slice; otherwise unclear
-        return _result(amount / 2) if countable and per == 1 and not inner else None
-    if per is not None and said_units & serving:
-        return _result(amount / per)
-    explicit = said_units & _UNIT_WORDS
-    if explicit:
-        for qty, units in inner:
-            if explicit & units:
-                return _result(amount / qty)
-        # A generic "piece" of a countable serving with no stated pieces is its
-        # own unit: "1 piece" of toast against "1 slice (47 g)" is one slice.
-        # Not for "1 pizza (8 slices)" (handled above or asks) or "1 serving".
-        if explicit == {"piece"} and said & {"piece", "pc"} and countable and not inner:
-            return _result(amount / per)
-        return None
+    per = _dec(basis.amount) if basis.unit == "count" and basis.amount is not None else None
+    outer = _canonical_units(_noun_tokens(basis.count_noun)) if per is not None else set()
+    inner = _inner_counts(basis.text)
+    single = per == 1 and bool(outer) and not (outer & _CONTAINERS) and not inner
+    fluid = per is None and basis.unit in _FLUID_UNITS
 
-    found = _identity_units(identity)
-    if found is _UNCLEAR or found is None:
-        # Nothing names a unit: n of a one-unit (or measured) serving is n servings.
-        return _result(amount) if per is None or per == 1 else None
-    units, bearing = found
-    if per is not None and units & serving:
-        if per != 1 and amount == 1 and "piece" in (units & serving):
-            return None  # "1" McNugget against "4 pieces": more likely one box
-        return _result(amount / per)
-    if bearing:
+    def match(units: set[str]) -> Any:
         for qty, inner_units in inner:
             if units & inner_units:
-                return _result(amount / qty)
+                return qty, units & inner_units
+        if per is not None and units & outer:
+            return per, units & outer
+        return _NO_MATCH
+
+    undescribed = basis.basis == "per_serving" and basis.amount is None and basis.unit is None and not inner
+    generic_serving = (per == 1 and outer == {"serving"} and not inner) or undescribed
+
+    def food_itself() -> Decimal | None:
+        if (single and not (outer & _SUB_UNITS)) or fluid:
+            return _result(amount)
+        if generic_serving:
+            # "1 serving" with no weight is one of whatever the source sells. With
+            # a weight ("1 serving (30 g)") it is one item only for a whole or
+            # restaurant/remembered dish, not for small foods like cookies.
+            if basis.grams is None and basis.ml is None:
+                return _result(amount)
+            head = _head_noun(identity.name) if identity is not None else None
+            if identity is not None and (identity.kind in ("restaurant", "history", "homemade")
+                                         or (head is not None and _member(head, _WHOLE_ITEMS))):
+                return _result(amount)
         return None
-    return _result(amount) if per is None or per == 1 else None
+
+    # 2a. The user's own words.
+    if said:
+        found = match(said_units)
+        if found is not _NO_MATCH:
+            return _result(amount / found[0])
+        if said & _GENERIC_PIECE and single:
+            return _result(amount)
+        if said_units & _UNIT_WORDS:
+            return None  # a unit the serving does not have: "2 slices" of "1 loaf", "1 box"
+
+    # 2b. The head noun of the food name.
+    ident = _identity_units(identity)
+    if ident is _UNCLEAR:
+        return food_itself() if per is None or per == 1 else None
+    if ident is None:
+        if said:  # the words name the food itself ("2 smoothies"), no identity given
+            return food_itself()
+        # Nothing names a unit at all: n of a one-unit serving is n servings.
+        return _result(amount) if (per == 1 and not inner) or fluid else None
+    units, bearing = ident
+    found = match(units)
+    if found is not _NO_MATCH:
+        divisor, matched = found
+        if divisor != 1 and amount == 1 and "piece" in matched:
+            return None  # "1" McNugget against "4 pieces": one piece or one box?
+        return _result(amount / divisor)
+    if bearing:
+        return None  # "2" bread against "1 loaf": a slice is not a loaf
+    return food_itself()
 
 
 def multiplier(portion: Portion, basis: ServingBasis,

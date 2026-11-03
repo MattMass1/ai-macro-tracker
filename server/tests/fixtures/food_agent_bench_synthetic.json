@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "synthetic": true,
+  "note": "Invented, de-identified cases. Same format as the private bench: labels (cases) plus scripts (what a correct model would emit per user turn, the fake resolver catalog, seeded history).",
+  "cases": [
+    {
+      "id": "syn-half-burger",
+      "category": "real_failure",
+      "failure_classes": ["lost_fraction"],
+      "user_turns": ["Half of a Harbor Grill smokehouse burger", "the one with bacon"],
+      "expected_action": "log",
+      "gold_items": [
+        {"identity": {"name": "Smokehouse Burger with Bacon", "brand": "Harbor Grill", "variant": null, "kind": "restaurant", "preparation": null},
+         "portion": {"kind": "serving_fraction", "amount": 0.5, "unit": "serving"}, "modifications": []}
+      ],
+      "expected_question": null,
+      "old_app": {"outcome": "lost_fraction", "logged_items_summary": "synthetic: whole burger logged for a half", "questions_asked": 2, "false_logged": true, "duplicate": false, "wrong_past_meal": false, "lost_fraction": true, "reasked_confirmed_item": false, "case_success": false},
+      "notes": "synthetic"
+    },
+    {
+      "id": "syn-smoothie-six-oz",
+      "category": "real_failure",
+      "failure_classes": ["reasked_confirmed_item", "no_log"],
+      "user_turns": ["One Berry Blast smoothie from Juice Hut", "yes but 6 oz instead of 12", "yes"],
+      "expected_action": "log",
+      "gold_items": [
+        {"identity": {"name": "Berry Blast Smoothie", "brand": "Juice Hut", "variant": "12 oz", "kind": "restaurant", "preparation": null},
+         "portion": {"kind": "volume", "amount": 6, "unit": "fl oz"}, "modifications": []}
+      ],
+      "expected_question": null,
+      "old_app": {"outcome": "reasked", "logged_items_summary": "synthetic: nothing logged, confirmation asked three times", "questions_asked": 3, "false_logged": false, "duplicate": false, "wrong_past_meal": false, "lost_fraction": false, "reasked_confirmed_item": true, "case_success": false},
+      "notes": "synthetic"
+    },
+    {
+      "id": "syn-last-time-bowl",
+      "category": "real_failure",
+      "failure_classes": ["wrong_past_meal"],
+      "user_turns": ["I had the teriyaki salmon bowl again, the one from last time"],
+      "expected_action": "recall_then_log",
+      "gold_items": [
+        {"identity": {"name": "Teriyaki Salmon Bowl", "brand": null, "variant": null, "kind": "history", "preparation": null},
+         "portion": {"kind": "serving_fraction", "amount": 1, "unit": "serving"}, "modifications": []}
+      ],
+      "expected_question": null,
+      "old_app": {"outcome": "wrong_food", "logged_items_summary": "synthetic: logged the newest unrelated entry", "questions_asked": 0, "false_logged": false, "duplicate": false, "wrong_past_meal": true, "lost_fraction": false, "reasked_confirmed_item": false, "case_success": false},
+      "notes": "synthetic"
+    },
+    {
+      "id": "syn-boiled-eggs-control",
+      "category": "control",
+      "failure_classes": [],
+      "user_turns": ["2 boiled eggs", "yes"],
+      "expected_action": "log",
+      "gold_items": [
+        {"identity": {"name": "Boiled Egg", "brand": null, "variant": null, "kind": "generic", "preparation": null},
+         "portion": {"kind": "count", "amount": 2, "unit": "egg"}, "modifications": []}
+      ],
+      "expected_question": null,
+      "old_app": {"outcome": "correct", "logged_items_summary": "synthetic: two boiled eggs", "questions_asked": 0, "false_logged": false, "duplicate": false, "wrong_past_meal": false, "lost_fraction": false, "reasked_confirmed_item": false, "case_success": true},
+      "notes": "synthetic"
+    }
+  ],
+  "scripts": {
+    "syn-half-burger": {
+      "turns": [
+        {"model": {"actions": [{"type": "add_items", "items": [
+          {"item_ref": null,
+           "identity": {"name": "Smokehouse Burger", "brand": "Harbor Grill", "variant": null, "kind": "restaurant", "preparation": null},
+           "portion": {"kind": "serving_fraction", "amount": 0.5, "unit": null, "text": "half of a"},
+           "modifications": []}]}]}},
+        {"model": {"actions": [{"type": "revise_item", "item_ref": "@open:1",
+          "identity": {"name": "Smokehouse Burger with Bacon", "brand": null, "variant": null, "kind": null, "preparation": null},
+          "clear_fields": [], "portion": null, "modifications": null}]}}
+      ],
+      "catalog": [
+        {"queries": ["Harbor Grill Smokehouse Burger"],
+         "row": {"name": "Smokehouse Burger", "brand": "Harbor Grill", "serving": "1 burger", "grams": 240, "kcal": 500, "p": 28, "c": 40, "f": 26, "fiber": 2}},
+        {"queries": ["Harbor Grill Smokehouse Burger with Bacon"],
+         "row": {"name": "Smokehouse Burger with Bacon", "brand": "Harbor Grill", "serving": "1 burger", "grams": 262, "kcal": 640, "p": 36, "c": 41, "f": 36, "fiber": 2}},
+        {"queries": ["Harbor Grill Double Smokehouse Burger with Bacon"],
+         "row": {"name": "Double Smokehouse Burger with Bacon", "brand": "Harbor Grill", "serving": "1 burger", "grams": 380, "kcal": 910, "p": 58, "c": 44, "f": 55, "fiber": 2}}
+      ],
+      "options": [],
+      "history": [],
+      "scoring": {"expected_entries": 1}
+    },
+    "syn-smoothie-six-oz": {
+      "turns": [
+        {"model": {"actions": [{"type": "add_items", "items": [
+          {"item_ref": null,
+           "identity": {"name": "Berry Blast Smoothie", "brand": "Juice Hut", "variant": null, "kind": "restaurant", "preparation": null},
+           "portion": {"kind": "count", "amount": 1, "unit": null, "text": "one"},
+           "modifications": []}]}]}},
+        {"model": {"actions": [{"type": "revise_item", "item_ref": "@open:1", "identity": null, "clear_fields": [],
+          "portion": {"kind": "mass", "amount": 6, "unit": "oz", "text": "6 oz instead of 12"}, "modifications": null}]}},
+        {"model": null}
+      ],
+      "catalog": [
+        {"queries": ["Juice Hut Berry Blast Smoothie"],
+         "row": {"name": "Berry Blast Smoothie - 12oz", "brand": "Juice Hut", "serving": "12 fl oz", "grams": 340, "kcal": 340, "p": 5, "c": 78, "f": 1, "fiber": 4}}
+      ],
+      "options": [],
+      "history": [],
+      "scoring": {"expected_entries": 1}
+    },
+    "syn-last-time-bowl": {
+      "turns": [
+        {"model": {"actions": [{"type": "recall_meal", "query": "teriyaki salmon bowl", "when_hint": "last time"}]}}
+      ],
+      "catalog": [],
+      "options": [],
+      "history": [
+        {"name": "Teriyaki Salmon Bowl", "days_ago": 3, "kcal": 640, "p": 38, "c": 70, "f": 22, "fiber": 6, "source": "Synthetic menu", "target": true},
+        {"name": "Two Pancake Stack", "days_ago": 0, "kcal": 450, "p": 10, "c": 80, "f": 9, "fiber": 2, "source": "Synthetic menu"}
+      ],
+      "scoring": {"expected_entries": 1}
+    },
+    "syn-boiled-eggs-control": {
+      "turns": [
+        {"model": {"actions": [{"type": "add_items", "items": [
+          {"item_ref": null,
+           "identity": {"name": "egg", "brand": null, "variant": null, "kind": "generic", "preparation": "boiled"},
+           "portion": {"kind": "count", "amount": 2, "unit": null, "text": "2"},
+           "modifications": []}]}]}},
+        {"model": null}
+      ],
+      "catalog": [
+        {"queries": ["boiled egg"],
+         "row": {"name": "Boiled Egg", "brand": "", "serving": "1 large egg", "grams": 50, "kcal": 78, "p": 6.3, "c": 0.6, "f": 5.3, "fiber": 0}}
+      ],
+      "options": [],
+      "history": [],
+      "scoring": {"expected_entries": 1}
+    }
+  }
+}

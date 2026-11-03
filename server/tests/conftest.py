@@ -6,6 +6,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 
+def pytest_addoption(parser):
+    parser.addoption("--food-agent-bench-dir", action="store", default="",
+                     help="directory holding the private bench labels.json and scripts.json "
+                          "(alternative to FOOD_AGENT_BENCH_DIR)")
+
+
 @pytest.fixture(autouse=True)
 def _isolate_lookup_caches(monkeypatch):
     """Process-local lookup memory (provider search hits, web positive/negative

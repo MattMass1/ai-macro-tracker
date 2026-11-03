@@ -80,6 +80,30 @@ class DraftInputError(ValueError):
     """The model sent an edit the server cannot apply. Nothing changed."""
 
 
+# The food agent (server/src/food_agent) keeps its drafts in the same tables and
+# marks every item: resolution {"food_agent": <schema>, ...} and field_origins
+# {"source": "food_agent"}. Those drafts commit only on the user's own yes to a
+# bound preview, so this engine never shows, edits, settles or commits them.
+FOOD_AGENT_MARKER = "food_agent"
+FOOD_AGENT_REFUSAL = {"status": "conflict", "confirmation": "I can't change that meal here, so nothing changed."}
+
+
+def is_food_agent_draft(draft: Mapping[str, Any] | None) -> bool:
+    """Whether any item of a stored draft row carries the food agent's marker."""
+    for item in (draft or {}).get("items") or []:
+        resolution = item.get("resolution")
+        if isinstance(resolution, str):
+            try:
+                resolution = json.loads(resolution)
+            except ValueError:
+                resolution = None
+        origins = item.get("field_origins")
+        if ((isinstance(resolution, Mapping) and FOOD_AGENT_MARKER in resolution)
+                or (isinstance(origins, Mapping) and origins.get("source") == FOOD_AGENT_MARKER)):
+            return True
+    return False
+
+
 def _fingerprint(resolution: Mapping[str, Any]) -> str:
     material = {k: resolution.get(k) for k in (*MACROS, "macro_source")}
     return hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()[:16]
@@ -271,8 +295,8 @@ class MealDrafts:
                               for item in draft["items"] if item["status"] == "included"],
                     **self._not_counted_brief(draft),
                     **({"question": draft["pending_question"]} if draft.get("pending_question") else {})}
-        return {"open_meals": [brief(d) for d in found["open"]],
-                "logged_meals": [brief(d) for d in found["committed"]]}
+        return {"open_meals": [brief(d) for d in found["open"] if not is_food_agent_draft(d)],
+                "logged_meals": [brief(d) for d in found["committed"] if not is_food_agent_draft(d)]}
 
     # ------------------------------------------------------------------ #
     # The one tool
@@ -401,11 +425,15 @@ class MealDrafts:
             draft = await self.store.fetch_meal_draft(str(args["draft_ref"]))
             if draft is None:
                 return {"status": "not_found", "confirmation": "I couldn't find that meal. Tell me what you ate."}
+            if is_food_agent_draft(draft):
+                return dict(FOOD_AGENT_REFUSAL)
             return draft
         source_ref = args.get("amend_ref") or args.get("repeat_ref")
         source = None
         if source_ref:
             source = await self.store.fetch_meal_draft(str(source_ref))
+            if is_food_agent_draft(source):
+                return dict(FOOD_AGENT_REFUSAL)
             if source is None or source["state"] != "committed":
                 return {"status": "not_found", "confirmation": "I couldn't find that logged meal."}
         intent = args.get("intent") or (source["intent"] if source else "consume")

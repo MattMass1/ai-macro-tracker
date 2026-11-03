@@ -4410,12 +4410,41 @@ async def _draft_unresolved_question(description: str) -> str:
     return _unresolved_food_question(description, await _closest_food_options(description))
 
 
+async def _food_agent_engine():
+    """The food agent when released for this user, else None (the old canvas path).
+
+    Fails closed: the operator switch and optional canary list
+    (``release_gates.food_agent_allowed``) are checked first, so with the gate
+    off nothing is read or built. Then the live 004 draft schema must exist,
+    and every food agent module (including ``food_agent.recall``) must import.
+    """
+    if not release_gates.food_agent_allowed():
+        return None
+    client = store_client()
+    try:
+        if not await client.meal_drafts_ready():
+            return None
+    except Exception:
+        logger.exception("Food agent readiness check failed; using the existing canvas path")
+        return None
+    try:
+        from food_agent.coordinator import FoodAgent
+        from food_agent.drafts import StoreDrafts
+        from food_agent.find_food import FoodFinder
+        from food_agent.model_adapter import ModelInterpreter
+        from food_agent.recall import HistoryRecaller
+    except ImportError:
+        logger.exception("Food agent modules unavailable; using the existing canvas path")
+        return None
+    return FoodAgent(StoreDrafts(client), ModelInterpreter(), FoodFinder(), HistoryRecaller(client))
+
+
 def canvas_service() -> CanvasService:
     global _canvas_service
     if _canvas_service is None:
         _canvas_service = CanvasService(store_factory=store_client,
             food_factory=_voice_tool_handlers, coach_factory=lambda: _coach_tool_handlers(canvas=True),
-            drafts_factory=_meal_drafts_engine)
+            drafts_factory=_meal_drafts_engine, food_agent_factory=_food_agent_engine)
     return _canvas_service
 
 

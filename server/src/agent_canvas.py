@@ -13,6 +13,7 @@ from typing import Any
 import time
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 from collections import OrderedDict
@@ -393,12 +394,15 @@ class CanvasService:
     by an action; no automatic retry is made after an uncertain write.
     """
     def __init__(self, *, store_factory, food_factory, coach_factory, agent=run_agent,
-                 drafts_factory=None):
+                 drafts_factory=None, food_agent_factory=None):
         self.store_factory = store_factory
         self.food_factory = food_factory
         # Async factory returning a MealDrafts engine when durable drafts are
         # released for this user, else None (legacy log_meal path).
         self.drafts_factory = drafts_factory
+        # Factory (sync or async) returning a food_agent FoodAgent when it is
+        # released for this user, else None: then turn() is the old path only.
+        self.food_agent_factory = food_agent_factory
         self.coach_factory = coach_factory
         self.agent = agent
         self.sessions: OrderedDict = OrderedDict()
@@ -652,6 +656,74 @@ class CanvasService:
             raise ValueError("This plan exceeds the native preview limit. Use the standard workout plan screen.")
         return rows
 
+    async def _food_agent(self):
+        """The released food agent, or None. A failing factory is the old path."""
+        try:
+            agent = self.food_agent_factory()
+            if inspect.isawaitable(agent):
+                agent = await agent
+        except Exception as exc:
+            logging.getLogger("agent_canvas").warning(
+                "food agent factory failed; using the existing path: %s", type(exc).__name__)
+            return None
+        return agent
+
+    @staticmethod
+    async def _food_agent_turn(agent, session_id, turn_id, message):
+        try:
+            return await agent.turn(message, session_ref=f"canvas:{session_id}", turn_ref=turn_id)
+        except Exception as exc:
+            # Never hand a food message to the old write path after an
+            # unexpected failure: the outcome is unknown, so say so.
+            logging.getLogger("agent_canvas").warning("food agent turn failed: %s", type(exc).__name__)
+            from food_agent.coordinator import FoodTurnResult
+            from food_agent.contracts import ToolOutcome
+            text = "Something went wrong on my side. Check Today before you log that again."
+            return FoodTurnResult(reply=text, handed_off=False, preview=None, receipt=None,
+                                  outcome=ToolOutcome(status="error", effect="unknown", safe_message=text))
+
+    async def _food_agent_reply(self, session, store, outcome, receipt_before):
+        """Present a food-agent turn with the existing surfaces and persist its reply.
+
+        A verified receipt (built from the saved row) is a MealReceipt; a
+        preview, question or unverified outcome is a FoodClarification; any
+        other reply is an AgentMessage. Same snapshot shape as the old path.
+        """
+        reply = str(outcome.reply or "").strip() or "I couldn't prepare a useful answer."
+        receipt = outcome.receipt
+        verified = receipt is not None and receipt.verified
+        question_open = (outcome.preview is not None or bool(outcome.question)
+                         or outcome.outcome.status in {"needs_detail", "conflict", "error", "unknown"})
+        task = session.canvas.surfaces.get("task")
+        food_task = bool(task) and all(item["component"] == "FoodClarification" for item in task["components"])
+        if verified:
+            if food_task and not question_open:
+                session.canvas.dismiss("task")
+            session.receipt = {"operationId": f"meal-draft:{outcome.draft_id or receipt.entry_id}",
+                               "recordId": str(receipt.entry_id), "label": str(receipt.name)[:240]}
+            session.canvas.present("receipt", "transient", [{
+                "id": "meal-receipt", "component": "MealReceipt", "text": reply[:1000],
+            }])
+        if question_open:
+            session.canvas.present("task", "task", [{
+                "id": "food-clarification", "component": "FoodClarification", "text": reply[:1000],
+            }])
+        elif not verified:
+            if food_task:
+                session.canvas.dismiss("task")
+            session.canvas.present("message", "task", [{
+                "id": "agent-message", "component": "AgentMessage", "text": reply[:1000],
+            }])
+        stored_reply = await store.insert_chat_message("assistant", reply)
+        if (_fresh_context_enabled() and session.receipt is not receipt_before and not question_open
+                and isinstance(stored_reply, Mapping) and stored_reply.get("created_at") is not None):
+            # Same rule as the old path: a logged meal with nothing left open
+            # starts the next turn's coach history fresh.
+            session.context_start = stored_reply["created_at"]
+        if session.setup_incomplete:
+            await self._sync_setup(session)
+        return {**session.snapshot(), "reply": reply[:1000]}
+
     async def turn(self, session_id, turn_id, message, *, adapter):
         if adapter not in {"text", "voice"}:
             raise ValueError("Unknown input adapter")
@@ -680,6 +752,18 @@ class CanvasService:
                 history = _history_after(history, session.context_start)
             receipt_before = session.receipt
             await store.insert_user_chat_message(message, daily_cap=50)
+            # Food agent (gated). None: the old path below runs as before. A
+            # food turn ends here; a non-food turn falls through unchanged,
+            # carrying only an optional reconcile notice for the reply.
+            food_turn = None
+            food_agent = await self._food_agent() if self.food_agent_factory is not None else None
+            if food_agent is not None:
+                food_turn = await self._food_agent_turn(food_agent, session_id, turn_id, message)
+                if not food_turn.handed_off:
+                    result = await self._food_agent_reply(session, store, food_turn, receipt_before)
+                    session.turns[turn_id] = (digest, deepcopy(result))
+                    session.replay_bytes += len(json.dumps(result).encode())
+                    return result
             foods = self.food_factory()
             drafts = await self.drafts_factory() if self.drafts_factory is not None else None
             last_food_result = None
@@ -1109,6 +1193,9 @@ class CanvasService:
                 (last_food_result or {}).get("confirmation")
                 or "I couldn't prepare a useful answer."
             )
+            if food_turn is not None and food_turn.reply:
+                # The food agent reconciled an earlier unverified save first.
+                reply = f"{food_turn.reply} {reply}"
             stored_reply = await store.insert_chat_message("assistant", reply)
             task = session.canvas.surfaces.get("task")
             question_open = (bool(task) and any(

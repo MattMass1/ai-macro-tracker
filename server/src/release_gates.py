@@ -111,6 +111,34 @@ def meal_drafts_allowed() -> bool:
         return False
 
 
+FOOD_AGENT_FLAG = "FOOD_AGENT_ENABLED"
+FOOD_AGENT_USERS_FLAG = "FOOD_AGENT_USER_IDS"
+
+
+def food_agent_allowed() -> bool:
+    """Operator switch (+ optional canary list) for the food agent.
+
+    Same semantics as :func:`meal_drafts_allowed`: only the exact value
+    ``true`` (any case, surrounding space ignored) opens it, an empty list
+    means every user, a malformed list allows nobody, and a list with no
+    bound user is closed. The live 004 schema check lives in the server
+    factory.
+    """
+    if os.environ.get(FOOD_AGENT_FLAG, "").strip().casefold() != "true":
+        return False
+    raw = os.environ.get(FOOD_AGENT_USERS_FLAG, "").strip()
+    if not raw:
+        return True
+    try:
+        allowed = {UUID(part.strip()) for part in raw.split(",") if part.strip()}
+    except ValueError:
+        return False
+    try:
+        return current_user_id() in allowed
+    except RuntimeError:
+        return False
+
+
 def gate_status() -> dict[str, bool]:
     """Non-secret gate state for diagnostics and tests."""
     return {

@@ -383,6 +383,78 @@ def test_review_r2b_unit_comes_from_the_head_noun_and_whole_items_never_become_s
                         _ident("chocolate chip cookies")) == Decimal("2")
 
 
+def test_review_c1_count_in_a_different_unit_than_a_one_unit_serving():
+    """Review re-check 3, C-1: a count against a one-unit serving must respect the
+    user's unit: use the serving's stated piece count, or ask. Never mis-scale."""
+    pizza = p.parse_serving_text("1 pizza (8 slices)")
+    assert p.multiplier(_p("count", 2, text="2 slices"), pizza, _ident("pepperoni pizza")) == Decimal("0.25")
+    assert p.multiplier(_p("count", 2, text="2 slices"), pizza) == Decimal("0.25")
+    assert p.multiplier(_p("count", 2, text="2"), pizza, _ident("pizza slices")) == Decimal("0.25")
+    assert p.multiplier(_p("count", 1, text="1"), pizza, _ident("pepperoni pizza")) == Decimal("1")
+    meal = p.parse_serving_text("1 serving (6 pieces)")
+    assert p.multiplier(_p("count", 6, text="6 nuggets"), meal) == Decimal("1")
+    assert p.multiplier(_p("count", 6, text="6"), meal, _ident("Chicken McNuggets")) == Decimal("1")
+    assert p.multiplier(_p("count", 3, text="3 nuggets"), meal) == Decimal("0.5")
+    loaf = p.parse_serving_text("1 loaf")
+    assert p.multiplier(_p("count", 2, text="2 slices"), loaf, _ident("bread")) is None
+    assert p.multiplier(_p("count", 2, text="2"), loaf, _ident("sourdough bread")) is None
+    assert p.multiplier(_p("count", 2, text="2"), p.parse_serving_text("1 pizza"),
+                        _ident("slice of pepperoni pizza")) is None
+    assert p.multiplier(_p("count", 1, text="1 bar"), p.parse_serving_text("1 serving (6 pieces)")) is None
+    # Nit: string cheese is not slices.
+    assert p.multiplier(_p("count", 1, text="1"), p.parse_serving_text("2 slices"), _ident("string cheese")) is None
+    assert p.multiplier(_p("count", 1, text="1 string cheese"), p.parse_serving_text("2 slices"),
+                        _ident("string cheese")) is None
+
+
+def test_bench_piece_is_the_serving_unit_for_a_countable_serving():
+    """Bench regressions after C-1 (synthetic wording): "1 piece" of toast against a
+    "1 slice" serving is one slice; "2 pieces" of bacon against "1 slice" is 2."""
+    toast_serving = p.parse_serving_text("1 slice (40 g)")
+    assert p.multiplier(_p("count", 1, text="1 piece"), toast_serving, _ident("rye toast")) == Decimal("1")
+    assert p.multiplier(_p("count", 1, text="1 piece"), toast_serving,
+                        _ident("rye toast", kind="homemade")) == Decimal("1")
+    assert p.multiplier(_p("count", 2, text="2 pcs"), toast_serving, _ident("rye toast")) == Decimal("2")
+    bacon_serving = p.parse_serving_text("1 slice (10 g)")
+    assert p.multiplier(_p("count", 2, text="2 pieces"), bacon_serving, _ident("bacon")) == Decimal("2")
+    assert p.multiplier(_p("count", 2, text="2"), bacon_serving, _ident("bacon")) == Decimal("2")
+    assert p.multiplier(_p("count", 3, text="3"), p.parse_serving_text("1 large egg (50 g)"),
+                        _ident("egg")) == Decimal("3")
+    assert p.multiplier(_p("count", 1, text="an"), p.parse_serving_text("1 muffin (57 g)"),
+                        _ident("English muffin")) == Decimal("1")
+    assert p.multiplier(_p("count", 2, text="2 pieces"), p.parse_serving_text("1 bar (40 g)"),
+                        _ident("protein bar")) == Decimal("2")
+    # Halves are half a unit, only when the words say so.
+    assert p.multiplier(_p("count", 2, text="2 bacon halves"), bacon_serving, _ident("bacon")) == Decimal("1")
+    # Not when the serving states its own pieces in another unit, or is a container.
+    assert p.multiplier(_p("count", 2, text="2 pieces"), p.parse_serving_text("1 pizza (8 slices)"),
+                        _ident("pepperoni pizza")) is None
+    assert p.multiplier(_p("count", 2, text="2 pieces"), p.parse_serving_text("1 serving (28 g)"),
+                        _ident("bacon")) is None
+    # C-1 still holds.
+    assert p.multiplier(_p("count", 2, text="2 slices"), p.parse_serving_text("1 pizza (8 slices)")) \
+        == Decimal("0.25")
+    assert p.multiplier(_p("count", 2, text="2 slices"), p.parse_serving_text("1 loaf"), _ident("bread")) is None
+    assert p.multiplier(_p("count", 1, text="1"), p.parse_serving_text("2 slices"), _ident("string cheese")) is None
+
+
+def test_review_c1_one_unit_serving_wins_still_hold():
+    sandwich = p.parse_serving_text("1 sandwich (215 g)")
+    big_mac = _ident("Big Mac", kind="restaurant")
+    assert p.multiplier(_p("count", 1, text="1"), sandwich, big_mac) == Decimal("1")
+    assert p.multiplier(_p("count", 2, text="2 Big Macs"), sandwich, big_mac) == Decimal("2")
+    assert p.multiplier(_p("count", 2, text="2"), sandwich) == Decimal("2")
+    assert p.multiplier(_p("count", 1, text="1 bar"), p.parse_serving_text("1 bar (40 g)"),
+                        _ident("protein bar")) == Decimal("1")
+    assert p.multiplier(_p("count", 2, text="2 bacon"), p.parse_serving_text("1 slice (8 g)"),
+                        _ident("bacon")) == Decimal("2")
+    assert p.multiplier(_p("count", 2, text="2"), p.parse_serving_text("1 bowl"),
+                        _ident("poke bowl")) == Decimal("2")
+    assert p.multiplier(_p("count", 2, text="2"), EGG, _ident("eggs")) == Decimal("2")
+    assert p.multiplier(_p("count", 2, text="2 wings"), p.parse_serving_text("6 wings"),
+                        _ident("buffalo wings")) == Decimal("0.3333")
+
+
 def test_mass_vs_volume_without_density_is_none():
     assert p.multiplier(_p("mass", 100, "g"), p.parse_serving_text("12 fl oz")) is None
     assert p.multiplier(_p("volume", 1, "cup"), p.parse_serving_text("12 oz")) is None

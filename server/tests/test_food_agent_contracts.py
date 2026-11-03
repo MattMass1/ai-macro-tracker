@@ -352,6 +352,37 @@ def test_review_r2_still_asks_when_the_unit_really_differs_or_is_unknown():
     assert p.multiplier(_p("count", 3, text="three"), p.parse_serving_text("2 slices"), _ident("apple")) is None
 
 
+def test_review_r2b_unit_comes_from_the_head_noun_and_whole_items_never_become_slices():
+    """Review re-check 2, R2-b: a slice word anywhere in the name must not turn a
+    whole pizza or sandwich into slices. Only the head noun gives the unit."""
+    slices = p.parse_serving_text("2 slices (60 g)")
+    pieces = p.parse_serving_text("10 pieces")
+    assert p.multiplier(_p("count", 1, text="1"), slices, _ident("pepperoni pizza")) is None
+    assert p.multiplier(_p("count", 2, text="2"), slices, _ident("toast sandwich")) is None
+    assert p.multiplier(_p("count", 1, text="1"), slices, _ident("cheese pizza")) is None
+    assert p.multiplier(_p("count", 1, text="1"), slices, _ident("ham and cheese sandwich")) is None
+    assert p.multiplier(_p("count", 2, text="2"), slices, _ident("bacon burger")) is None
+    assert p.multiplier(_p("count", 1, text="1"), slices, _ident("flatbread")) is None
+    assert p.multiplier(_p("count", 2, text="2"), pieces, _ident("chicken nugget wrap")) is None
+    assert p.multiplier(_p("count", 2, text="2"), pieces, _ident("nugget bowl")) is None
+    assert p.multiplier(_p("count", 1, text="1 box"), pieces, _ident("Chicken McNuggets")) is None
+    # The head noun is the unit: these keep working.
+    assert p.multiplier(_p("count", 3, text="3"), slices, _ident("slice of pepperoni pizza")) == Decimal("1.5")
+    assert p.multiplier(_p("count", 3, text="3"), slices, _ident("pizza slices")) == Decimal("1.5")
+    assert p.multiplier(_p("count", 4, text="4"), slices, _ident("sourdough toast")) == Decimal("2")
+    assert p.multiplier(_p("count", 3, text="three"), slices, _ident("turkey bacon")) == Decimal("1.5")
+    assert p.multiplier(_p("count", 2, text="2"), p.parse_serving_text("2 large eggs"), _ident("eggs")) \
+        == Decimal("1")
+    assert p.multiplier(_p("count", 6, text="6"), p.parse_serving_text("4 pieces"),
+                        _ident("Chicken McNuggets")) == Decimal("1.5")
+    assert p.multiplier(_p("count", 9, text="9"), p.parse_serving_text("6 wings"),
+                        _ident("buffalo wings")) == Decimal("1.5")
+    assert p.multiplier(_p("count", 6, text="6"), p.parse_serving_text("4 pieces"),
+                        _ident("boneless wings")) == Decimal("1.5")
+    assert p.multiplier(_p("count", 6, text="6"), p.parse_serving_text("3 cookies (28 g)"),
+                        _ident("chocolate chip cookies")) == Decimal("2")
+
+
 def test_mass_vs_volume_without_density_is_none():
     assert p.multiplier(_p("mass", 100, "g"), p.parse_serving_text("12 fl oz")) is None
     assert p.multiplier(_p("volume", 1, "cup"), p.parse_serving_text("12 oz")) is None

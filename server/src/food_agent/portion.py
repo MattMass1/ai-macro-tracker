@@ -219,8 +219,30 @@ _UNIT_EQUIVALENTS: dict[str, frozenset[str]] = {
 # Foods counted in a unit by default, used only when the user's words carry no
 # unit ("three" bacon against a "2 slices" serving).
 _NATURAL_UNIT: dict[str, frozenset[str]] = {
-    "slice": frozenset({"bacon", "bread", "toast", "pizza", "cheese", "ham", "turkey", "salami", "pepperoni"}),
+    "slice": frozenset({"bacon", "bread", "toast", "cheese", "ham", "turkey", "salami", "pepperoni"}),
 }
+# Whole items: a count of these is whole items, never slices or pieces.
+_WHOLE_ITEMS = frozenset({
+    "pizza", "sandwich", "burger", "cheeseburger", "hamburger", "wrap", "bowl", "sub", "hoagie", "burrito",
+    "quesadilla", "flatbread", "pita", "bagel", "muffin", "bun", "roll", "panini", "melt", "calzone",
+    "salad", "plate", "platter", "meal", "combo", "box", "whopper", "pie", "cake", "loaf",
+})
+_HEAD_CUT = re.compile(r"\s(?:with|w/|in|on|over|topped)\s", re.IGNORECASE)
+_COMBINATION = re.compile(r"\band\b|&|,", re.IGNORECASE)
+
+
+def _head_noun(name: str) -> str | None:
+    """The head noun of a food name: the last noun, or the noun before "of".
+
+    "pepperoni pizza" -> pizza; "toast sandwich" -> sandwich; "slice of pizza"
+    -> slice; "burger with bacon" -> burger; "Chicken McNuggets" -> mcnugget.
+    """
+    text = _PAREN.sub(" ", name.lower())
+    text = _HEAD_CUT.split(f" {text} ", maxsplit=1)[0]
+    if " of " in text:
+        text = text.split(" of ", 1)[0]
+    words = [_stem(word) for word in re.findall(r"[a-z]+", text) if word not in _NOUN_IGNORE]
+    return words[-1] if words else None
 # Words that count a container, not a unit: "1 box" of a "10 pieces" serving is unclear.
 _CONTAINERS = frozenset({"box", "pack", "package", "packet", "bag", "order", "meal", "combo", "serving",
                          "container", "carton", "bowl", "plate", "tray", "bucket", "sleeve", "tub"})
@@ -243,9 +265,11 @@ def _same_count_unit(user_text: str | None, serving_noun: str | None, amount: De
     """True when the user's count is in the serving's own unit ("4 pieces" vs "10 pieces").
 
     The user's own words decide when they name a unit. When they are just a
-    number ("2"), the unit comes from the food's name ("eggs", "bacon slices",
-    "McNuggets"); a name that states a pack size ("10 piece") is the pack, not
-    the unit, and a bare "1" of a piece food (one McNugget?) stays unclear.
+    number ("2"), the unit comes from the HEAD noun of the food's name only
+    ("eggs", "bacon slices", "McNuggets"). A whole item ("pepperoni pizza",
+    "toast sandwich") is never slices or pieces; a name that states a pack size
+    ("10 piece") is the pack, not the unit; a bare "1" of a piece food (one
+    McNugget?) stays unclear.
     """
     serving = _canonical_units(_noun_tokens(serving_noun))
     if not serving:
@@ -260,13 +284,14 @@ def _same_count_unit(user_text: str | None, serving_noun: str | None, amount: De
     named = " ".join(part for part in (identity.name, identity.variant) if part)
     if re.search(r"\d", named):
         return False
-    name_tokens = _noun_tokens(named)
-    if name_tokens & _CONTAINERS:
+    if _noun_tokens(named) & _CONTAINERS:
         return False
-    units = _canonical_units(name_tokens)
-    for unit, foods in _NATURAL_UNIT.items():
-        if any(_member(token, foods) for token in name_tokens):
-            units.add(unit)
+    head = _head_noun(identity.name)
+    if head is None or _member(head, _WHOLE_ITEMS):
+        return False
+    units = _canonical_units({head})
+    if not _COMBINATION.search(identity.name):  # "bacon, egg and cheese" is a sandwich, not slices
+        units |= {unit for unit, foods in _NATURAL_UNIT.items() if _member(head, foods)}
     matched = serving & units
     if not matched:
         return False

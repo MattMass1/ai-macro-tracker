@@ -1269,6 +1269,40 @@ class Store:
             return None
         return {**meal(row), "entry_revision": int(row["entry_revision"]), "macro_source": row["macro_source"]}
 
+    async def search_own_entries(self, terms: list[str] | tuple[str, ...], *, since: date,
+                                 until: date | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        """Read-only: the CURRENT user's nutrition entries whose name or
+        component_metadata text contains ANY of ``terms`` (case-insensitive,
+        literal substrings), with ``since <= day <= until``, newest first.
+
+        A coarse prefilter for the food agent's history recall; the caller does
+        the real food-word matching. Owner-scoped by ``current_user_id()`` only.
+        No index: per-user volume over a bounded window is small.
+        """
+        patterns = []
+        for term in terms:
+            text = str(term).strip().casefold()[:40]
+            if text:
+                escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                patterns.append(f"%{escaped}%")
+        if not patterns:
+            return []
+        pool = await self.connect(); user_id = current_user_id()
+        rows = await pool.fetch(
+            "SELECT id,name,meal,calories,protein,carbs,fat,fiber,day,created_at,macro_source,"
+            "entry_revision,component_metadata FROM nutrition_entries "
+            "WHERE user_id=$1 AND day >= $2 AND ($3::date IS NULL OR day <= $3) "
+            "AND (name ILIKE ANY($4::text[]) OR component_metadata::text ILIKE ANY($4::text[])) "
+            "ORDER BY day DESC, created_at DESC, id LIMIT $5",
+            user_id, since, until, patterns[:12], max(1, min(int(limit), 500)))
+        out = []
+        for row in rows:
+            data = _dict(row) or {}
+            metadata = data.get("component_metadata")
+            data["component_metadata"] = json.loads(metadata) if isinstance(metadata, str) else metadata
+            out.append(data)
+        return out
+
     async def resolve_usual(self, phrase: str) -> dict[str, Any] | None:
         """The user's private saved usual for a phrase: structured or legacy."""
         pool = await self.connect(); user_id = current_user_id()

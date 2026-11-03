@@ -605,6 +605,77 @@ async def test_model_outage_hands_off_when_nothing_is_open_but_not_when_a_draft_
     assert drafts.entries == {}
 
 
+class FlakyClearDrafts(MemoryDrafts):
+    """save() fails when clearing a binding (review R-1 probe)."""
+
+    fail_clear: int = 0
+
+    async def save(self, draft, expected_revision):
+        if self.fail_clear and draft.pending is None and draft.state == "collecting":
+            self.fail_clear -= 1
+            raise ConnectionError("simulated: DB write failed while clearing a binding")
+        return await super().save(draft, expected_revision)
+
+
+async def test_r1_failed_binding_clear_then_yes_never_logs_the_earlier_preview():
+    clock = Clock()
+    drafts, script = FlakyClearDrafts(clock=clock), Script()
+    agent = FoodAgent(drafts, script, Finder(), None, clock)
+    script.push(HALF_QP)
+    await _say(agent, "half a quarter pounder")
+    drafts.fail_clear = 1
+    script.push({"type": "ask", "question": "Did you have any sauce with it?"})
+    asked = await _say(agent, "what about the sauce")
+    assert asked.reply == "Did you have any sauce with it?"
+    (row,) = drafts.drafts.values()
+    assert (row["pending_question"] or "").startswith("{")  # the clear really failed
+    script.push({"type": "ask", "question": "Which sauce?"})
+    yes = await _say(agent, "yes")
+    assert drafts.entries == {} and drafts.commit_calls == [] and yes.receipt is None
+
+
+async def test_r1_exception_mid_turn_still_leaves_no_confirmable_stale_preview(rig, monkeypatch):
+    agent, drafts, script, _, _ = rig
+    script.push(HALF_QP)
+    await _say(agent, "half a quarter pounder")
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("unexpected bug while editing")
+    monkeypatch.setattr(agent, "_edit", boom)
+    script.push(add((_ident("Toast"), _portion())))
+    with pytest.raises(RuntimeError):
+        await _say(agent, "and a coke")
+    (row,) = drafts.drafts.values()
+    assert row["pending_question"] is None  # cleared in a finally
+    monkeypatch.undo()
+    script.push({"type": "ask", "question": "Anything else?"})
+    yes = await _say(agent, "yes")
+    assert drafts.entries == {} and yes.receipt is None
+
+
+async def test_r1_marker_write_failure_fails_closed(rig):
+    agent, drafts, script, _, _ = rig
+    script.push(HALF_QP)
+    await _say(agent, "half a quarter pounder")
+    drafts.fail_marks = 1
+    result = await _say(agent, "what about the sauce")  # interpreter is never reached
+    assert result.outcome.status == "error" and "nothing changed" in result.reply.casefold()
+    assert len(script.calls) == 1 and drafts.entries == {}
+
+
+async def test_r2_bare_count_of_eggs_against_a_two_egg_serving_is_one_serving_without_a_question(rig, monkeypatch):
+    agent, drafts, script, _, _ = rig
+    two_eggs = _food("fs-2eggs", "Eggs, whole, large", "2 large eggs", protein=12, calories=140, carbs=1,
+                     fat=10, fiber=0)
+    monkeypatch.setitem(CATALOG, "eggs", two_eggs)
+    script.push(add((_ident("Eggs"), _portion("count", 2, text="2"))))
+    result = await _say(agent, "2 eggs")
+    assert result.question is None and result.preview is not None
+    assert result.preview.totals.calories == 140.0
+    (row,) = drafts.drafts.values()
+    assert row["items"][0]["resolution"]["state"]["multiplier"] == 1.0
+
+
 class NoHistory:
     def __init__(self, status="not_found"):
         self.status = status

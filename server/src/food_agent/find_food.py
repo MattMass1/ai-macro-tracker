@@ -518,7 +518,7 @@ class FoodFinder:
             amount = _squash(portion.text) or f"{portion.amount:g} {portion.unit}"
             return FindResult("needs_detail", None, note=note, question=_one_question(
                 f"Was the {amount} of {_clean_name(identity.name)} weighed raw or cooked?"))
-        if portion_math.multiplier(portion, food.serving_basis) is None:
+        if portion_math.multiplier(portion, food.serving_basis, identity) is None:
             return FindResult("needs_detail", food, note=note,
                               question=_amount_question(food, portion))
         return FindResult("matched", food, note=note)

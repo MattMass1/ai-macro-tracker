@@ -35,6 +35,7 @@ from food_agent.contracts import (NUTRIENT_KEYS, PENDING_QUESTION_MAX, SCHEMA_VE
 OPEN_STATES = ("collecting", "needs_detail", "ready")
 AGENT_MARKER = "food_agent"
 ACK_PREFIX = "food-agent-ack"
+SEEN_PREFIX = "food-agent-seen"
 
 
 class DraftCommitConflict(RuntimeError):
@@ -56,6 +57,16 @@ def op_key(draft_id: str, revision: int) -> str:
 
 def ack_key(draft_id: str, revision: int) -> str:
     return f"{ACK_PREFIX}:{draft_id}:{int(revision)}"
+
+
+def seen_key(draft_id: str, revision: int) -> str:
+    """Marker: a user turn has come AFTER this preview revision was shown, so it is not the
+    last thing shown any more. Insert-only and durable: a bare yes can never confirm it."""
+    return f"{SEEN_PREFIX}:{str(draft_id).lower()}:{int(revision)}"
+
+
+def _key_hash(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
 
 
 class CommitIntent(BaseModel):
@@ -343,6 +354,8 @@ class DraftPort(Protocol):
     async def fetch_operation(self, key: str) -> dict[str, Any] | None: ...
     async def acknowledge(self, draft_id: str, revision: int, request_hash: str, entry_id: str) -> None: ...
     async def is_acknowledged(self, draft_id: str, revision: int) -> bool: ...
+    async def mark_seen(self, draft_id: str, revision: int) -> None: ...
+    async def is_seen(self, draft_id: str, revision: int) -> bool: ...
     async def unknown_nutrients_writable(self) -> bool: ...
 
 
@@ -396,6 +409,16 @@ class StoreDrafts:
     async def is_acknowledged(self, draft_id, revision) -> bool:
         return await self.store.fetch_operation(ack_key(draft_id, revision)) is not None
 
+    async def mark_seen(self, draft_id, revision) -> None:
+        key = seen_key(draft_id, revision)
+
+        async def write(_conn):
+            return {"seen": True}
+        await self.store.run_idempotent(key, _key_hash(key), write)
+
+    async def is_seen(self, draft_id, revision) -> bool:
+        return await self.store.fetch_operation(seen_key(draft_id, revision)) is not None
+
     async def unknown_nutrients_writable(self) -> bool:
         from release_gates import calorie_only_write_allowed
         return calorie_only_write_allowed() and await self.store.nullable_nutrients_ready()
@@ -419,6 +442,7 @@ class MemoryDrafts:
     fail_before_commit: int = 0
     fail_after_commit: int = 0
     readback_fails: int = 0
+    fail_marks: int = 0
     limit: int = 8
 
     def _row(self, draft_id: str) -> dict[str, Any] | None:
@@ -522,12 +546,22 @@ class MemoryDrafts:
     async def is_acknowledged(self, draft_id, revision):
         return ack_key(draft_id, revision) in self.ops
 
+    async def mark_seen(self, draft_id, revision):
+        if self.fail_marks:
+            self.fail_marks -= 1
+            raise ConnectionError("simulated: seen-marker write failed")
+        key = seen_key(draft_id, revision)
+        self.ops.setdefault(key, (_key_hash(key), {"seen": True}))
+
+    async def is_seen(self, draft_id, revision):
+        return seen_key(draft_id, revision) in self.ops
+
     async def unknown_nutrients_writable(self):
         return self.unknown_writable
 
 
 __all__ = [
-    "OPEN_STATES", "DraftCommitConflict", "DraftCommitBlocked", "DraftNotReady", "op_key", "ack_key",
+    "OPEN_STATES", "DraftCommitConflict", "DraftCommitBlocked", "DraftNotReady", "op_key", "ack_key", "seen_key",
     "CommitIntent", "AgentDraft", "new_draft", "portion_label", "identity_text", "item_label",
     "CommitPlan", "item_panels", "request_hash_of", "build_commit", "draft_to_row", "row_to_draft",
     "DraftPort", "StoreDrafts", "MemoryDrafts",

@@ -330,6 +330,17 @@ async def test_three_eggs_count_works_against_one_egg():
     assert result.food.panel.protein == pytest.approx(12.6 * 0.527, abs=0.01)
 
 
+async def test_bare_count_of_eggs_against_a_two_egg_serving_is_matched():
+    """R-2: "2" eggs against a "2 large eggs" serving is one serving, not a question."""
+    row = _fatsecret("eg2", "Eggs", "", "2 large eggs", 100, 143, 12.6, 0.7, 9.5, 0)
+    two = Portion(kind="count", amount=2, text="2")
+    result = await _finder(Resolver(default=row)).find(_identity("eggs", kind="generic"), two)
+    assert result.status == "matched", result
+    assert result.question is None
+    assert p.multiplier(two, result.food.serving_basis,
+                        _identity("eggs", kind="generic")) == Decimal("1")
+
+
 async def test_weighed_chicken_without_raw_or_cooked_asks_raw_or_cooked():
     from food_lookup import resolve_generic_whole_food
 

@@ -314,6 +314,44 @@ def test_review_s4_count_against_multi_piece_serving_needs_matching_noun():
     assert p.multiplier(_p("count", 2, text="2 smoothies"), SMOOTHIE) == Decimal("2")
 
 
+def _ident(name: str, variant: str | None = None, kind: str = "generic") -> c.FoodIdentity:
+    return c.FoodIdentity(name=name, brand=None, variant=variant, kind=kind, preparation=None)
+
+
+def test_review_r2_count_unit_comes_from_identity_and_known_equivalents():
+    """Review re-check R-2: the model often puts only the number in portion.text.
+    The unit then comes from the food's name, and nuggets are pieces."""
+    two_eggs = p.parse_serving_text("2 large eggs (100 g)")
+    assert p.multiplier(_p("count", 2, text="2"), two_eggs, _ident("eggs")) == Decimal("1")
+    assert p.multiplier(_p("count", 3, text="3"), two_eggs, _ident("scrambled egg")) == Decimal("1.5")
+    slices = p.parse_serving_text("2 slices (16 g)")
+    assert p.multiplier(_p("count", 3, text="three"), slices, _ident("bacon")) == Decimal("1.5")
+    assert p.multiplier(_p("count", 3, text="three"), slices, _ident("bacon slices")) == Decimal("1.5")
+    pieces = p.parse_serving_text("4 pieces (64 g)")
+    nuggets = _ident("Chicken McNuggets", kind="restaurant")
+    assert p.multiplier(_p("count", 6, text="6 nuggets"), pieces, nuggets) == Decimal("1.5")
+    assert p.multiplier(_p("count", 6, text="6 nuggets"), pieces) == Decimal("1.5")
+    assert p.multiplier(_p("count", 6, text="6"), pieces, nuggets) == Decimal("1.5")
+    # The existing two-argument call keeps working.
+    assert p.multiplier(_p("count", 2, text="2 eggs"), two_eggs) == Decimal("1")
+
+
+def test_review_r2_still_asks_when_the_unit_really_differs_or_is_unknown():
+    ten = p.parse_serving_text("10 pieces")
+    nuggets = _ident("Chicken McNuggets", kind="restaurant")
+    assert p.multiplier(_p("count", 1, text="1 box"), ten, nuggets) is None
+    assert p.multiplier(_p("count", 1, text="1 order"), ten, nuggets) is None
+    assert p.multiplier(_p("count", 1, text="1 bar"), ten, _ident("granola bites")) is None
+    assert p.multiplier(_p("count", 1, text="1"), ten) is None
+    # "1" McNugget from the name alone is more likely one box: ask.
+    assert p.multiplier(_p("count", 1, text="1"), ten, nuggets) is None
+    # A name that states the box size ("10 piece") is the box, not the unit.
+    assert p.multiplier(_p("count", 2, text="2"), ten, _ident("Chicken McNuggets", variant="10 piece")) is None
+    assert p.multiplier(_p("count", 2, text="2"), ten, _ident("10 piece Chicken McNuggets")) is None
+    # Nothing links the food to slices.
+    assert p.multiplier(_p("count", 3, text="three"), p.parse_serving_text("2 slices"), _ident("apple")) is None
+
+
 def test_mass_vs_volume_without_density_is_none():
     assert p.multiplier(_p("mass", 100, "g"), p.parse_serving_text("12 fl oz")) is None
     assert p.multiplier(_p("volume", 1, "cup"), p.parse_serving_text("12 oz")) is None

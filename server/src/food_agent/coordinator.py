@@ -137,19 +137,39 @@ class FoodAgent:
             logger.warning("food agent could not read drafts: %s", type(exc).__name__)
             return _result("I couldn't reach your log just now. Try again in a moment.", "error", "unknown")
         shown_before = [d for d in recent if d.state in EDITABLE_STATES and d.pending_confirm() is not None]
-        result = await self._turn(message, decision, recent, now, session_ref)
-        await self._settle_bindings(shown_before, result)
-        return result
+        # R-1, check one (runs FIRST, fails closed): a preview is confirmable only if no
+        # user turn has come after it. Every turn that does not consume a binding writes
+        # a durable insert-only "seen" marker for it before any other work.
+        try:
+            live = [d for d in shown_before if not await self.drafts.is_seen(d.id, d.revision)]
+            reshows_all = decision == "yes" and len(live) > 1  # "which one?" shows them all again
+            # A binding a yes/no consumes is marked too: one use only.
+            for draft in live if not reshows_all else []:
+                await self.drafts.mark_seen(draft.id, draft.revision)
+        except Exception as exc:
+            logger.warning("food agent could not record the last shown preview: %s", type(exc).__name__)
+            return _result("I couldn't reach your log just now, so nothing changed. Try again in a moment.",
+                           "error", "not_applied")
+        result: FoodTurnResult | None = None
+        try:
+            result = await self._turn(message, decision, recent, now, session_ref, {d.id for d in live})
+            return result
+        finally:
+            # Check two: clear every binding this turn did not show, even if the turn raised.
+            await self._settle_bindings(shown_before, result)
 
-    async def _settle_bindings(self, shown_before: list[AgentDraft], result: FoodTurnResult) -> None:
+    async def _settle_bindings(self, shown_before: list[AgentDraft], result: FoodTurnResult | None) -> None:
         """B1: a preview stays confirmable only if this turn's reply showed it.
 
         Any other binding is cleared in the DB (survives restarts). A draft that
         changed during the turn fails the CAS and keeps whatever the turn wrote.
+        A failed clear is safe: the seen marker already makes the binding unusable.
         """
-        keep = set(result.shown_draft_ids)
-        if result.preview is not None:
-            keep.add(result.preview.draft_id)
+        keep: set[str] = set()
+        if result is not None:
+            keep.update(result.shown_draft_ids)
+            if result.preview is not None:
+                keep.add(result.preview.draft_id)
         for draft in shown_before:
             if draft.id in keep:
                 continue
@@ -159,7 +179,7 @@ class FoodAgent:
                 logger.warning("food agent could not clear a preview binding: %s", type(exc).__name__)
 
     async def _turn(self, message: str, decision: str, recent: list[AgentDraft], now: datetime,
-                    session_ref: str | None) -> FoodTurnResult:
+                    session_ref: str | None, live: set[str]) -> FoodTurnResult:
         try:
             reconciled = await self._reconcile(recent, now, decision)
         except Exception as exc:
@@ -172,20 +192,21 @@ class FoodAgent:
                 recent = await self.drafts.recent(now - self.recent_window)
             except Exception:
                 return reconciled
-            rest = await self._handle(message, decision, recent, now, session_ref)
+            rest = await self._handle(message, decision, recent, now, session_ref, live)
             return FoodTurnResult(
                 reply=" ".join(part for part in (reconciled.reply, rest.reply) if part),
                 handed_off=rest.handed_off, preview=rest.preview, receipt=reconciled.receipt,
                 outcome=rest.outcome if rest.outcome.effect != "not_attempted" else reconciled.outcome,
                 draft_id=rest.draft_id or reconciled.draft_id, question=rest.question)
-        return await self._handle(message, decision, recent, now, session_ref)
+        return await self._handle(message, decision, recent, now, session_ref, live)
 
     async def _handle(self, message: str, decision: str, recent: list[AgentDraft], now: datetime,
-                      session_ref: str | None) -> FoodTurnResult:
+                      session_ref: str | None, live: set[str]) -> FoodTurnResult:
         # The active draft (a preview or question pending) comes first; clearing a
         # stale binding touches updated_at, so recency alone cannot decide.
         open_ = sorted((d for d in recent if d.state in EDITABLE_STATES), key=lambda d: d.pending is None)
-        bound = [d for d in open_ if d.pending_confirm() is not None]
+        # Only a preview that was the LAST thing shown may be confirmed or cancelled.
+        bound = [d for d in open_ if d.pending_confirm() is not None and d.id in live]
         if decision == "yes" and len(bound) == 1:
             return await self._confirm(bound[0], now)
         if decision == "yes" and len(bound) > 1:
@@ -264,12 +285,8 @@ class FoodAgent:
                     await self.drafts.save(other.with_(pending=None), other.revision)
             return await self._reshow(chosen, now)
         if len(bound) == 1:
-            draft = bound[0]
-            preview = self._preview(draft, now)
-            if preview is None:
-                return await self._reshow(draft, now)
-            return _result(f"Nothing changed yet. {self._preview_text(draft, preview, [])}",
-                           draft_id=draft.id, preview=preview)
+            # This turn marked the old binding seen: show it again under a fresh revision.
+            return await self._reshow(bound[0], now, prefix="Nothing changed yet.")
         ready = next((d for d in open_ if d.question() is None and items_ready(d.items)), None)
         if ready is not None:  # its preview was not the last thing shown: show it again, never commit
             return await self._reshow(ready, now)
@@ -574,7 +591,7 @@ class FoodAgent:
                                   modifications=modifications)
         mult = item.multiplier
         if portion != item.portion or mult is None:
-            found = portion_multiplier(portion, item.resolved.serving_basis)
+            found = portion_multiplier(portion, item.resolved.serving_basis, identity)
             mult = float(found) if found is not None else None
             if mult is None:
                 questions.append(self._portion_question(item.resolved))
@@ -614,7 +631,7 @@ class FoodAgent:
         for item in items:
             if item.resolved is not None:
                 if item.multiplier is None and not questions:
-                    found = portion_multiplier(item.portion, item.resolved.serving_basis)
+                    found = portion_multiplier(item.portion, item.resolved.serving_basis, item.identity)
                     if found is None:
                         questions.append(self._portion_question(item.resolved))
                     else:
@@ -629,7 +646,7 @@ class FoodAgent:
                 out.append(item)
                 continue
             if result.status == "matched" and result.food is not None:
-                found = portion_multiplier(item.portion, result.food.serving_basis)
+                found = portion_multiplier(item.portion, result.food.serving_basis, item.identity)
                 item = DraftItemState(item_ref=item.item_ref, identity=item.identity, portion=item.portion,
                                       modifications=list(item.modifications), resolved=result.food,
                                       multiplier=float(found) if found is not None else None)

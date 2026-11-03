@@ -20,8 +20,8 @@ from collections.abc import Mapping
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
-from food_agent.contracts import (MASS_UNITS, NUTRIENT_KEYS, VOLUME_UNITS, NutrientPanel, Portion,
-                                  ServingBasis)
+from food_agent.contracts import (MASS_UNITS, NUTRIENT_KEYS, VOLUME_UNITS, FoodIdentity, NutrientPanel,
+                                  Portion, ServingBasis)
 
 GRAMS_PER: dict[str, Decimal] = {
     "g": Decimal("1"), "kg": Decimal("1000"), "oz": Decimal("28.349523125"), "lb": Decimal("453.59237"),
@@ -211,17 +211,78 @@ def _noun_tokens(text: str | None) -> set[str]:
     return {_stem(word) for word in words if word not in _NOUN_IGNORE}
 
 
-def _same_count_noun(user_text: str | None, serving_noun: str | None) -> bool:
-    """True when the user's count words name the serving's own unit ("4 pieces" vs "10 pieces")."""
-    serving = _noun_tokens(serving_noun)
-    return bool(serving) and bool(serving & _noun_tokens(user_text))
+# Count units that mean the same thing: "6 nuggets" against a "4 pieces" serving.
+_UNIT_EQUIVALENTS: dict[str, frozenset[str]] = {
+    "piece": frozenset({"piece", "pc", "nugget", "tender", "wing", "dumpling", "bite", "strip", "ball", "chunk"}),
+    "slice": frozenset({"slice", "rasher"}),
+}
+# Foods counted in a unit by default, used only when the user's words carry no
+# unit ("three" bacon against a "2 slices" serving).
+_NATURAL_UNIT: dict[str, frozenset[str]] = {
+    "slice": frozenset({"bacon", "bread", "toast", "pizza", "cheese", "ham", "turkey", "salami", "pepperoni"}),
+}
+# Words that count a container, not a unit: "1 box" of a "10 pieces" serving is unclear.
+_CONTAINERS = frozenset({"box", "pack", "package", "packet", "bag", "order", "meal", "combo", "serving",
+                         "container", "carton", "bowl", "plate", "tray", "bucket", "sleeve", "tub"})
 
 
-def multiplier(portion: Portion, basis: ServingBasis) -> Decimal | None:
+def _member(token: str, words: frozenset[str]) -> bool:
+    return any(token == word or (len(word) >= 5 and token.endswith(word)) for word in words)
+
+
+def _canonical_units(tokens: set[str]) -> set[str]:
+    out = set()
+    for token in tokens:
+        group = next((key for key, words in _UNIT_EQUIVALENTS.items() if _member(token, words)), None)
+        out.add(group or token)
+    return out
+
+
+def _same_count_unit(user_text: str | None, serving_noun: str | None, amount: Decimal,
+                     identity: FoodIdentity | None) -> bool:
+    """True when the user's count is in the serving's own unit ("4 pieces" vs "10 pieces").
+
+    The user's own words decide when they name a unit. When they are just a
+    number ("2"), the unit comes from the food's name ("eggs", "bacon slices",
+    "McNuggets"); a name that states a pack size ("10 piece") is the pack, not
+    the unit, and a bare "1" of a piece food (one McNugget?) stays unclear.
+    """
+    serving = _canonical_units(_noun_tokens(serving_noun))
+    if not serving:
+        return False
+    said = _noun_tokens(user_text)
+    if (said & _CONTAINERS) - serving:  # "1 box" of "10 pieces"; "2 boxes" of "3 boxes" is fine
+        return False
+    if said:
+        return bool(serving & _canonical_units(said))
+    if identity is None:
+        return False
+    named = " ".join(part for part in (identity.name, identity.variant) if part)
+    if re.search(r"\d", named):
+        return False
+    name_tokens = _noun_tokens(named)
+    if name_tokens & _CONTAINERS:
+        return False
+    units = _canonical_units(name_tokens)
+    for unit, foods in _NATURAL_UNIT.items():
+        if any(_member(token, foods) for token in name_tokens):
+            units.add(unit)
+    matched = serving & units
+    if not matched:
+        return False
+    if amount == 1 and "piece" in matched:
+        return False
+    return True
+
+
+def multiplier(portion: Portion, basis: ServingBasis,
+               identity: FoodIdentity | None = None) -> Decimal | None:
     """How many source servings ``portion`` is, or ``None`` when it cannot be known.
 
     The result is quantized to 4 decimal places. ``None`` means the agent must
-    ask; it is never replaced by a default of 1.
+    ask; it is never replaced by a default of 1. ``identity`` (optional) lets a
+    bare count ("2") take its unit from the food's name against a multi-piece
+    serving ("2 large eggs"); pass it whenever the item's identity is known.
     """
     amount = _dec(portion.amount)
     if portion.kind == "unspecified":
@@ -238,7 +299,7 @@ def multiplier(portion: Portion, basis: ServingBasis) -> Decimal | None:
         if basis.unit == "count" and basis.amount is not None and _dec(basis.amount) != 1:
             # A multi-piece serving ("10 pieces"): divide only when the user
             # counted in that same unit ("4 pieces"). "1" or "1 box" is unclear.
-            if not _same_count_noun(portion.text, basis.count_noun):
+            if not _same_count_unit(portion.text, basis.count_noun, amount, identity):
                 return None
             return _result(amount / _dec(basis.amount))
         return _result(amount)

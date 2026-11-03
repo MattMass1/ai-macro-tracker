@@ -225,6 +225,35 @@ async def test_yes_or_no_to_a_side_question_never_acts_on_the_earlier_preview_af
     assert draft["state"] == "collecting" and draft["pending_question"] is None
 
 
+@pg
+async def test_failed_binding_clear_then_yes_after_restart_logs_nothing(env, monkeypatch):
+    """Review R-1: even when the clear write fails, the durable seen-marker refuses the bare yes."""
+    store = env["store"]
+    real_save = store.save_meal_draft
+    state = {"fail": 0}
+
+    async def flaky(draft, expected_revision):
+        if state["fail"] and draft.get("pending_question") is None and draft.get("state") == "collecting":
+            state["fail"] -= 1
+            raise ConnectionResetError("simulated: clear write lost")
+        return await real_save(draft, expected_revision)
+    monkeypatch.setattr(store, "save_meal_draft", flaky)
+    agent, script, _ = _agent(store)
+    with As(env["users"][0]):
+        script.push(HALF_QP)
+        await _say(agent, "half a quarter pounder")
+        state["fail"] = 1
+        script.push({"type": "ask", "question": "Did you have any sauce with it?"})
+        await _say(agent, "what about the sauce")
+        (draft,) = await _rows(env["url"], "SELECT pending_question FROM meal_drafts")
+        assert draft["pending_question"].startswith("{")  # the binding survived the failed clear
+        restarted, script2, _ = _agent(store)
+        script2.push({"type": "ask", "question": "Which sauce?"})
+        yes = await _say(restarted, "yes")
+    assert yes.receipt is None
+    assert await _rows(env["url"], "SELECT 1 FROM nutrition_entries") == []
+
+
 # ---------------------------------------------------------------- item 7 (and real failure 2 on PG)
 
 

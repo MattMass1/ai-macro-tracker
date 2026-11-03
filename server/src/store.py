@@ -1234,6 +1234,33 @@ class Store:
             "AND id=$2 AND revision=$3 AND state IN ('collecting','needs_detail','ready') RETURNING id",
             user_id, UUID(str(draft_id)), int(expected_revision)))
 
+    async def fetch_recent_meal_drafts(self, *, since: datetime, limit: int = 8) -> list[dict[str, Any]]:
+        """Read-only: the user's drafts in ANY state updated since ``since``, newest first.
+
+        The food agent needs committed drafts too (to reconcile an unverified
+        commit and to amend the meal just logged), which
+        ``fetch_meal_draft_context`` does not return by update time.
+        """
+        pool = await self.connect(); user_id = current_user_id()
+        async with pool.acquire() as conn:
+            ids = await conn.fetch(
+                "SELECT id FROM meal_drafts WHERE user_id=$1 AND updated_at >= $2 "
+                "ORDER BY updated_at DESC, id LIMIT $3", user_id, since, int(limit))
+            return [await self._draft_conn(conn, user_id, row["id"]) for row in ids]
+
+    async def fetch_operation(self, key: str) -> dict[str, Any] | None:
+        """Read-only: the current user's idempotent operation for ``key``, if any."""
+        pool = await self.connect(); user_id = current_user_id()
+        row = await pool.fetchrow(
+            "SELECT idempotency_key,request_hash,status,stored_response,created_at,completed_at "
+            "FROM request_operations WHERE user_id=$1 AND idempotency_key=$2", user_id, str(key))
+        if row is None:
+            return None
+        data = _dict(row) or {}
+        stored = data.get("stored_response")
+        data["stored_response"] = json.loads(stored) if isinstance(stored, str) else stored
+        return data
+
     async def fetch_entry_revision(self, entry_id: str) -> dict[str, Any] | None:
         pool = await self.connect(); user_id = current_user_id()
         row = await pool.fetchrow("SELECT * FROM nutrition_entries WHERE user_id=$1 AND id=$2",

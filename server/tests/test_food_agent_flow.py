@@ -458,6 +458,35 @@ async def test_item_refs_are_unique_across_open_and_logged_meals(rig):
     assert [i["resolution"]["state"]["item_ref"] for i in open_rows[0]["items"]] == ["i2"]
 
 
+class NoHistory:
+    def __init__(self, status="not_found"):
+        self.status = status
+
+    async def recall(self, query, when_hint):
+        from food_agent.ports import RecallResult
+        return RecallResult(status=self.status, items=(), source_entry_id=None, note=None,
+                            question=f"I couldn't find {query} in your log. Where was it from?")
+
+
+@pytest.mark.parametrize("status, outcome", [("not_found", "no_match"), ("needs_detail", "needs_detail")])
+async def test_recall_that_finds_nothing_asks_honestly_and_writes_nothing(rig, status, outcome):
+    agent, drafts, script, _, _ = rig
+    agent.recaller = NoHistory(status)
+    script.push({"type": "recall_meal", "query": "ahi tuna bowl", "when_hint": "last time"})
+    result = await _say(agent, "ahi tuna bowl again, the one I had last time")
+    assert result.reply == "I couldn't find ahi tuna bowl in your log. Where was it from?"
+    assert result.outcome.status == outcome and result.outcome.effect == "not_attempted"
+    assert result.preview is None and drafts.drafts == {} and drafts.entries == {}
+    # With a meal already waiting, a failed recall leaves that draft untouched.
+    script.push(HALF_QP)
+    await _say(agent, "half a quarter pounder")
+    before = json.dumps(drafts.drafts, default=str, sort_keys=True)
+    script.push({"type": "recall_meal", "query": "ahi tuna bowl", "when_hint": None})
+    again = await _say(agent, "and the tuna bowl from last time")
+    assert again.reply == "I couldn't find ahi tuna bowl in your log. Where was it from?"
+    assert json.dumps(drafts.drafts, default=str, sort_keys=True) == before and drafts.entries == {}
+
+
 # ---------------------------------------------------------------- model adapter
 
 

@@ -425,6 +425,7 @@ class FoodAgent:
             return _result("I couldn't find that item. What should I change?", "needs_detail")
         items = list(target.items)
         taken = {i.item_ref for d in recent for i in d.items}
+        recall_misses: list[str] = []
         notes: list[str] = []
         questions: list[str] = []
         for action in actions:
@@ -440,7 +441,13 @@ class FoodAgent:
             elif action.type == "remove_item":
                 items = [i for i in items if i.item_ref != action.item_ref]
             elif action.type == "recall_meal":
-                await self._recall(action, items, notes, questions, taken)
+                recall_misses.append(await self._recall(action, items, notes, questions, taken))
+        recall_only = all(a.type == "recall_meal" for a in actions if a.type in EDIT_TYPES)
+        if questions and recall_only and items == list(target.items):
+            # A recall that found nothing: say so honestly. No draft is created and
+            # an open draft is left exactly as it was.
+            status = "no_match" if "not_found" in recall_misses else "needs_detail"
+            return _result(questions[0], status, draft_id=None if is_new else target.id, question=questions[0])
         if not items:
             if not is_new:
                 await self.drafts.cancel(target.id, target.revision)
@@ -517,23 +524,26 @@ class FoodAgent:
         return f"One serving of {food.display_name} is {basis}. How much did you have?"
 
     async def _recall(self, action: Any, items: list[DraftItemState], notes: list[str],
-                      questions: list[str], taken: set[str]) -> None:
+                      questions: list[str], taken: set[str]) -> str:
+        """Add recalled items, or one honest question. Returns the recall status."""
         if self.recaller is None:
             questions.append(f"I can't look up past meals yet. What was in the {action.query}?")
-            return
+            return "needs_detail"
         try:
             found = await self.recaller.recall(action.query, action.when_hint)
         except Exception as exc:
             logger.warning("food agent recall failed: %s", type(exc).__name__)
             questions.append(f"I couldn't search your log just now. What was in the {action.query}?")
-            return
+            return "needs_detail"
         if found.status == "found" and found.items:
             for item in found.items:
                 items.append(item.model_copy(update={"item_ref": self._next_ref(items, taken)}))
             if found.note:
                 notes.append(found.note)
-            return
-        questions.append(found.question or f"I couldn't find {action.query} in your log. What was it?")
+            return "found"
+        questions.append(found.question or found.note
+                         or f"I couldn't find {action.query} in your log. What was it?")
+        return "not_found" if found.status != "needs_detail" else "needs_detail"
 
     async def _resolve(self, items: list[DraftItemState], notes: list[str],
                        questions: list[str]) -> list[DraftItemState]:

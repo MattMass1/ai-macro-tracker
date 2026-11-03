@@ -44,8 +44,6 @@ RECENT_WINDOW = timedelta(hours=24)
 NEW_MEAL_AFTER = timedelta(minutes=20)
 MAX_DRAFT_ITEMS = 24
 OVERSIZED = "This meal is too large to show completely. Please split it into smaller meals before confirming."
-_SESSION_UNSET = object()
-
 COULD_NOT_VERIFY = ("I could not verify it saved. I'll check it first thing on your next message, "
                     "so don't log it again.")
 
@@ -196,7 +194,7 @@ class FoodAgent:
     async def _turn(self, message: str, decision: str, recent: list[AgentDraft], now: datetime,
                     session_ref: str | None, live: set[str]) -> FoodTurnResult:
         try:
-            reconciled = await self._reconcile(recent, now, decision)
+            reconciled = await self._reconcile(recent, now, decision, session_ref)
         except Exception as exc:
             logger.warning("food agent could not reconcile: %s", type(exc).__name__)
             return _result("I couldn't reach your log just now. Try again in a moment.", "error", "unknown")
@@ -233,7 +231,7 @@ class FoodAgent:
         if decision == "yes" and len(bound) + len(unseen) > 1:
             return self._ask_which(bound + unseen)
         if decision == "yes" and len(bound) == 1:
-            return await self._confirm(bound[0], now)
+            return await self._confirm(bound[0], now, session_ref)
         if decision == "yes" and len(bound) > 1:
             return self._ask_which(bound)
         # S1: a yes/no with no preview showing answers a question: the model interprets it.
@@ -313,13 +311,13 @@ class FoodAgent:
             return await self._reshow(chosen, now, session_ref=session_ref)
         if len(bound) == 1:
             # This turn marked the old binding seen: show it again under a fresh revision.
-            return await self._reshow(bound[0], now, prefix="Nothing changed yet.")
+            return await self._reshow(bound[0], now, prefix="Nothing changed yet.", session_ref=session_ref)
         ready = next((d for d in open_ if d.question() is None and items_ready(d.items)), None)
         if ready is not None:  # its preview was not the last thing shown: show it again, never commit
             return await self._reshow(ready, now, session_ref=session_ref)
         return _result("There's nothing waiting to log right now.")
 
-    async def _confirm(self, draft: AgentDraft, now: datetime) -> FoodTurnResult:
+    async def _confirm(self, draft: AgentDraft, now: datetime, session_ref: str | None) -> FoodTurnResult:
         binding = draft.pending_confirm()
         assert binding is not None
         draft, questions = await self._refresh(draft)
@@ -327,13 +325,14 @@ class FoodAgent:
             return _result(questions[0], "needs_detail", "not_applied", question=questions[0])
         current_hash = content_hash(list(draft.items))
         if binding.revision != draft.revision or binding.content_hash != current_hash:
-            return await self._reshow(draft, now, prefix="That meal changed since I showed it.")
+            return await self._reshow(draft, now, prefix="That meal changed since I showed it.",
+                                      session_ref=session_ref)
         pinned = draft.with_(meal_type=draft.meal_type or _default_meal_type(now))
         try:
             plan = build_commit(pinned, current_hash)
         except (DraftNotReady, ValueError) as exc:
             logger.info("draft not committable: %s", exc)
-            return await self._reshow(draft, now)
+            return await self._reshow(draft, now, session_ref=session_ref)
         if plan.unknown and not await self.drafts.unknown_nutrients_writable():
             return await self._block_unknown(draft, plan.unknown)
         intent = CommitIntent(draft_id=draft.id, revision=draft.revision + 1, content_hash=current_hash,
@@ -344,11 +343,12 @@ class FoodAgent:
             # Lost the CAS: a duplicate delivery of this same yes may have won it.
             fresh = await self.drafts.get(draft.id)
             if fresh is not None and fresh.commit_intent() is not None:
-                done = await self._reconcile_one(fresh, now, reacknowledge=True)
+                done = await self._reconcile_one(fresh, now, session_ref, reacknowledge=True)
                 if done is not None:
                     return done
             if fresh is not None and fresh.state in EDITABLE_STATES:
-                return await self._reshow(fresh, now, prefix="That meal changed since I showed it.")
+                return await self._reshow(fresh, now, prefix="That meal changed since I showed it.",
+                                          session_ref=session_ref)
             return _result("That meal changed before I could save it. Check Today.", "conflict", "not_applied")
         if staged.revision != intent.revision:
             logger.error("commit intent bound to %s but draft is at %s", intent.revision, staged.revision)
@@ -425,8 +425,8 @@ class FoodAgent:
             return None  # it committed meanwhile: reconcile normally
         return _result("OK, not logged.", "ok", "not_applied", draft_id=draft.id)
 
-    async def _reconcile(self, recent: list[AgentDraft], now: datetime,
-                         decision: str = "other") -> FoodTurnResult | None:
+    async def _reconcile(self, recent: list[AgentDraft], now: datetime, decision: str,
+                         session_ref: str | None) -> FoodTurnResult | None:
         """Finish or verify an earlier commit whose outcome was not verified. Same key, same hash."""
         for draft in await self.drafts.recovery():  # owner-scoped, independent of conversational recency
             intent = draft.commit_intent()
@@ -437,17 +437,17 @@ class FoodAgent:
                     continue
                 if await self.drafts.is_acknowledged(draft.id, intent.revision):
                     continue  # older unresolved intents must remain discoverable
-                return await self._reconcile_one(draft, now)
+                return await self._reconcile_one(draft, now, session_ref)
             if draft.state == "ready" and draft.revision == intent.revision:
                 if decision == "no":
                     abandoned = await self._abandon_unlanded(draft, intent)
                     if abandoned is not None:
                         return abandoned
                     draft = await self.drafts.get(draft.id) or draft
-                return await self._reconcile_one(draft, now)
+                return await self._reconcile_one(draft, now, session_ref)
         return None
 
-    async def _reconcile_one(self, draft: AgentDraft, now: datetime, *,
+    async def _reconcile_one(self, draft: AgentDraft, now: datetime, session_ref: str | None, *,
                              reacknowledge: bool = False) -> FoodTurnResult | None:
         intent = draft.commit_intent()
         if intent is None:
@@ -484,7 +484,9 @@ class FoodAgent:
             return None
         if plan is None or plan.request_hash != intent.request_hash:
             # Never commit something other than what the user said yes to.
-            return await self._reshow(draft, now, prefix="That meal changed before it was saved.")
+            # Bind the fresh preview to the session receiving this reply, never the draft's creator.
+            return await self._reshow(draft, now, prefix="That meal changed before it was saved.",
+                                      session_ref=session_ref)
         return await self._commit(draft, intent, plan)
 
     # ------------------------------------------------------------ cancel / block
@@ -620,10 +622,10 @@ class FoodAgent:
         if question is not None:
             return _result(question, "needs_detail", draft_id=saved.id, question=question)
         if saved.revision != new_revision:  # the binding must name the revision the write produced
-            return await self._reshow(saved, now)
+            return await self._reshow(saved, now, session_ref=session_ref)
         preview = self._preview(saved, now)
         if preview is None:
-            return await self._reshow(saved, now)
+            return await self._reshow(saved, now, session_ref=session_ref)
         return _result(self._preview_text(saved, preview, notes), draft_id=saved.id, preview=preview)
 
     def _revise(self, item: DraftItemState, action: Any, questions: list[str]) -> DraftItemState:
@@ -762,8 +764,13 @@ class FoodAgent:
         text += " Save the change?" if draft.is_amend else " Log it?"
         return text
 
-    async def _reshow(self, draft: AgentDraft, now: datetime, *, prefix: str = "", session_ref: Any = _SESSION_UNSET) -> FoodTurnResult:
-        """Bind a fresh preview to the draft's CURRENT content and show it. Never commits."""
+    async def _reshow(self, draft: AgentDraft, now: datetime, *, session_ref: str | None,
+                      prefix: str = "") -> FoodTurnResult:
+        """Bind a fresh preview to the draft's CURRENT content and show it. Never commits.
+
+        ``session_ref`` is required: the binding always names the session that receives
+        this reply, so only that session's yes can confirm what it was shown.
+        """
         lead = f"{prefix} " if prefix else ""
         draft, questions = await self._refresh(draft)
         if questions:
@@ -774,7 +781,7 @@ class FoodAgent:
             return _result(f"{lead}{question}", "needs_detail", draft_id=draft.id, question=question)
         binding = PendingConfirm(draft_id=draft.id, revision=draft.revision + 1,
                                  content_hash=content_hash(list(draft.items)),
-                                 session_ref=session_ref if session_ref is not _SESSION_UNSET else (draft.pending_confirm().session_ref if draft.pending_confirm() else draft.session_ref)).to_pending_question()
+                                 session_ref=session_ref).to_pending_question()
         candidate = draft.with_(state="collecting", pending=binding)
         trial = self._preview(candidate.with_(revision=draft.revision + 1), now)
         if trial is not None and len(lead + self._preview_text(candidate, trial, [])) > 1000:

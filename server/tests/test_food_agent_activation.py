@@ -147,6 +147,45 @@ async def test_no_cache_refresh_change_requires_new_preview():
     assert final.receipt and final.receipt.nutrients.calories == 300
     assert len(drafts.entries) == 1
 
+def _recovery_reshown_in_b():
+    """A previews, A's yes never lands, the restricted panel changes, B's next message re-previews."""
+    agent, drafts, script, finder, _ = rig()
+    original = finder.find
+    count = 0
+    async def restricted(identity, portion):
+        nonlocal count
+        count += 1
+        result = await original(identity, portion)
+        from dataclasses import replace
+        food = result.food.model_copy(update={'cache_allowed': False})
+        if count > 2:  # preview and A's confirm refresh agree; recovery sees new evidence
+            food = food.model_copy(update={'panel': food.panel.model_copy(update={'calories': 600.})})
+        return replace(result, food=food)
+    finder.find = restricted
+    return agent, drafts, script
+
+async def _reach_recovery_reshow(agent, drafts, script):
+    script.push(HALF_QP)
+    await agent.turn('half burger', session_ref='A')
+    drafts.fail_before_commit = 1
+    assert (await agent.turn('yes', session_ref='A')).outcome.effect == 'unknown'
+    shown = await agent.turn('yes', session_ref='B')
+    assert shown.preview and not drafts.entries
+    return shown
+
+async def test_recovery_reshow_binds_to_the_session_that_saw_it_not_the_creator():
+    agent, drafts, script = _recovery_reshown_in_b()
+    await _reach_recovery_reshow(agent, drafts, script)
+    result = await agent.turn('yes', session_ref='A')  # A never saw the changed meal
+    assert not drafts.entries and result.preview is not None
+
+async def test_recovery_reshow_then_yes_in_viewing_session_logs_once():
+    agent, drafts, script = _recovery_reshown_in_b()
+    await _reach_recovery_reshow(agent, drafts, script)
+    result = await agent.turn('yes', session_ref='B')
+    assert result.receipt and result.receipt.verified and result.receipt.nutrients.calories == 300
+    assert len(drafts.entries) == 1
+
 async def test_missing_session_cannot_consume_named_session_preview():
     agent, drafts, script, _, _ = rig()
     script.push(HALF_QP)

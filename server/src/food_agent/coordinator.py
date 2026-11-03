@@ -55,6 +55,10 @@ class FoodTurnResult:
     ``handed_off=True`` means the message is not food: the caller runs its old
     path. ``reply`` may still be non-empty then (a reconciliation note from an
     earlier unverified commit) and should be shown first.
+
+    ``shown_draft_ids``: drafts whose preview this reply shows besides ``preview``
+    (the "which one?" question). Every other preview binding is cleared at the
+    end of the turn, so a later yes/no can only act on what was shown LAST.
     """
 
     reply: str
@@ -64,6 +68,7 @@ class FoodTurnResult:
     outcome: ToolOutcome
     draft_id: str | None = None
     question: str | None = None
+    shown_draft_ids: tuple[str, ...] = ()
 
 
 def _outcome(status: str, effect: str, message: str) -> ToolOutcome:
@@ -128,9 +133,37 @@ class FoodAgent:
         decision = confirm.classify(message)
         try:
             recent = await self.drafts.recent(now - self.recent_window)
-            reconciled = await self._reconcile(recent, now)
         except Exception as exc:  # the store is unreachable: claim nothing
             logger.warning("food agent could not read drafts: %s", type(exc).__name__)
+            return _result("I couldn't reach your log just now. Try again in a moment.", "error", "unknown")
+        shown_before = [d for d in recent if d.state in EDITABLE_STATES and d.pending_confirm() is not None]
+        result = await self._turn(message, decision, recent, now, session_ref)
+        await self._settle_bindings(shown_before, result)
+        return result
+
+    async def _settle_bindings(self, shown_before: list[AgentDraft], result: FoodTurnResult) -> None:
+        """B1: a preview stays confirmable only if this turn's reply showed it.
+
+        Any other binding is cleared in the DB (survives restarts). A draft that
+        changed during the turn fails the CAS and keeps whatever the turn wrote.
+        """
+        keep = set(result.shown_draft_ids)
+        if result.preview is not None:
+            keep.add(result.preview.draft_id)
+        for draft in shown_before:
+            if draft.id in keep:
+                continue
+            try:
+                await self.drafts.save(draft.with_(state="collecting", pending=None), draft.revision)
+            except Exception as exc:
+                logger.warning("food agent could not clear a preview binding: %s", type(exc).__name__)
+
+    async def _turn(self, message: str, decision: str, recent: list[AgentDraft], now: datetime,
+                    session_ref: str | None) -> FoodTurnResult:
+        try:
+            reconciled = await self._reconcile(recent, now, decision)
+        except Exception as exc:
+            logger.warning("food agent could not reconcile: %s", type(exc).__name__)
             return _result("I couldn't reach your log just now. Try again in a moment.", "error", "unknown")
         if reconciled is not None:
             if decision != "other":
@@ -149,18 +182,15 @@ class FoodAgent:
 
     async def _handle(self, message: str, decision: str, recent: list[AgentDraft], now: datetime,
                       session_ref: str | None) -> FoodTurnResult:
-        open_ = [d for d in recent if d.state in EDITABLE_STATES]
+        # The active draft (a preview or question pending) comes first; clearing a
+        # stale binding touches updated_at, so recency alone cannot decide.
+        open_ = sorted((d for d in recent if d.state in EDITABLE_STATES), key=lambda d: d.pending is None)
         bound = [d for d in open_ if d.pending_confirm() is not None]
         if decision == "yes" and len(bound) == 1:
             return await self._confirm(bound[0], now)
         if decision == "yes" and len(bound) > 1:
             return self._ask_which(bound)
-        if decision == "yes":
-            asking = next((d for d in open_ if d.question()), None)
-            if asking is not None:
-                question = asking.question() or ""
-                return _result(f"I still need one thing first. {question}", "needs_detail",
-                               draft_id=asking.id, question=question)
+        # S1: a yes/no with no preview showing answers a question: the model interprets it.
         if decision == "no" and len(bound) == 1:
             return await self._cancel(bound[0])
 
@@ -170,6 +200,9 @@ class FoodAgent:
                 turn = AgentTurn.model_validate_json(json.dumps(turn))
         except Exception as exc:
             logger.warning("food agent interpreter failed: %s", type(exc).__name__)
+            if not open_:
+                # Nothing of ours is open: let the old path answer (it has no food-write tools).
+                return _result("", "error", handed_off=True)
             return _result("Sorry, I couldn't read that. Can you say it again?", "error")
 
         actions = list(turn.actions)
@@ -183,7 +216,7 @@ class FoodAgent:
             return await self._edit(actions, open_, recent, now, session_ref)
         confirm_action = next((a for a in actions if a.type == "confirm"), None)
         if confirm_action is not None:
-            return await self._model_confirm(confirm_action, decision, bound, now)
+            return await self._model_confirm(confirm_action, decision, bound, open_, now)
         ask = next((a for a in actions if a.type == "ask"), None)
         if ask is not None:
             return _result(ask.question, "needs_detail", question=ask.question)
@@ -201,8 +234,11 @@ class FoodAgent:
     def _context(self, open_: list[AgentDraft], recent: list[AgentDraft], now: datetime) -> dict[str, Any]:
         """Only the current user's own drafts (the store is owner-scoped)."""
         last = next((d for d in recent if d.state == "committed"), None)
+        asking = next((d for d in open_ if d.question()), None)
         return {
             "now": now.isoformat(),
+            # The user may be answering this (even with just "yes" or "no").
+            "last_question": None if asking is None else {"draft_ref": asking.id, "question": asking.question()},
             "open_drafts": [{"draft_ref": d.id, "revision": d.revision,
                              "awaiting_yes": d.pending_confirm() is not None, "question": d.question(),
                              "items": [self._item_context(i) for i in d.items]} for d in open_],
@@ -214,9 +250,10 @@ class FoodAgent:
     def _ask_which(self, bound: list[AgentDraft]) -> FoodTurnResult:
         names = [" and ".join(item_label(i) for i in d.items) for d in bound]
         reply = f"You have {len(bound)} meals waiting to log: {_join(names)}. Which one should I log?"
-        return _result(reply, "needs_detail", question=reply)
+        return _result(reply, "needs_detail", question=reply, shown_draft_ids=tuple(d.id for d in bound))
 
-    async def _model_confirm(self, action, decision: str, bound: list[AgentDraft], now: datetime) -> FoodTurnResult:
+    async def _model_confirm(self, action, decision: str, bound: list[AgentDraft], open_: list[AgentDraft],
+                             now: datetime) -> FoodTurnResult:
         """The model thinks the user confirmed. That is a hint: it never commits."""
         if len(bound) > 1:
             chosen = next((d for d in bound if d.id == str(action.draft_ref).lower()), None)
@@ -233,6 +270,9 @@ class FoodAgent:
                 return await self._reshow(draft, now)
             return _result(f"Nothing changed yet. {self._preview_text(draft, preview, [])}",
                            draft_id=draft.id, preview=preview)
+        ready = next((d for d in open_ if d.question() is None and items_ready(d.items)), None)
+        if ready is not None:  # its preview was not the last thing shown: show it again, never commit
+            return await self._reshow(ready, now)
         return _result("There's nothing waiting to log right now.")
 
     async def _confirm(self, draft: AgentDraft, now: datetime) -> FoodTurnResult:
@@ -326,7 +366,20 @@ class FoodAgent:
 
     # ------------------------------------------------------------ reconciliation
 
-    async def _reconcile(self, recent: list[AgentDraft], now: datetime) -> FoodTurnResult | None:
+    async def _abandon_unlanded(self, draft: AgentDraft, intent: CommitIntent) -> FoodTurnResult | None:
+        """N1: "no" after an unverified save that never reached the DB cancels it instead of retrying.
+
+        Safe against a late arrival of the original request: the commit re-checks
+        ``state='ready'`` under a row lock, and a canceled draft fails that check.
+        """
+        if await self.drafts.fetch_operation(op_key(draft.id, intent.revision)) is not None:
+            return None
+        if not await self.drafts.cancel(draft.id, draft.revision):
+            return None  # it committed meanwhile: reconcile normally
+        return _result("OK, not logged.", "ok", "not_applied", draft_id=draft.id)
+
+    async def _reconcile(self, recent: list[AgentDraft], now: datetime,
+                         decision: str = "other") -> FoodTurnResult | None:
         """Finish or verify an earlier commit whose outcome was not verified. Same key, same hash."""
         for draft in recent:  # newest first
             intent = draft.commit_intent()
@@ -339,6 +392,11 @@ class FoodAgent:
                     break  # everything older was reconciled before this one
                 return await self._reconcile_one(draft, now)
             if draft.state == "ready" and draft.revision == intent.revision:
+                if decision == "no":
+                    abandoned = await self._abandon_unlanded(draft, intent)
+                    if abandoned is not None:
+                        return abandoned
+                    draft = await self.drafts.get(draft.id) or draft
                 return await self._reconcile_one(draft, now)
         return None
 
@@ -391,10 +449,11 @@ class FoodAgent:
         refs = {a.item_ref for a in actions if a.type in ("revise_item", "remove_item")}
         adds = any(a.type in ("add_items", "recall_meal") for a in actions)
         current = open_[0] if open_ else None
+        if refs:  # refs are unique across the user's recent drafts
+            holder = next((d for d in open_ if refs <= {i.item_ref for i in d.items}), None)
+            if holder is not None:
+                return holder, False
         if current is not None:
-            current_refs = {i.item_ref for i in current.items}
-            if refs and refs <= current_refs:
-                return current, False
             if not refs and adds:
                 age = now - (current.updated_at or now)
                 if age <= self.new_meal_after:
@@ -451,6 +510,10 @@ class FoodAgent:
         if not items:
             if not is_new:
                 await self.drafts.cancel(target.id, target.revision)
+            if target.is_amend:
+                # S2: removing a whole logged meal is not an amend; say plainly nothing changed.
+                return _result("That meal is already saved, so I didn't change it. To take it off, delete it "
+                               "in Today.", "needs_detail", "not_applied", draft_id=None if is_new else target.id)
             return _result("Removed. Nothing left to log.", draft_id=None if is_new else target.id)
         if len(items) > MAX_DRAFT_ITEMS:
             return _result("That's more items than I can keep in one meal. Can you split it?", "needs_detail")

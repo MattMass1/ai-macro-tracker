@@ -283,7 +283,35 @@ def test_oz_against_gram_basis_is_mass():
 
 def test_count_two_eggs_is_two():
     assert p.multiplier(_p("count", 2), EGG) == Decimal("2")
-    assert p.multiplier(_p("count", 6), p.parse_serving_text("3 cookies (28 g)")) == Decimal("2")
+    assert p.multiplier(_p("count", 6, text="6 cookies"), p.parse_serving_text("3 cookies (28 g)")) == Decimal("2")
+
+
+def test_review_s4_serving_fraction_needs_a_defined_serving():
+    """Review S4 / probe Q1: 'half' of a per-100 g panel is not 50 g; ask instead."""
+    assert p.multiplier(_p("serving_fraction", 0.5, text="half a chicken breast"), PER_100G) is None
+    assert p.multiplier(_p("serving_fraction", 0.5), p.basis_per_100ml()) is None
+    # Against the source's own serving a fraction still always works.
+    assert p.multiplier(_p("serving_fraction", 0.5), SANDWICH) == Decimal("0.5")
+    assert p.multiplier(_p("serving_fraction", 0.5), SMOOTHIE) == Decimal("0.5")
+
+
+def test_review_s4_count_against_multi_piece_serving_needs_matching_noun():
+    """Review S4 / probe Q1: '1' against a '10 pieces' serving is not silently 0.1."""
+    ten = p.parse_serving_text("10 pieces")
+    assert p.multiplier(_p("count", 1, text="1"), ten) is None
+    assert p.multiplier(_p("count", 1, text="1 bar"), ten) is None
+    assert p.multiplier(_p("count", 1, text="one box"), ten) is None
+    # The user counted in the serving's own unit: pieces of 10.
+    assert p.multiplier(_p("count", 1, text="1 piece"), ten) == Decimal("0.1")
+    assert p.multiplier(_p("count", 5, text="5 pieces"), ten) == Decimal("0.5")
+    nuggets = p.parse_serving_text("10 nuggets (160 g)")
+    assert p.multiplier(_p("count", 4, text="4 chicken nuggets"), nuggets) == Decimal("0.4")
+    assert p.multiplier(_p("count", 2, text="2 boxes"), p.parse_serving_text("3 boxes")) == Decimal("0.6667")
+    # A one-unit serving keeps the simple rule: n units = n servings.
+    assert p.multiplier(_p("count", 2, text="2"), EGG) == Decimal("2")
+    assert p.multiplier(_p("count", 2, text="2 bars"), p.parse_serving_text("1 bar (40 g)")) == Decimal("2")
+    # A serving with no count unit: the count is servings.
+    assert p.multiplier(_p("count", 2, text="2 smoothies"), SMOOTHIE) == Decimal("2")
 
 
 def test_mass_vs_volume_without_density_is_none():

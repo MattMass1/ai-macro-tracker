@@ -130,14 +130,16 @@ def _osa(a: str, b: str) -> int:
 
 
 def _close(query_word: str, token: str) -> bool:
-    """A small typo: one edit for words of 5+ letters (two for 8+); a 4-letter word
-    only by swapping two adjacent letters ("tuan"/"tuna"). Short words must be exact."""
+    """A small typo, never a different food word. The first letter must match.
+    4-5 letters: only two adjacent letters swapped ("tuan"/"tuna"), so "mocha" never
+    reaches "mochi" nor "jerky" "jerk". 6-7 letters: one edit; 8+: two edits.
+    Shorter words must be exact. A typo match only ever leads to a question."""
     size = len(query_word)
-    if size < 4 or abs(size - len(token)) > (2 if size >= 8 else 1):
+    if size < 4 or not token or token[0] != query_word[0] or abs(size - len(token)) > (2 if size >= 8 else 1):
         return False
     distance = _osa(query_word, token)
-    if size == 4:
-        return len(token) == 4 and distance == 1 and sorted(query_word) == sorted(token)
+    if size <= 5:
+        return len(token) == size and distance == 1 and sorted(query_word) == sorted(token)
     return distance <= (2 if size >= 8 else 1)
 
 
@@ -489,6 +491,9 @@ class HistoryRecaller:
             return RecallResult(status="needs_detail", question=question)
 
         chosen = next(iter(foods.values()))
+        if chosen.quality != "exact":  # a typo match is a guess: ask, never preview it
+            return RecallResult(status="needs_detail",
+                                question=f"Did you mean the {chosen.name} from {_day_label(chosen.day)}?")
         if missed is not None:
             note = (f"I didn't see it on {_window_label(missed)}, so this is your {chosen.name} "
                     f"from {_day_label(chosen.day)}")

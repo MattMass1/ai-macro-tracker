@@ -290,6 +290,111 @@ def test_identity_allows_the_golds_own_preparation_words_but_nothing_else():
     assert not bench.identity_matches(gold, "Sunny Side Up")  # the food itself is still required
 
 
+# ---------------------------------------------------------------- S5: an independent scorer
+
+
+def test_scorer_never_calls_the_portion_math_it_is_checking():
+    source = Path(bench.__file__).read_text()
+    assert not hasattr(bench, "expected_multiplier")
+    assert "food_agent.portion" not in source and "import multiplier" not in source
+
+
+async def test_saved_multiplier_is_compared_to_the_hand_derived_expected_value():
+    case, script, run = await _run_one("syn-half-burger")
+    assert bench.score_case(case, script, run)["success"]
+    wrong = copy.deepcopy(script)
+    wrong["scoring"]["expected_multiplier"] = {"0": 0.25}  # the code saved 0.5 and agrees with itself; the value is wrong
+    scored = bench.score_case(case, wrong, run)
+    assert not scored["success"] and scored["portion"] == {"n": 0, "d": 1}
+    assert scored["failure_classes"]["lost_fraction"] == 1
+
+
+async def test_a_gold_item_with_no_expected_multiplier_cannot_pass_the_portion_check():
+    case, script, run = await _run_one("syn-half-burger")
+    bare = copy.deepcopy(script)
+    bare["scoring"].pop("expected_multiplier")
+    scored = bench.score_case(case, bare, run)
+    assert not scored["success"] and scored["portion"] == {"n": 0, "d": 1}
+    assert any("expected_multiplier" in reason for reason in scored["reasons"])
+
+
+async def test_expected_grams_is_checked_when_given():
+    case, script, run = await _run_one("syn-smoothie-six-oz")
+    assert bench.score_case(case, script, run)["success"]  # 6 of 12 fl oz = 170 g of the scripted 340 g serving
+    wrong = copy.deepcopy(script)
+    wrong["scoring"]["expected_grams"] = {"0": 100}
+    scored = bench.score_case(case, wrong, run)
+    assert not scored["success"] and any("grams" in reason for reason in scored["reasons"])
+
+
+def test_half_against_a_per_100g_catalog_is_a_question_not_fifty_grams():
+    case = {"id": "x", "expected_action": "clarify", "gold_items": [], "old_app": {}}
+    fifty = bench.CaseRun(case_id="x", decoy_markers=[], turns=[bench.TurnRecord(
+        idx=0, user="half a chicken breast", reply="Chicken breast: 5 g protein. Log it?")],
+        entries=[{"id": "1", "name": "Chicken breast", "component_metadata": {"items": [
+            {"display_name": "Chicken breast", "multiplier": 0.5, "provider": "FatSecret"}]}}])
+    scored = bench.score_case(case, {}, fifty)
+    assert not scored["success"]
+
+
+@pytest.mark.parametrize("gold,shown,expected", [
+    ({"name": "fries", "brand": "McDonald's"}, "McDonald's Large Fries", False),
+    ({"name": "fries", "brand": "McDonald's"}, "McDonald's Fries", True),
+    ({"name": "chicken breast"}, "Chicken breast, raw", False),
+    ({"name": "chicken breast", "preparation": "raw"}, "Raw chicken breast", True),
+    ({"name": "Quarter Pounder", "brand": "McDonald's"}, "McDonald's Quarter Pounder with Cheese", False),
+    ({"name": "coffee"}, "Regular Coffee", False),
+    ({"name": "burger"}, "Double Burger", False),
+    ({"name": "smoothie"}, "Mini Smoothie", False),
+    ({"name": "smoothie"}, "Small Strawberry Smoothie", False),
+    ({"name": "rice"}, "Cooked Rice", False),
+    ({"name": "large fries"}, "Fries", False),
+    ({"name": "rice", "preparation": "cooked"}, "Cooked Rice", True),
+])
+def test_identity_keeps_size_preparation_and_flavor_words(gold, shown, expected):
+    assert bench.identity_matches({"brand": None, "variant": None, "preparation": None, **gold}, shown) is expected
+
+
+@pytest.mark.parametrize("reply,claim", [
+    ("I logged it.", True),
+    ("I've logged your eggs.", True),
+    ("All set, logged it for you.", True),
+    ("Saved it.", True),
+    ("I added it to your log.", True),
+    ("Logged Burger, no sauce: 30 g protein.", True),
+    ("Logged Burger: 30 g protein, no fiber data.", True),
+    ("There is no sauce, but I've logged the burger.", True),
+    ("I didn't log it.", False),
+    ("I haven't logged it yet.", False),
+    ("OK, not logged.", False),
+    ("I couldn't log it, so nothing was saved.", False),
+    ("Did you mean the Creamy Crisp bars you logged earlier?", False),
+    ("Did I log it already?", False),
+])
+def test_claims_logged_first_person_and_receipt_forms(reply, claim):
+    assert bench.claims_logged(reply) is claim
+
+
+async def test_any_old_path_call_fails_the_case():
+    case, script, run = await _run_one("syn-boiled-eggs-control")
+    assert bench.score_case(case, script, run)["success"]
+    handed = copy.deepcopy(run)
+    handed.old_path_calls = 1
+    scored = bench.score_case(case, script, handed)
+    assert not scored["success"] and any("old path" in reason for reason in scored["reasons"])
+
+
+async def test_the_old_path_stub_records_a_write_it_attempts():
+    old = bench.OldPath()
+    attempted = []
+
+    async def log_meal(args):
+        attempted.append(args)
+        return {"status": "committed"}
+    reply, _ = await old(message="yes", handlers={"log_meal": log_meal})
+    assert old.calls == ["yes"] and len(old.writes) == 1 and attempted
+
+
 def test_percentiles():
     assert bench.percentile([1.0, 2.0, 3.0, 4.0], 50) == 2.5
     assert bench.percentile([5.0], 95) == 5.0

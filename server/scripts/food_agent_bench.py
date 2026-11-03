@@ -142,9 +142,17 @@ class OldPath:
 
     def __init__(self):
         self.calls: list[str] = []
+        self.writes: list[str] = []  # write attempts, so a double write by the old model is visible
 
     async def __call__(self, **kwargs):
         self.calls.append(kwargs["message"])
+        write = (kwargs.get("handlers") or {}).get("log_meal")
+        if write is not None:  # worst case: the old model logs whatever it was handed
+            self.writes.append(kwargs["message"])
+            try:
+                await write({"description": kwargs["message"]})
+            except Exception:  # the harness' refusing handler raises; the attempt is what matters
+                pass
         return "Handed to the old path.", []
 
 
@@ -568,6 +576,7 @@ async def run_case(case: dict[str, Any], script: dict[str, Any], backend) -> Cas
         run.entries = run.entries or []
     finally:
         reset_user(scope)
+    run.old_path_calls += len(old.calls)  # the old model ran at all: a fail, with or without a write
     run.unexpected_model_calls = interpreter.unexpected
     run.script_actions = [{"turn": t.idx, "types": t.model_types} for t in run.turns]
     run.wall_ms = (time.perf_counter() - wall0) * 1000
@@ -579,10 +588,16 @@ async def run_case(case: dict[str, Any], script: dict[str, Any], backend) -> Cas
 
 _TOKEN = re.compile(r"[a-z]+|\d+")
 _UNIT_TOKENS = frozenset({"oz", "fl", "g", "ml", "lb", "l", "kg", "cup", "tbsp", "tsp"})
-_DESCRIPTORS = frozenset({"the", "a", "an", "of", "and", "large", "whole", "raw", "cooked", "fresh", "regular"})
+_DESCRIPTORS = frozenset({"the", "a", "an", "of", "and"})  # filler only: size, raw/cooked and flavor words are identity
 _NUMBERED = re.compile(r"(^|\s)\d+\s*[.)](\s|$)")
-_CLAIM = re.compile(r"\s*(logged|saved|updated)\b", re.I)  # a sentence that STARTS with the claim, as receipts do
-_NEGATED = re.compile(r"n't|\bnot\b|\bnever\b|\bno\b|\bnothing\b|\bcannot\b|\bcould not\b", re.I)
+_CLAIM_START = re.compile(r"\s*(logged|saved|updated)\b", re.I)  # a receipt-style sentence: "Logged X: ..."
+_VERB = r"(?:logged|saved|added|updated)"
+_CLAIM_ANYWHERE = re.compile(
+    rf"\bi(?:'ve|\s+have)?\s+(?:just\s+|already\s+)?{_VERB}\b"  # "I logged", "I've saved"
+    rf"|\b{_VERB}\s+(?:it|that|this|them)\b"  # "logged it (for you)", "saved it", "added it"
+    rf"|\b(?:it|that|this|they)(?:'s|\s+is|\s+was|\s+has\s+been|\s+have\s+been|\s+are)\s+(?:been\s+)?{_VERB}\b"
+    rf"|\b(?:has|have)\s+been\s+{_VERB}\b", re.I)
+_NEGATOR = re.compile(r"n't\b|\bnot\b|\bnever\b|\bcannot\b|\bno longer\b|\bnothing\b", re.I)
 _AMOUNT_Q = re.compile(r"\bhow (many|much)\b", re.I)
 
 
@@ -608,33 +623,13 @@ def identity_matches(gold: dict[str, Any], display_name: str) -> bool:
     return bool(wanted) and wanted <= shown and not extras
 
 
-def _gold_portion(gold: dict[str, Any]):
-    from food_agent.contracts import Portion
-    spec = gold["portion"]
-    kind = spec["kind"]
-    unit = str(spec.get("unit") or "").replace(" ", "_").casefold()
-    data = {"kind": kind, "amount": None if kind == "unspecified" else float(spec["amount"]),
-            "unit": unit if kind in ("mass", "volume") else None, "text": ""}
-    try:
-        return Portion.model_validate_json(json.dumps(data))
-    except ValueError:
-        return None
-
-
-def expected_multiplier(gold: dict[str, Any], item: dict[str, Any]) -> float | None:
-    """How many servings of the SAVED food the gold portion is (the resolver panel's own serving)."""
-    from food_agent.contracts import ServingBasis
-    from food_agent.portion import multiplier
-    portion = _gold_portion(gold)
-    basis_raw = item.get("serving_basis")
-    if portion is None or not isinstance(basis_raw, dict):
-        return None
-    try:
-        basis = ServingBasis.model_validate_json(json.dumps(basis_raw))
-    except ValueError:
-        return None
-    found = multiplier(portion, basis)
-    return float(found) if found is not None else None
+def _expected(scoring: dict[str, Any], gold: dict[str, Any], index: int, key: str) -> float | None:
+    """A hand-derived expected value for gold item ``index``: on the gold item itself or in the script's
+    ``scoring[key]`` map. The scorer never derives it with the portion math under test."""
+    if gold.get(key) is not None:
+        return float(gold[key])
+    given = (scoring.get(key) or {}).get(str(index))
+    return None if given is None else float(given)
 
 
 def _saved_items(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -651,8 +646,22 @@ def _sentences(text: str) -> list[str]:
 
 
 def claims_logged(reply: str) -> bool:
-    """Does the reply say a meal was logged/saved/updated (negations like "not logged" do not count)?"""
-    return any(_CLAIM.match(s) and not _NEGATED.search(s) for s in _sentences(reply))
+    """Does the reply claim this turn logged/saved/updated/added something?
+
+    A receipt-style sentence ("Logged X, no sauce: ...") always counts. A first-person or "it" claim ("I logged
+    it", "saved it") counts unless a negator sits right before the verb ("I haven't logged it"). A question never
+    claims.
+    """
+    for sentence in _sentences(str(reply or "").replace("’", "'")):
+        if sentence.rstrip().endswith("?"):
+            continue
+        if _CLAIM_START.match(sentence):
+            return True
+        for found in _CLAIM_ANYWHERE.finditer(sentence):
+            before = " ".join(sentence[:found.end()].split()[-5:-1])  # up to 4 words ahead of the claim verb
+            if not _NEGATOR.search(sentence[max(0, found.start() - 25):found.end()]) and not _NEGATOR.search(before):
+                return True
+    return False
 
 
 def _numbers(reply: str) -> dict[str, float]:
@@ -703,9 +712,19 @@ def score_case(case: dict[str, Any], script: dict[str, Any], run: CaseRun) -> di
         candidates = [i for i, s in enumerate(saved) if i not in used
                       and identity_matches(gold["identity"], str(s.get("display_name") or ""))]
         best = None
+        expected = _expected(scoring, gold, g, "expected_multiplier")
+        expected_grams = _expected(scoring, gold, g, "expected_grams")
+        if expected is None:
+            reasons.append(f"no expected_multiplier for gold item {g} (the portion cannot be checked)")
         for i in candidates:
-            expected = expected_multiplier(gold, saved[i])
-            good = expected is not None and abs(float(saved[i].get("multiplier") or 0) - expected) <= 0.01 * expected
+            saved_mult = float(saved[i].get("multiplier") or 0)
+            good = expected is not None and abs(saved_mult - expected) <= 0.01 * expected
+            if good and expected_grams is not None:
+                per = (saved[i].get("serving_basis") or {}).get("grams")
+                grams_ok = per is not None and abs(float(per) * saved_mult - expected_grams) <= 0.02 * expected_grams
+                if not grams_ok:
+                    reasons.append(f"grams: gold item {g} expected about {expected_grams:g} g")
+                good = grams_ok
             if best is None or (good and not best[2]):
                 best = (i, expected, good)
         row = {"gold": g, "identity": best is not None, "portion": bool(best and best[2]), "expected_multiplier":
@@ -748,6 +767,9 @@ def score_case(case: dict[str, Any], script: dict[str, Any], run: CaseRun) -> di
         identity_matches(g, str(s.get("display_name") or "")) for g in gold_all) for s in saved)
     if wrong_past:
         reasons.append("wrong past meal copied from history")
+
+    if run.old_path_calls:
+        reasons.append(f"old path ran ({run.old_path_calls} call/write attempt(s)) for a food-agent dialogue")
 
     # ---- confirm sequence, stale commits, false claims, receipts
     committed_before_confirm = false_logged = stale = receipt_bad = 0

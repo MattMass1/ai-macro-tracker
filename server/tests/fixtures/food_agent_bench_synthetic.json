@@ -82,7 +82,7 @@
       ],
       "options": [],
       "history": [],
-      "scoring": {"expected_entries": 1}
+      "scoring": {"expected_entries": 1, "expected_multiplier": {"0": 0.5}}
     },
     "syn-smoothie-six-oz": {
       "turns": [
@@ -101,7 +101,7 @@
       ],
       "options": [],
       "history": [],
-      "scoring": {"expected_entries": 1}
+      "scoring": {"expected_entries": 1, "expected_multiplier": {"0": 0.5}, "expected_grams": {"0": 170}}
     },
     "syn-last-time-bowl": {
       "turns": [
@@ -113,7 +113,7 @@
         {"name": "Teriyaki Salmon Bowl", "days_ago": 3, "kcal": 640, "p": 38, "c": 70, "f": 22, "fiber": 6, "source": "Synthetic menu", "target": true},
         {"name": "Two Pancake Stack", "days_ago": 0, "kcal": 450, "p": 10, "c": 80, "f": 9, "fiber": 2, "source": "Synthetic menu"}
       ],
-      "scoring": {"expected_entries": 1}
+      "scoring": {"expected_entries": 1, "expected_multiplier": {"0": 1}}
     },
     "syn-boiled-eggs-control": {
       "turns": [
@@ -130,7 +130,7 @@
       ],
       "options": [],
       "history": [],
-      "scoring": {"expected_entries": 1}
+      "scoring": {"expected_entries": 1, "expected_multiplier": {"0": 2}}
     }
   }
 }

@@ -146,6 +146,15 @@ async def test_two_open_drafts_and_yes_does_not_commit(env):
         await _say(agent, "2 eggs")
         script.push(add((_ident("Toast"), _portion())))
         await _say(agent, "toast")
+        # Showing the toast cleared the eggs binding (B1); another device shows the eggs again.
+        from food_agent import contracts as c
+        from food_agent.drafts import StoreDrafts
+        port = StoreDrafts(env["store"])
+        eggs = next(d for d in await port.recent(_now() - timedelta(hours=1)) if d.items[0].identity.name == "Eggs")
+        assert eggs.pending is None
+        await port.save(eggs.with_(pending=c.PendingConfirm(
+            draft_id=eggs.id, revision=eggs.revision + 1,
+            content_hash=c.content_hash(list(eggs.items))).to_pending_question()), eggs.revision)
         result = await _say(agent, "yes")
     assert result.receipt is None and result.reply.rstrip().endswith("?")
     assert await _rows(env["url"], "SELECT 1 FROM nutrition_entries") == []
@@ -194,6 +203,26 @@ async def test_model_confirmed_true_is_rejected_by_schema_and_commits_nothing(en
         result = await _say(agent, "confirmed, go on then")
     assert result.receipt is None
     assert await _rows(env["url"], "SELECT 1 FROM nutrition_entries") == []
+
+
+@pg
+async def test_yes_or_no_to_a_side_question_never_acts_on_the_earlier_preview_after_restart(env):
+    """Review B1 (probes P2, R1): the cleared binding lives in the DB, so a restart cannot revive it."""
+    agent, script, _ = _agent(env["store"])
+    with As(env["users"][0]):
+        script.push(HALF_QP)
+        await _say(agent, "half a quarter pounder")
+        script.push({"type": "ask", "question": "Did you have any sauce with it?"})
+        await _say(agent, "what about the sauce")
+        restarted, script2, _ = _agent(env["store"])
+        script2.push({"type": "ask", "question": "OK. Anything else with it?"})
+        no = await _say(restarted, "no")
+        script2.push({"type": "ask", "question": "Which sauce?"})
+        yes = await _say(restarted, "yes")
+    assert no.receipt is None and yes.receipt is None
+    assert await _rows(env["url"], "SELECT 1 FROM nutrition_entries") == []
+    (draft,) = await _rows(env["url"], "SELECT state, pending_question FROM meal_drafts")
+    assert draft["state"] == "collecting" and draft["pending_question"] is None
 
 
 # ---------------------------------------------------------------- item 7 (and real failure 2 on PG)
@@ -386,6 +415,7 @@ async def test_unknown_nutrients_are_never_stored_or_shown_as_zero(env, monkeypa
         script.push(add((_ident("Mystery Bar"), _portion())))
         no_cal = await _say(agent, "a mystery bar")
         assert no_cal.preview is None and "0 kcal" not in no_cal.reply
+        script.push({"type": "ask", "question": "Which brand was it?"})
         await _say(agent, "yes")
         assert await _rows(env["url"], "SELECT 1 FROM nutrition_entries") == []
 
@@ -394,6 +424,7 @@ async def test_unknown_nutrients_are_never_stored_or_shown_as_zero(env, monkeypa
         script.push(add((_ident("Core Power Elite"), _portion())))
         blocked = await _say(agent, "a core power elite")  # calorie-only gate closed
         assert "fiber" in blocked.reply and "0 g fiber" not in blocked.reply
+        script.push({"type": "ask", "question": "Which brand was it?"})
         await _say(agent, "yes")
         assert await _rows(env["url"], "SELECT 1 FROM nutrition_entries") == []
 

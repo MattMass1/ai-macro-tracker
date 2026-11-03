@@ -188,6 +188,35 @@ def _basis_ml(basis: ServingBasis) -> Decimal | None:
     return None
 
 
+_NOUN_IGNORE = frozenset({
+    "a", "an", "the", "of", "and", "or", "my", "about", "around", "like", "just", "only", "x",
+    "half", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
+    "twelve", "dozen", "couple", "few", "several", "large", "small", "medium", "big", "little",
+    "mini", "whole", "extra", "regular",
+})
+
+
+def _stem(word: str) -> str:
+    if word.endswith("ies") and len(word) > 4:
+        return word[:-3] + "y"
+    if word.endswith(("xes", "ches", "shes", "sses", "zes")):
+        return word[:-2]
+    if word.endswith("s") and not word.endswith("ss") and len(word) > 2:
+        return word[:-1]
+    return word
+
+
+def _noun_tokens(text: str | None) -> set[str]:
+    words = re.findall(r"[a-z]+", (text or "").lower())
+    return {_stem(word) for word in words if word not in _NOUN_IGNORE}
+
+
+def _same_count_noun(user_text: str | None, serving_noun: str | None) -> bool:
+    """True when the user's count words name the serving's own unit ("4 pieces" vs "10 pieces")."""
+    serving = _noun_tokens(serving_noun)
+    return bool(serving) and bool(serving & _noun_tokens(user_text))
+
+
 def multiplier(portion: Portion, basis: ServingBasis) -> Decimal | None:
     """How many source servings ``portion`` is, or ``None`` when it cannot be known.
 
@@ -200,11 +229,17 @@ def multiplier(portion: Portion, basis: ServingBasis) -> Decimal | None:
     if amount is None:
         return None
     if portion.kind == "serving_fraction":
-        return _result(amount)
+        # "Half" is half of the source's own serving. A per-100 g / per-100 ml
+        # panel has no serving, so "half a chicken breast" is not 50 g: ask.
+        return _result(amount) if basis.basis == "per_serving" else None
     if portion.kind == "count":
         if basis.basis != "per_serving":
             return None
-        if basis.unit == "count" and basis.amount is not None:
+        if basis.unit == "count" and basis.amount is not None and _dec(basis.amount) != 1:
+            # A multi-piece serving ("10 pieces"): divide only when the user
+            # counted in that same unit ("4 pieces"). "1" or "1 box" is unclear.
+            if not _same_count_noun(portion.text, basis.count_noun):
+                return None
             return _result(amount / _dec(basis.amount))
         return _result(amount)
 

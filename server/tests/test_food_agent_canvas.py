@@ -44,10 +44,17 @@ class OldPath:
     def __init__(self, reply="Today is Push: bench, rows and dips."):
         self.reply = reply
         self.calls = []
+        self.tools = []
+        self.instructions = []
 
     async def __call__(self, **kwargs):
         self.calls.append(kwargs["message"])
+        self.tools.append(sorted(set(kwargs["handlers"]) | {t["name"] for t in kwargs["tool_catalog"]}))
+        self.instructions.append(kwargs["instruction_override"])
         return self.reply, []
+
+
+FOOD_WRITE_TOOLS = {"log_meal", "update_meal"}
 
 
 class Rig:
@@ -213,6 +220,9 @@ async def test_non_food_message_is_handed_to_the_old_path_unchanged(user, monkey
     hooked, with_hook = await run(True)
     plain, without_hook = await run(False)
     assert hooked.old.calls == ["what's my workout today"]
+    # Same visible result; the only difference is that food writes stay with the food agent.
+    assert "log_meal" in plain.old.tools[0] and not FOOD_WRITE_TOOLS & set(hooked.old.tools[0])
+    assert "log_meal" not in hooked.old.instructions[0]
     assert json.dumps(with_hook, sort_keys=True) == json.dumps(without_hook, sort_keys=True)
     assert hooked.chat.history == plain.chat.history
     assert with_hook["reply"] == "Today is Push: bench, rows and dips."
@@ -234,6 +244,103 @@ async def test_handed_off_turn_shows_the_reconcile_notice_first(user):
     assert later["reply"].startswith("Logged McDonald's Quarter Pounder (half)")
     assert later["reply"].endswith("Today is Push: bench, rows and dips.")
     assert len(rig.drafts.entries) == 1 and _assistant_texts(rig.chat)[-1] == later["reply"]
+    # Review S6: the verified save is shown as the existing receipt; the stale card is gone.
+    assert later["receipt"] is not None and later["receipt"]["recordId"] in rig.drafts.entries
+    receipt = _components(later)["MealReceipt"]
+    assert receipt["text"].startswith("Logged McDonald's Quarter Pounder (half)")
+    assert "could not verify" not in json.dumps(later).casefold()
+    assert "FoodClarification" not in _components(later)
+
+
+class GreedyOldModel:
+    """Review probe C1: an old-path model that logs food whenever it has a tool for it."""
+
+    def __init__(self):
+        self.tools = []
+
+    async def __call__(self, **kwargs):
+        handlers = kwargs["handlers"]
+        self.tools.append(sorted(set(handlers) | {t["name"] for t in kwargs["tool_catalog"]}))
+        if "log_meal" in handlers:
+            out = await handlers["log_meal"]({"description": "half quarter pounder", "meal_type": "Dinner"})
+            return out["confirmation"], []
+        if "update_meal" in handlers:
+            out = await handlers["update_meal"]({"add": [{"description": "half quarter pounder"}]})
+            return out.get("confirmation") or "ok", []
+        return "I can't log food from here. Tell me what you ate and I'll show it first.", []
+
+
+def _legacy_writers(rig, writes):
+    def foods():
+        async def log_meal(call_id, args):
+            writes.append(("log_meal", dict(args)))
+            return {"status": "committed", "operation_id": "op-legacy",
+                    "logged": {"id": "legacy-row", "name": args["description"]},
+                    "confirmation": f"Logged {args['description']}."}
+
+        async def lookup_food(call_id, args):
+            return {"status": "found"}
+        return {"log_meal": log_meal, "lookup_food": lookup_food}
+
+    class AutoCommitDrafts:
+        asked = 0
+
+        async def context(self):
+            return {"open_meals": [], "logged_meals": []}
+
+        async def handle(self, args, **_kw):
+            writes.append(("update_meal", dict(args)))
+            return {"status": "committed", "draft_ref": str(uuid4()), "logged": {"id": "legacy-draft-row",
+                    "name": "half quarter pounder"}, "confirmation": "Logged half quarter pounder."}
+
+    async def drafts_factory():
+        AutoCommitDrafts.asked += 1
+        return AutoCommitDrafts()
+    rig.service.food_factory = foods
+    return drafts_factory, AutoCommitDrafts
+
+
+@pytest.mark.parametrize("meal_drafts_on", [False, True])
+async def test_misread_food_handed_off_cannot_write_and_one_yes_gives_one_row(user, meal_drafts_on):
+    """Review B2 / probe C1: with the food agent active, a handed-off turn has no food write tool."""
+    rig = Rig()
+    writes = []
+    drafts_factory, engine = _legacy_writers(rig, writes)
+    if meal_drafts_on:
+        rig.service.drafts_factory = drafts_factory
+    rig.service.agent = greedy = GreedyOldModel()
+    rig.script.push(HALF_QP)
+    first = await rig.say("half a mcdonald's quarter pounder")
+    assert first["reply"].endswith("Log it?")
+    rig.script.push({"type": "not_food"})  # the food model misreads an edit as not food
+    handed = await rig.say("actually that was my dinner, log it as dinner")
+    assert not FOOD_WRITE_TOOLS & set(greedy.tools[0])
+    assert writes == [] and engine.asked == 0 and rig.drafts.entries == {}
+    assert handed["receipt"] is None and "MealReceipt" not in _components(handed)
+    # B1: the handed-off reply did not re-show the preview, so it is unbound.
+    # The next "yes" goes to the model, whose confirm only re-shows it.
+    (draft_id, row), = rig.drafts.drafts.items()
+    rig.script.push({"type": "confirm", "draft_ref": draft_id, "shown_revision": row["revision"]})
+    reshown = await rig.say("yes")
+    assert writes == [] and rig.drafts.entries == {} and rig.drafts.commit_calls == []
+    assert reshown["reply"].endswith("Log it?") and reshown["receipt"] is None
+    assert "MealReceipt" not in _components(reshown)
+    done = await rig.say("yes")
+    assert writes == [] and len(rig.drafts.entries) == 1  # one meal, one row
+    assert len(rig.drafts.commit_calls) == 1 and done["receipt"] is not None
+    assert "MealReceipt" in _components(done)
+
+
+async def test_without_the_food_agent_the_old_model_keeps_its_food_tools(user):
+    """The B2 restriction applies only when the food agent is active for the user."""
+    rig = Rig()
+    writes = []
+    _legacy_writers(rig, writes)
+    rig.service.food_agent_factory = None
+    rig.service.agent = greedy = GreedyOldModel()
+    result = await rig.say("half a quarter pounder")
+    assert "log_meal" in greedy.tools[0] and len(writes) == 1
+    assert "MealReceipt" in _components(result)
 
 
 # ---------------------------------------------------------------- replay

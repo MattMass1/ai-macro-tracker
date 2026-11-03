@@ -178,13 +178,49 @@ async def test_hint_day_without_the_food_says_which_day_it_used():
 # ---------------------------------------------------------------- matching tolerance
 
 
-@pytest.mark.parametrize("query", ["ahi tuna bowls", "Ahi-Tuna Bowl!", "AHI TUNA BOWL", "ahi tuan bowl",
-                                   "ahi tuna bowel", "tuna bowl"])
-async def test_plural_case_punctuation_and_small_typos(query):
+@pytest.mark.parametrize("query", ["ahi tuna bowls", "Ahi-Tuna Bowl!", "AHI TUNA BOWL", "tuna bowl"])
+async def test_plural_case_and_punctuation_are_found(query):
     tuna = _row(**TUNA)
     recaller, _ = _recaller([_row(**BK), tuna])
     result = await recaller.recall(query, None)
     assert result.status == "found" and result.source_entry_id == tuna["id"], query
+
+
+@pytest.mark.parametrize("query", ["ahi tuan bowl", "ahi tuna bwol"])
+async def test_a_typo_only_match_asks_did_you_mean(query):
+    tuna = _row(**TUNA)
+    recaller, _ = _recaller([_row(**BK), tuna])
+    result = await recaller.recall(query, None)
+    assert result.status == "needs_detail" and result.items == (), query
+    assert result.question.startswith("Did you mean the Ahi Tuna Bowl") and result.question.count("?") == 1
+
+
+# Review S3 (probes P9, P9b): a typo must never turn into a different real food.
+@pytest.mark.parametrize("query,entry", [("my mocha from last time", "Mochi ice cream"),
+                                         ("the jerky I had", "Jerk chicken thighs"),
+                                         ("toast again", "Roast beef"),
+                                         ("ahi tuna bowel", "Ahi Tuna Bowl")])
+def test_typo_tolerance_never_bridges_different_foods(query, entry):
+    from food_agent.recall import food_words, match, tokens_of
+    assert match(food_words(query), tokens_of(entry)) is None
+
+
+@pytest.mark.parametrize("query,entry", [("mocha", "Mochi ice cream"), ("jerky", "Jerk chicken thighs"),
+                                         ("toast", "Roast beef")])
+async def test_unrelated_near_miss_entries_are_never_found(query, entry):
+    row = _row(entry, date(2026, 10, 30))
+    recaller, _ = _recaller([row], clock=_clock(2026, 11, 2))
+    result = await recaller.recall(query, "last time")
+    assert result.status != "found" and result.items == () and result.source_entry_id is None
+
+
+def test_fuzzy_needs_same_first_letter_and_longer_words():
+    from food_agent.recall import match
+    assert match(["chiken"], ["chicken"]) == "fuzzy"   # 6+ letters: one edit, same first letter
+    assert match(["hicken"], ["chicken"]) is None      # first letter differs
+    assert match(["bwol"], ["bowl"]) == "fuzzy"        # short word: adjacent swap only
+    assert match(["mocha"], ["mochi"]) is None         # 5 letters: no substitution
+    assert match(["mocha"], ["mohca"]) == "fuzzy"
 
 
 @pytest.mark.parametrize("query", ["salmon bowl", "ahi tuna roll", "tuna sandwich", "bowl of chili",

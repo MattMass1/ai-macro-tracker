@@ -21,7 +21,7 @@ from food_agent import confirm
 from food_agent import contracts as c
 from food_agent import portion as p
 from food_agent.coordinator import FoodAgent, FoodTurnResult
-from food_agent.drafts import MemoryDrafts
+from food_agent.drafts import DraftCommitConflict, MemoryDrafts
 from food_agent.ports import FindResult
 
 # ---------------------------------------------------------------- fixtures
@@ -306,6 +306,11 @@ async def test_two_open_drafts_and_yes_asks_which(rig):
     script.push(add((_ident("Toast"), _portion())))
     await _say(agent, "toast")
     assert len(drafts.drafts) == 2
+    # Showing the toast cleared the eggs binding (B1). Another device then shows the eggs again.
+    eggs_id = next(i for i, row in drafts.drafts.items()
+                   if row["items"][0]["resolution"]["state"]["identity"]["name"] == "Eggs")
+    assert drafts.drafts[eggs_id]["pending_question"] is None
+    _rebind(drafts, eggs_id)
     result = await _say(agent, "yes")
     assert drafts.commit_calls == [] and drafts.entries == {}
     assert result.reply.rstrip().endswith("?")
@@ -319,6 +324,7 @@ async def test_unknown_calories_never_commits_and_asks_one_question(rig):
     result = await _say(agent, "a mystery bar")
     assert result.preview is None and result.reply.count("?") == 1
     assert "0 kcal" not in result.reply
+    script.push({"type": "ask", "question": "Which brand was it?"})
     yes = await _say(agent, "yes")
     assert drafts.commit_calls == [] and drafts.entries == {} and yes.receipt is None
 
@@ -329,6 +335,7 @@ async def test_unknown_fiber_blocked_when_unknowns_cannot_be_stored(rig):
     script.push(add((_ident("Core Power Elite"), _portion())))
     result = await _say(agent, "a core power elite")
     assert "fiber" in result.reply and "0 g fiber" not in result.reply
+    script.push({"type": "ask", "question": "Which brand was it?"})
     await _say(agent, "yes")
     assert drafts.commit_calls == [] and drafts.entries == {}
 
@@ -458,6 +465,146 @@ async def test_item_refs_are_unique_across_open_and_logged_meals(rig):
     assert [i["resolution"]["state"]["item_ref"] for i in open_rows[0]["items"]] == ["i2"]
 
 
+# ---------------------------------------------------------------- review round (B1, S1, S2, N1)
+
+BIG_MAC_COMBO = _food("fs-bmc", "McDonald's Big Mac Combo", "1 combo",
+                      protein=28, calories=1080, carbs=140, fat=42, fiber=8)
+
+
+def _ask_combo(finder):
+    plain = Finder.find
+
+    async def find(identity, portion):
+        finder.calls.append((identity, portion))
+        if identity.name.casefold() == "big mac":
+            return FindResult(status="needs_detail", food=None, note=None, question="Did you mean Big Mac Combo?")
+        if identity.name.casefold() == "big mac combo":
+            return FindResult(status="matched", food=BIG_MAC_COMBO, note=None, question=None)
+        finder.calls.pop()
+        return await plain(finder, identity, portion)
+    finder.find = find
+
+
+def _rebind(drafts, draft_id):
+    """Another device showed this draft's preview: give it a valid binding again."""
+    row = drafts.drafts[draft_id]
+    items = [c.DraftItemState.model_validate_json(json.dumps(i["resolution"]["state"])) for i in row["items"]]
+    row["pending_question"] = c.PendingConfirm(draft_id=draft_id, revision=row["revision"],
+                                               content_hash=c.content_hash(items)).to_pending_question()
+
+
+async def test_p2_yes_to_a_model_side_question_never_logs_the_earlier_preview(rig):
+    agent, drafts, script, _, _ = rig
+    script.push(HALF_QP)
+    await _say(agent, "half a quarter pounder")
+    script.push({"type": "ask", "question": "Did you have any sauce with it?"})
+    await _say(agent, "what about the sauce")
+    script.push({"type": "confirm", "draft_ref": next(iter(drafts.drafts)), "shown_revision": 1})
+    answer = await _say(agent, "yes")
+    assert drafts.entries == {} and drafts.commit_calls == [] and answer.receipt is None
+    assert len(script.calls) == 3  # the yes reached the model; it was not taken as a commit
+    # The model's confirm only re-shows the preview; a yes to THAT logs it.
+    assert answer.preview is not None and answer.reply.endswith("Log it?")
+    done = await _say(agent, "yes")
+    assert len(drafts.entries) == 1 and done.receipt is not None
+
+
+async def test_r1_no_to_a_model_side_question_does_not_cancel_the_meal(rig):
+    agent, drafts, script, _, _ = rig
+    script.push(HALF_QP)
+    await _say(agent, "half a quarter pounder")
+    script.push({"type": "ask", "question": "Did you have any sauce with it?"})
+    await _say(agent, "what about the sauce")
+    script.push({"type": "ask", "question": "OK. Anything else with it?"})
+    await _say(agent, "no")
+    assert [row["state"] for row in drafts.drafts.values()] != ["canceled"]
+    assert drafts.entries == {}
+
+
+async def test_p3_yes_to_another_drafts_question_never_logs_the_first_draft(rig):
+    agent, drafts, script, finder, clock = rig
+    _ask_combo(finder)
+    script.push(HALF_QP)
+    await _say(agent, "half a quarter pounder")
+    clock.now += timedelta(minutes=25)
+    script.push(add((_ident("Big Mac", "McDonald's", "restaurant"), _portion())))
+    asked = await _say(agent, "a big mac")
+    assert asked.reply == "Did you mean Big Mac Combo?"
+    big_mac_ref = asked.draft_id
+    item_ref = drafts.drafts[big_mac_ref]["items"][0]["resolution"]["state"]["item_ref"]
+    script.push(revise(item_ref, identity={"name": "Big Mac Combo", "brand": None, "variant": None,
+                                           "kind": None, "preparation": None}))
+    answered = await _say(agent, "yes")
+    assert drafts.entries == {} and answered.preview is not None
+    assert answered.preview.draft_id == big_mac_ref
+    await _say(agent, "yes")
+    assert [e["name"] for e in drafts.entries.values()] == ["McDonald's Big Mac Combo"]
+
+
+async def test_s1_yes_answering_a_did_you_mean_question_reaches_the_model_and_resolves(rig):
+    agent, drafts, script, finder, _ = rig
+    _ask_combo(finder)
+    script.push(add((_ident("Big Mac", "McDonald's", "restaurant"), _portion())))
+    asked = await _say(agent, "a big mac")
+    assert asked.question == "Did you mean Big Mac Combo?"
+    script.push(revise("i1", identity={"name": "Big Mac Combo", "brand": None, "variant": None,
+                                       "kind": None, "preparation": None}))
+    answered = await _say(agent, "yes")
+    assert len(script.calls) == 2 and script.calls[1][0] == "yes"
+    assert "Did you mean Big Mac Combo?" in json.dumps(script.calls[1][1])
+    assert answered.preview is not None and "I still need" not in answered.reply
+    assert drafts.entries == {}
+
+
+async def test_s2_removing_the_only_item_of_a_logged_meal_is_honest(rig):
+    agent, drafts, script, _, _ = rig
+    script.push(HALF_QP)
+    await _say(agent, "half a quarter pounder")
+    await _say(agent, "yes")
+    (entry_id, entry), = drafts.entries.items()
+    saved = dict(entry)
+    script.push({"type": "remove_item", "item_ref": "i1"})
+    result = await _say(agent, "actually remove the burger")
+    assert "Removed" not in result.reply and "didn't change" in result.reply
+    assert result.outcome.effect == "not_applied"
+    assert drafts.entries == {entry_id: saved}
+
+
+async def test_n1_no_cancel_after_an_unverified_save_that_never_landed_logs_nothing(rig):
+    agent, drafts, script, _, _ = rig
+    script.push(HALF_QP)
+    await _say(agent, "half a quarter pounder")
+    drafts.fail_before_commit = 1
+    lost = await _say(agent, "yes")
+    assert lost.outcome.effect == "unknown"
+    no = await _say(agent, "no, cancel")
+    assert drafts.entries == {} and "logged" not in no.reply.casefold().replace("not logged", "")
+    (draft_id, row), = drafts.drafts.items()
+    assert row["state"] == "canceled"
+    # The original request arriving late cannot write either.
+    first = drafts.commit_calls[0]
+    with pytest.raises(DraftCommitConflict):
+        await drafts.commit(*first)
+    assert drafts.entries == {}
+
+
+async def test_model_outage_hands_off_when_nothing_is_open_but_not_when_a_draft_is(rig):
+    agent, drafts, script, _, _ = rig
+
+    async def down(message, context):
+        raise RuntimeError("model unavailable")
+    agent.interpret = down
+    workout = await _say(agent, "what's my workout today")
+    assert workout.handed_off is True and workout.reply == "" and drafts.drafts == {}
+    agent.interpret = script
+    script.push(HALF_QP)
+    await _say(agent, "half a quarter pounder")
+    agent.interpret = down
+    with_draft = await _say(agent, "with extra pickles please")
+    assert with_draft.handed_off is False and "couldn't read" in with_draft.reply
+    assert drafts.entries == {}
+
+
 class NoHistory:
     def __init__(self, status="not_found"):
         self.status = status
@@ -477,14 +624,20 @@ async def test_recall_that_finds_nothing_asks_honestly_and_writes_nothing(rig, s
     assert result.reply == "I couldn't find ahi tuna bowl in your log. Where was it from?"
     assert result.outcome.status == outcome and result.outcome.effect == "not_attempted"
     assert result.preview is None and drafts.drafts == {} and drafts.entries == {}
-    # With a meal already waiting, a failed recall leaves that draft untouched.
+    # With a meal already waiting, a failed recall keeps its items; only its preview
+    # binding is cleared, because the last thing shown is now the question (B1).
     script.push(HALF_QP)
     await _say(agent, "half a quarter pounder")
-    before = json.dumps(drafts.drafts, default=str, sort_keys=True)
+    (draft_id, row), = drafts.drafts.items()
+    items_before = json.dumps(row["items"][0]["resolution"], sort_keys=True)
     script.push({"type": "recall_meal", "query": "ahi tuna bowl", "when_hint": None})
     again = await _say(agent, "and the tuna bowl from last time")
     assert again.reply == "I couldn't find ahi tuna bowl in your log. Where was it from?"
-    assert json.dumps(drafts.drafts, default=str, sort_keys=True) == before and drafts.entries == {}
+    assert json.dumps(drafts.drafts[draft_id]["items"][0]["resolution"], sort_keys=True) == items_before
+    assert drafts.drafts[draft_id]["pending_question"] is None and drafts.entries == {}
+    script.push({"type": "ask", "question": "Where was the tuna bowl from?"})
+    after = await _say(agent, "yes")  # a yes to the recall question never logs the burger
+    assert drafts.entries == {} and after.receipt is None
 
 
 # ---------------------------------------------------------------- model adapter

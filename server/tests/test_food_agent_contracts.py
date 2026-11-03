@@ -480,6 +480,68 @@ def test_review_recheck4_nit_half_in_a_count_is_a_fraction():
                         _ident("pepperoni pizza")) == Decimal("0.5")
 
 
+def test_review_f1_quarter_pounder_count_is_one_whole_sandwich():
+    """Re-check 5, F-1 (real failure 2's product): "quarter" in the NAME is not a fraction."""
+    sandwich = p.parse_serving_text("1 sandwich (202 g)")
+    qp = _ident("Quarter Pounder", kind="restaurant")
+    assert p.multiplier(_p("count", 1, text="1 quarter pounder"), sandwich, qp) == Decimal("1")
+    assert p.multiplier(_p("count", 1, text="1 quarter pounder"), sandwich) == Decimal("1")
+    assert p.multiplier(_p("count", 2, text="2 quarter pounders"), sandwich, qp) == Decimal("2")
+    hh =p.multiplier(_p("count", 2, text="2 half-and-half"), p.parse_serving_text("1 creamer (11 ml)"),
+                      _ident("half-and-half creamer"))
+    assert hh == Decimal("2")
+    assert p.multiplier(_p("count", 1, text="1 half moon cookie"), p.parse_serving_text("1 cookie (50 g)"),
+                        _ident("half moon cookie")) == Decimal("1")
+
+
+def test_review_f1_fraction_words_never_apply_twice():
+    sandwich = p.parse_serving_text("1 sandwich (202 g)")
+    turkey = _ident("turkey sandwich")
+    assert p.multiplier(_p("count", 1.5, text="one and a half"), sandwich, turkey) == Decimal("1.5")
+    assert p.multiplier(_p("count", 0.5, text="half"), sandwich, turkey) == Decimal("0.5")
+    assert p.multiplier(_p("count", 2.5, text="2 and a half slices"), p.parse_serving_text("1 slice (30 g)"),
+                        _ident("bread")) == Decimal("2.5")
+    assert p.multiplier(_p("serving_fraction", 0.5, text="half"), sandwich, turkey) == Decimal("0.5")
+    assert p.multiplier(_p("serving_fraction", 0.5, text="half"), sandwich) == Decimal("0.5")
+    # A whole count with a standalone fraction word still works.
+    assert p.multiplier(_p("count", 1, text="1 half"), sandwich, turkey) == Decimal("0.5")
+    assert p.multiplier(_p("count", 1, text="half a sandwich"), sandwich, turkey) == Decimal("0.5")
+    assert p.multiplier(_p("count", 2, text="2 bacon halves"), p.parse_serving_text("1 slice (10 g)"),
+                        _ident("bacon")) == Decimal("1")
+
+
+def test_review_f2_weighted_serving_counts_only_single_portion_dishes():
+    """Re-check 5, F-2: "1 serving (N g)" is one item only for a count of 1 of a
+    single-portion dish; whole-to-portion foods and small multiples ask."""
+    for name, grams in (("apple pie", 120), ("birthday cake", 80), ("banana bread loaf", 50),
+                        ("pepperoni pizza", 110), ("sourdough bread", 50)):
+        basis = p.parse_serving_text(f"1 serving ({grams} g)")
+        assert p.multiplier(_p("count", 1, text="1"), basis, _ident(name, kind="homemade")) is None, name
+    almonds = _ident("almonds", kind="restaurant")
+    assert p.multiplier(_p("count", 10, text="10"), p.parse_serving_text("1 serving (28 g)"), almonds) is None
+    assert p.multiplier(_p("count", 20, text="20 fries"), p.parse_serving_text("1 serving (117 g)"),
+                        _ident("fries", kind="restaurant")) is None
+    assert p.multiplier(_p("count", 20, text="20"), p.parse_serving_text("1 serving"),
+                        _ident("tortilla chips", kind="restaurant")) is None
+    for name in ("grilled chicken sandwich", "double cheeseburger", "chicken burrito", "poke bowl",
+                 "caesar salad", "strawberry smoothie", "protein bar", "turkey wrap"):
+        basis = p.parse_serving_text("1 serving (215 g)")
+        assert p.multiplier(_p("count", 1, text="1"), basis, _ident(name, kind="restaurant")) == Decimal("1"), name
+    # Two of a single-portion dish against a weighed "1 serving": ask.
+    assert p.multiplier(_p("count", 2, text="2"), p.parse_serving_text("1 serving (215 g)"),
+                        _ident("grilled chicken sandwich", kind="restaurant")) is None
+
+
+def test_review_recheck5_recalled_portion_counts_as_portions():
+    """A recalled history item's serving is one portion as logged: "2 of my usual" is 2."""
+    history = c.ServingBasis(text="one portion as logged on Oct 30", basis="per_serving", amount=1.0,
+                             unit="count", grams=410.0)
+    bowl = _ident("ahi tuna bowl", kind="history")
+    assert p.multiplier(_p("count", 2, text="2"), history, bowl) == Decimal("2")
+    assert p.multiplier(_p("count", 1, text="1"), history, bowl) == Decimal("1")
+    assert p.multiplier(_p("count", 2, text="2 slices"), history, _ident("pizza", kind="history")) is None
+
+
 def test_review_c1_one_unit_serving_wins_still_hold():
     sandwich = p.parse_serving_text("1 sandwich (215 g)")
     big_mac = _ident("Big Mac", kind="restaurant")

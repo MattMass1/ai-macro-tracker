@@ -272,7 +272,41 @@ _GENERIC_PIECE = frozenset({"piece", "pc"})
 _FRACTION_WORDS: dict[str, Decimal] = {
     "half": Decimal("0.5"), "halve": Decimal("0.5"), "quarter": Decimal("0.25"),
 }
+_FRACTION_KEY = {"half": "half", "halves": "half", "quarter": "quarter", "quarters": "quarter"}
+# A standalone fraction word: not inside a hyphenated word ("half-and-half").
+_FRACTION_RE = re.compile(r"(?<![a-z-])(half|halves|quarters?)(?![a-z-])")
+_FRACTION_FOLLOWERS = frozenset({"of", "a", "an", "the"})
+# Single-portion dishes: "1 serving (215 g)" of one of these is the dish.
+_SINGLE_PORTION = frozenset({
+    "sandwich", "burger", "wrap", "bowl", "burrito", "salad", "smoothie", "shake", "bar", "sub", "hoagie",
+    "bagel", "muffin", "quesadilla", "panini", "melt", "whopper", "croissant", "parfait", "taco",
+})
+# Small multiples: "20 fries" or "10 almonds" is never 20 or 10 servings.
+_SMALL_MULTIPLES = frozenset({
+    "almond", "nut", "cashew", "peanut", "pistachio", "walnut", "pecan", "fry", "chip", "crisp", "cracker",
+    "pretzel", "grape", "berry", "cherry", "olive", "raisin", "candy", "popcorn", "tot",
+})
 _NO_MATCH = object()
+
+
+def _fraction_in_words(text: str | None, identity: FoodIdentity | None) -> Decimal | None:
+    """A standalone fraction word in the portion words ("1 half", "half a sandwich",
+    "2 bacon halves"), or None. Never a word from the food's NAME ("Quarter
+    Pounder", "half-and-half", "half moon cookie")."""
+    lowered = (text or "").lower()
+    named = " ".join(part for part in (identity.name, identity.variant) if part).lower() if identity else ""
+    in_name = {_FRACTION_KEY.get(word) for word in re.findall(r"[a-z]+", named)}
+    head = _head_noun(identity.name) if identity is not None else None
+    for match in _FRACTION_RE.finditer(lowered):
+        key = _FRACTION_KEY[match.group(1)]
+        if key in in_name:
+            continue
+        rest = re.findall(r"[a-z]+", lowered[match.end():])
+        following = rest[0] if rest else None
+        if following is None or following in _FRACTION_FOLLOWERS or (
+                head is not None and _stem(following) == head):
+            return _FRACTION_WORDS[key]
+    return None
 
 
 def _inner_counts(text: str) -> list[tuple[Decimal, set[str]]]:
@@ -308,7 +342,7 @@ def _identity_units(identity: FoodIdentity | None) -> Any:
     head = _head_noun(identity.name)
     if head is None:
         return None
-    if _member(head, _WHOLE_ITEMS):
+    if _member(head, _WHOLE_ITEMS) or _member(head, _SINGLE_PORTION):
         return {head}, False
     units = _canonical_units({head})
     if not _COMBINATION.search(identity.name):  # "bacon, egg and cheese" is a sandwich, not slices
@@ -320,9 +354,11 @@ def _count_multiplier(portion: Portion, basis: ServingBasis, amount: Decimal,
                       identity: FoodIdentity | None) -> Decimal | None:
     """Servings for a count, by one rule. ``None`` means ask; it never guesses.
 
-    1. **Fractions first.** "half", "halves", "a quarter" in the portion words
-       scale the count (``1 half`` = 0.5, ``2 bacon halves`` = 1) and are then
-       matched like any other count.
+    1. **Fractions first, once.** A standalone "half", "halves" or "quarter" in
+       the portion words scales a WHOLE count (``1 half`` = 0.5, ``2 bacon
+       halves`` = 1). Never when the amount already holds it (1.5 "one and a
+       half"), and never from the food's name ("Quarter Pounder",
+       "half-and-half", "half moon cookie").
     2. **The user's unit U.** The portion words' nouns when they match the
        serving or name a unit word ("2 slices", "6 nuggets", "1 box");
        otherwise the HEAD noun of the food name ("2" eggs, "three" bacon -> slice,
@@ -340,19 +376,22 @@ def _count_multiplier(portion: Portion, basis: ServingBasis, amount: Decimal,
     6. **The food itself.** When U is the food (not a unit word like slice,
        piece, bar, box) and the serving is one countable whole item with no
        inner count ("2 Big Macs" of "1 sandwich"), the count is servings. Drinks
-       served by fluid volume ("2 smoothies" of "12 fl oz") are servings too, and
-       so is a plain "1 serving" with no weight. "1 serving (30 g)" is one item
-       only for a whole item or a restaurant/remembered/homemade dish.
+       served by fluid volume ("2 smoothies" of "12 fl oz") are servings too, as
+       are recalled portions ("one portion as logged") and a plain "1 serving"
+       with no weight. "1 serving (215 g)" is the dish only for a count of 1 of
+       a single-portion dish (sandwich, burger, bowl, burrito, salad, smoothie,
+       bar). Whole-to-portion foods (pie, cake, loaf, pizza) and small
+       multiples (fries, almonds, chips) against a "1 serving" ask.
     7. **Otherwise ask.** A different unit ("2 slices" of "1 loaf"), a whole
        item against a part ("1 pizza" of "2 slices"), or a food count against a
        mass or cup serving ("2 eggs" of "100 g") returns ``None``. So does a
        bare "1" of a piece food against a multi-piece serving (one McNugget, or
        one box?) and any name that states its own pack size ("10 piece").
     """
-    words = [_stem(word) for word in re.findall(r"[a-z]+", (portion.text or "").lower())]
-    fraction = next((_FRACTION_WORDS[word] for word in words if word in _FRACTION_WORDS), None)
-    if fraction is not None:
-        amount = amount * fraction
+    if amount == amount.to_integral_value():  # 1.5 "one and a half" already holds its fraction
+        fraction = _fraction_in_words(portion.text, identity)
+        if fraction is not None:
+            amount = amount * fraction
     said = _noun_tokens(portion.text) - set(_FRACTION_WORDS)
     said_units = _canonical_units(said)
 
@@ -373,18 +412,22 @@ def _count_multiplier(portion: Portion, basis: ServingBasis, amount: Decimal,
     undescribed = basis.basis == "per_serving" and basis.amount is None and basis.unit is None and not inner
     generic_serving = (per == 1 and outer == {"serving"} and not inner) or undescribed
 
+    # A bare "1" serving with no noun (a recalled "one portion as logged") is one portion.
+    bare_one = per == 1 and not outer and not inner
+
     def food_itself() -> Decimal | None:
-        if (single and not (outer & _SUB_UNITS)) or fluid:
+        if (single and not (outer & _SUB_UNITS)) or fluid or bare_one:
             return _result(amount)
         if generic_serving:
-            # "1 serving" with no weight is one of whatever the source sells. With
-            # a weight ("1 serving (30 g)") it is one item only for a whole or
-            # restaurant/remembered dish, not for small foods like cookies.
+            head = _head_noun(identity.name) if identity is not None else None
+            if head is not None and _member(head, _SMALL_MULTIPLES):
+                return None  # "20 fries" of "1 serving" is not 20 servings
+            # "1 serving" with no weight is one of whatever the source sells.
             if basis.grams is None and basis.ml is None:
                 return _result(amount)
-            head = _head_noun(identity.name) if identity is not None else None
-            if identity is not None and (identity.kind in ("restaurant", "history", "homemade")
-                                         or (head is not None and _member(head, _WHOLE_ITEMS))):
+            # "1 serving (215 g)" is the dish only for ONE single-portion dish
+            # (sandwich, burger, bowl...); a pie, cake, loaf or pizza asks.
+            if amount == 1 and head is not None and _member(head, _SINGLE_PORTION):
                 return _result(amount)
         return None
 
@@ -401,6 +444,10 @@ def _count_multiplier(portion: Portion, basis: ServingBasis, amount: Decimal,
     # 2b. The head noun of the food name.
     ident = _identity_units(identity)
     if ident is _UNCLEAR:
+        # The name states its pack size ("McNuggets (10 piece)"): one of the
+        # pack against the product's own "1 serving" is that serving.
+        if generic_serving and amount == 1:
+            return _result(amount)
         return food_itself() if per is None or per == 1 else None
     if ident is None:
         if said:  # the words name the food itself ("2 smoothies"), no identity given

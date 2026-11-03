@@ -19,13 +19,17 @@ struct CoachTurn: Decodable {
     /// True when the server presented its measurements form (a `ProfileMetrics`
     /// component); the chat then shows the inline metrics card.
     let wantsMetricsForm: Bool
+    /// One-tap answers for this reply ("Log it", "Cancel", "6 oz"). A tap sends
+    /// the label as an ordinary message, exactly as if it had been typed.
+    let quickReplies: [String]
 
-    private enum Keys: String, CodingKey { case reply, approval, surfaces }
+    private enum Keys: String, CodingKey { case reply, approval, surfaces, quickReplies }
     private struct Surface: Decodable { let components: [Component]? }
     private struct Component: Decodable { let component: String? }
 
-    init(reply: String?, approval: CoachApproval? = nil, wantsMetricsForm: Bool = false) {
+    init(reply: String?, approval: CoachApproval? = nil, wantsMetricsForm: Bool = false, quickReplies: [String] = []) {
         self.reply = reply; self.approval = approval; self.wantsMetricsForm = wantsMetricsForm
+        self.quickReplies = quickReplies
     }
 
     init(from decoder: Decoder) throws {
@@ -36,6 +40,18 @@ struct CoachTurn: Decodable {
         wantsMetricsForm = surfaces.contains { surface in
             (surface.components ?? []).contains { $0.component == "ProfileMetrics" }
         }
+        let labels = (try? container.decodeIfPresent([String].self, forKey: .quickReplies)) ?? []
+        quickReplies = Self.cleanQuickReplies(labels)
+    }
+
+    /// At most four short, distinct, non-empty labels; anything else is dropped.
+    static func cleanQuickReplies(_ labels: [String]) -> [String] {
+        var seen = Set<String>()
+        return labels
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0.count <= 40 && seen.insert($0.lowercased()).inserted }
+            .prefix(4)
+            .map { $0 }
     }
 }
 

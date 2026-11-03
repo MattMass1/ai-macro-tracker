@@ -155,6 +155,24 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertEqual(payload.macrosPerServing, MacroTotals(calories: 200, protein: 20, carbs: 15, fat: 5, fiber: 2))
     }
 
+    func testCoachTurnDecodesQuickReplies() throws {
+        let json = #"{"reply":"Club (no tomato): 520 kcal. Log it?","quickReplies":["Log it","Cancel"],"surfaces":[]}"#
+        let turn = try JSONDecoder().decode(CoachTurn.self, from: Data(json.utf8))
+        XCTAssertEqual(turn.quickReplies, ["Log it", "Cancel"])
+    }
+
+    func testCoachTurnWithoutQuickRepliesStillDecodes() throws {
+        let turn = try JSONDecoder().decode(CoachTurn.self, from: Data(#"{"reply":"Logged."}"#.utf8))
+        XCTAssertEqual(turn.quickReplies, [])
+        XCTAssertEqual(turn.reply, "Logged.")
+    }
+
+    func testQuickRepliesAreCappedTrimmedAndDeduplicated() {
+        let cleaned = CoachTurn.cleanQuickReplies([" Log it ", "log it", "", "Half", String(repeating: "x", count: 41),
+                                                   "1 serving", "2 servings", "Cancel"])
+        XCTAssertEqual(cleaned, ["Log it", "Half", "1 serving", "2 servings"])
+    }
+
     func testBarcodeFoodRequestEncodesCode() throws {
         let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
         let json = try JSONSerialization.jsonObject(with: encoder.encode(BarcodeFoodRequest(code: "012345678905"))) as! [String: Any]

@@ -123,7 +123,8 @@ async def test_half_quarter_pounder_with_cheese_through_the_canvas(user):
     rig = Rig()
     rig.script.push(HALF_QP)
     first = await rig.say("Half of a McDonald's quarter pounder")
-    assert set(first) == SNAPSHOT_KEYS
+    assert set(first) == SNAPSHOT_KEYS | {"quickReplies"}
+    assert first["quickReplies"] == ["Log it", "Cancel"]
     assert rig.drafts.entries == {} and rig.drafts.commit_calls == []
     assert first["receipt"] is None and "MealReceipt" not in _components(first)
     assert "210 kcal" in first["reply"] and first["reply"].endswith("Log it?")

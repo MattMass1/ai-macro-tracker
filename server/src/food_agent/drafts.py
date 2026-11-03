@@ -182,9 +182,12 @@ def identity_text(item: DraftItemState) -> str:
 
 
 def item_label(item: DraftItemState) -> str:
+    """Name, then amount and changes: "Grilled Chicken Club (no tomato, no lettuce)"."""
+    from food_agent.modifications import mod_text
     name = item.resolved.display_name if item.resolved is not None else identity_text(item)
-    label = portion_label(item.portion)
-    return f"{name} ({label})" if label else name
+    parts = [portion_label(item.portion), *dict.fromkeys(mod_text(m) for m in item.modifications)]
+    detail = ", ".join(part for part in parts if part)
+    return f"{name} ({detail})" if detail else name
 
 
 # ---------------------------------------------------------------- commit values
@@ -222,8 +225,6 @@ def build_commit(draft: AgentDraft, content_hash: str) -> CommitPlan:
     """
     if not draft.items:
         raise DraftNotReady("the meal has no items")
-    if any(i.modifications for i in draft.items):
-        raise DraftNotReady("modifications require source-backed component evidence")
     panels = item_panels(draft.items)
     totals = sum_panels(panels)
     unknown = tuple(key for key in NUTRIENT_KEYS if getattr(totals, key) is None)

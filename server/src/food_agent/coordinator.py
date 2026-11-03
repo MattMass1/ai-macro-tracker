@@ -22,14 +22,14 @@ import json
 import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import domain
 from food_agent import confirm
-from food_agent.contracts import (AgentTurn, DraftItemState, NutrientPanel, PendingConfirm, Preview, PreviewLine,
-                                  Receipt, ResolvedFood, ToolOutcome, content_hash, sum_panels)
+from food_agent.contracts import (MASS_UNITS, VOLUME_UNITS, AgentTurn, DraftItemState, NutrientPanel,
+                                  PendingConfirm, Preview, PreviewLine, Receipt, ResolvedFood, ToolOutcome, content_hash, sum_panels)
 from food_agent.drafts import (AgentDraft, CommitIntent, CommitPlan, DraftCommitBlocked, DraftCommitConflict,
                                DraftNotReady, DraftPort, build_commit, identity_text, item_label, new_draft,
                                op_key, portion_label)
@@ -69,6 +69,9 @@ class FoodTurnResult:
     draft_id: str | None = None
     question: str | None = None
     shown_draft_ids: tuple[str, ...] = ()
+    # One-tap answers for this reply. Each one is sent as an ordinary message,
+    # so a tap has exactly the authority of typing the same words.
+    quick_replies: tuple[str, ...] = ()
 
 
 def _outcome(status: str, effect: str, message: str) -> ToolOutcome:
@@ -166,10 +169,37 @@ class FoodAgent:
                         await self.drafts.save(draft.with_(pending=None), draft.revision)
                 result = _result("This meal is too large to show completely. Please split it into smaller meals before confirming.",
                                  "needs_detail", "not_applied")
-            return result
+            return await self._with_quick_replies(result)
         finally:
             # Check two: clear every binding this turn did not show, even if the turn raised.
             await self._settle_bindings(shown_before, result)
+
+    async def _with_quick_replies(self, result: FoodTurnResult) -> FoodTurnResult:
+        """Attach one-tap answers. Buttons are a convenience only: any failure means none."""
+        try:
+            replies = await self._quick_replies(result)
+        except Exception as exc:
+            logger.info("food agent quick replies skipped: %s", type(exc).__name__)
+            return result
+        return replace(result, quick_replies=replies) if replies else result
+
+    async def _quick_replies(self, result: FoodTurnResult) -> tuple[str, ...]:
+        if result.handed_off or result.outcome.status in {"error", "conflict", "unknown"}:
+            return ()
+        if result.preview is not None:
+            return ("Save it" if result.reply.endswith("Save the change?") else "Log it", "Cancel")
+        question = result.question
+        if not question or not result.draft_id or result.shown_draft_ids:
+            return ()
+        if question.endswith("raw or cooked?"):
+            return ("Raw", "Cooked")
+        draft = await self.drafts.get(result.draft_id)
+        if draft is None or draft.state not in EDITABLE_STATES:
+            return ()
+        item = next((i for i in draft.items if i.resolved is not None and i.multiplier is None), None)
+        if item is None:
+            return ()
+        return portion_choices(item.resolved.serving_basis) + ("Cancel",)  # type: ignore[union-attr]
 
     async def _settle_bindings(self, shown_before: list[AgentDraft], result: FoodTurnResult | None) -> None:
         """B1: a preview stays confirmable only if this turn's reply showed it.
@@ -681,13 +711,8 @@ class FoodAgent:
                        questions: list[str]) -> list[DraftItemState]:
         out = []
         for item in items:
-            # No source-backed component modification adapter exists yet. Never pretend
-            # the standard panel reflects an adjustment, including recalled items.
-            if item.modifications:
-                detail = ", ".join(f"{m.op} {m.text}" for m in item.modifications)
-                questions.append(f"I don't have source-backed nutrition for {detail}. Can you choose a listed variant or remove the adjustment?")
-                out.append(item.model_copy(update={"resolved": None, "multiplier": None}))
-                continue
+            # Changes ("no tomato", "extra patty") keep the item: it is counted as the
+            # standard recipe and the preview says so (food_agent.modifications).
             if item.resolved is not None and item.resolved.panel.calories is not None:
                 if item.multiplier is None and not questions:
                     found = portion_multiplier(item.portion, item.resolved.serving_basis, item.identity)
@@ -759,7 +784,9 @@ class FoodAgent:
         from food_agent.source_policy import attribution_texts
         source_notes = [text for item in draft.items if item.resolved for text in
                         attribution_texts([item.resolved.attribution, item.resolved.component_attributions])]
-        for note in dict.fromkeys([*notes, *source_notes]):
+        from food_agent.modifications import adjustment_note
+        adjusted = adjustment_note(draft.items)
+        for note in dict.fromkeys([*notes, *([adjusted] if adjusted else []), *source_notes]):
             text += f" {note[0].upper()}{note[1:]}."
         text += " Save the change?" if draft.is_amend else " Log it?"
         return text
@@ -797,7 +824,16 @@ class FoodAgent:
 
 
 def items_ready(items: Sequence[DraftItemState]) -> bool:
-    return bool(items) and all(not i.modifications and i.resolved is not None and i.multiplier is not None for i in items)
+    return bool(items) and all(i.resolved is not None and i.multiplier is not None for i in items)
+
+
+def portion_choices(basis: Any) -> tuple[str, ...]:
+    """Typical amounts for a "how much?" question, in words the interpreter already reads."""
+    if basis.basis == "per_100ml" or basis.unit in VOLUME_UNITS or getattr(basis, "ml", None):
+        return ("8 fl oz", "12 fl oz", "16 fl oz")
+    if basis.basis == "per_100g" or basis.unit in MASS_UNITS or basis.grams:
+        return ("4 oz", "6 oz", "8 oz")
+    return ("Half", "1 serving", "2 servings")
 
 
 def _same_values(row: Mapping[str, Any], values: Mapping[str, Any]) -> bool:

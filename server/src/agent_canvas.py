@@ -746,7 +746,11 @@ class CanvasService:
             session.context_start = stored_reply["created_at"]
         if session.setup_incomplete:
             await self._sync_setup(session)
-        return {**session.snapshot(), "reply": reply[:1000]}
+        replies = [str(label)[:40] for label in (getattr(outcome, "quick_replies", ()) or ())][:4]
+        snapshot = {**session.snapshot(), "reply": reply[:1000]}
+        if replies:
+            snapshot["quickReplies"] = replies
+        return snapshot
 
     async def turn(self, session_id, turn_id, message, *, adapter):
         if adapter not in {"text", "voice"}:

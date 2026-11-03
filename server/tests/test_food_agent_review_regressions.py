@@ -47,9 +47,14 @@ async def test_modification_must_not_silently_keep_unmodified_panel():
     action['items'][0]['modifications'] = [{'op':'extra','text':'beef patty'}]
     script.push(action)
     preview = await agent.turn('Quarter Pounder with an extra beef patty')
+    # Disclosed BEFORE the yes: the preview names the change and says it is not counted.
+    assert '(extra beef patty)' in preview.reply
+    assert "I can't adjust for extra beef patty yet" in preview.reply
     result = await agent.turn('yes')
     print('MODIFICATION', preview.reply, result.outcome.effect)
-    assert not drafts.entries, 'Unsupported extra patty must ask/disclose rather than log unchanged standard panel'
+    (entry,) = drafts.entries.values()
+    assert 'extra beef patty' in entry['name'], 'The saved entry must keep the change visible'
+    assert entry['component_metadata']['items'][0]['modifications'] == [{'op': 'extra', 'text': 'beef patty'}]
 
 async def test_preview_from_another_session_cannot_be_confirmed_unseen():
     clock, script, finder = Clock(), Script(), Finder()

@@ -75,14 +75,18 @@ async def test_cross_session_reshow_then_own_confirmation():
     assert result.receipt and result.receipt.verified and len(drafts.entries) == 1
 
 async def test_modification_only_revision_clears_authority():
+    """A change re-binds to a NEW preview that shows it; the old preview cannot be confirmed."""
     agent, drafts, script, _, _ = rig()
     script.push(HALF_QP)
-    await agent.turn('half burger')
+    first = await agent.turn('half burger')
     script.push({'type': 'revise_item', 'item_ref': 'i1', 'modifications': [{'op':'remove','text':'cheese'}]})
     result = await agent.turn('remove cheese')
-    assert result.preview is None and 'source-backed' in result.reply
-    await agent.turn('yes')
+    assert result.preview is not None and result.preview.content_hash != first.preview.content_hash
+    assert '(half, no cheese)' in result.reply and "I can't adjust for no cheese yet" in result.reply
     assert not drafts.entries
+    await agent.turn('yes')
+    (entry,) = drafts.entries.values()
+    assert entry['component_metadata']['items'][0]['modifications'] == [{'op': 'remove', 'text': 'cheese'}]
 
 async def test_recalled_modifications_are_not_silently_discarded():
     agent, drafts, script, finder, _ = rig()
@@ -95,9 +99,13 @@ async def test_recalled_modifications_are_not_silently_discarded():
     agent.recaller = Recaller()
     script.push({'type':'recall_meal','query':'burger'})
     result = await agent.turn('same extra patty burger')
-    assert not result.preview and 'source-backed' in result.reply
+    assert result.preview is not None and '(half, extra patty)' in result.reply
+    assert "I can't adjust for extra patty yet" in result.reply
     await agent.turn('yes')
-    assert not drafts.entries
+    (entry,) = drafts.entries.values()
+    # The recall joins the open meal as a second item; the change stays on the recalled one.
+    saved = [i['modifications'] for i in entry['component_metadata']['items']]
+    assert [{'op': 'extra', 'text': 'patty'}] in saved and 'extra patty' in entry['name']
 
 
 def source_row(**extra):

@@ -30,6 +30,9 @@ Rules:
   that change; leave the rest null so they are kept. "quarter pounder with cheese" after a half quarter pounder
   changes identity.name only (the half is kept). "6 oz instead of 12" changes portion only
   ({kind: "mass", amount: 6, unit: "oz"}); do not re-add the food.
+- Toppings taken off or changed ("no tomato", "light mayo", "swap fries") are modifications on that item.
+  Something added on top that has its own nutrition ("extra patty", "add bacon", "side of ranch") is its own
+  item in add_items, so it gets looked up.
 - "the one I had last time", "again", "my usual X": use recall_meal with the food words as query.
 - A bare "oz" is unit "oz". Fluid ounces are "fl_oz". No amount given: portion kind "unspecified".
 - If the user is clearly confirming the shown meal, you may return confirm; code decides if it counts.

@@ -9,6 +9,8 @@ struct CoachMessage: Identifiable {
     var text: String
     var approval: CoachApproval? = nil
     var showsMetricsForm = false
+    /// One-tap answers under this reply; cleared as soon as anything is sent.
+    var quickReplies: [String] = []
 
     enum Role { case user, assistant }
 }
@@ -53,6 +55,11 @@ struct CoachChatView: View {
                                         ApprovalRow(approval: approval, isBusy: isSending,
                                                     onConfirm: { Task { await respond(to: approval, confirm: true, in: message.id) } },
                                                     onCancel: { Task { await respond(to: approval, confirm: false, in: message.id) } })
+                                    }
+                                    if message.role == .assistant, !message.quickReplies.isEmpty {
+                                        QuickReplyRow(labels: message.quickReplies, isBusy: isSending) { label in
+                                            Task { await sendChat(label) }
+                                        }
                                     }
                                     if message.role == .assistant, message.showsMetricsForm {
                                         MetricsFormCard(
@@ -203,6 +210,7 @@ struct CoachChatView: View {
 
     private func sendChat(_ message: String) async {
         guard !isSending else { return }
+        clearQuickReplies()  // an answered question's buttons must not be tapped again
         messages.append(CoachMessage(role: .user, text: message))
         isSending = true
         defer { isSending = false }
@@ -253,7 +261,14 @@ struct CoachChatView: View {
         messages.append(CoachMessage(role: .assistant,
                                      text: text.isEmpty ? fallback : text,
                                      approval: turn.approval?.status == "pending" || turn.approval?.status == nil ? turn.approval : nil,
-                                     showsMetricsForm: turn.wantsMetricsForm))
+                                     showsMetricsForm: turn.wantsMetricsForm,
+                                     quickReplies: turn.quickReplies))
+    }
+
+    private func clearQuickReplies() {
+        for index in messages.indices where !messages[index].quickReplies.isEmpty {
+            messages[index].quickReplies = []
+        }
     }
 
     private func dismissMetricsForm(_ id: UUID) {
@@ -364,6 +379,31 @@ private struct ApprovalRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .appCard(padding: 14)
+    }
+}
+
+/// One-tap answers under the coach's latest reply. The first is the main
+/// action ("Log it"); the rest are outlined. Each tap sends its label.
+private struct QuickReplyRow: View {
+    let labels: [String]
+    let isBusy: Bool
+    let onTap: (String) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Array(labels.enumerated()), id: \.element) { index, label in
+                    let primary = index == 0
+                    Button(label) { onTap(label) }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(primary ? Color.white : Theme.accent)
+                        .padding(.horizontal, 16).padding(.vertical, 9)
+                        .background(primary ? Theme.accent : Theme.accentTint, in: Capsule())
+                        .accessibilityHint("Sends \(label)")
+                }
+            }
+        }
+        .disabled(isBusy)
     }
 }
 

@@ -307,7 +307,16 @@ def to_resolved_food(found: Mapping[str, Any]) -> ResolvedFood | None:
     macro_source = _squash(found.get("source")) or provider
     if found.get("estimate_provenance") and "estimate" not in macro_source.casefold():
         macro_source = f"Estimate: {macro_source}"
+    from food_agent.source_policy import permits_cache, policy_only
+    attribution = policy_only(dict(found.get("attribution") or {}))
+    for key, value in found.items():
+        if "retention" in key or key in ("expires_at", "cache_expires_at", "cache_allowed"):
+            attribution.setdefault(key, value)
+    nested = policy_only(list(found.get("component_attributions") or []) +
+                         list(found.get("component_metadata") or []))
+    allowed = permits_cache(found) and permits_cache({"provider": provider, **attribution})
     return ResolvedFood(food_id=food_id[:200], provider=provider, external_id=external_id,
+                        cache_allowed=allowed, attribution=attribution, component_attributions=nested,
                         display_name=_display_name(found), macro_source=macro_source[:200],
                         serving_basis=basis, panel=panel)
 

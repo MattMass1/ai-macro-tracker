@@ -174,7 +174,7 @@ async def test_choco_laka_six_oz_instead_of_twelve_through_the_canvas(user):
     rig.script.push(SIX_OZ)
     second = await rig.say("yes but 6 oz instead of 12")
     assert rig.drafts.commit_calls == [] and rig.drafts.entries == {}
-    assert len(rig.resolver.queries) == 1  # same food, no new search
+    assert len(rig.resolver.queries) == 2  # no-cache evidence refreshed, identity remains unchanged
     (row,) = rig.drafts.drafts.values()
     state = row["items"][0]["resolution"]["state"]
     assert state["resolved"]["food_id"] == food["food_id"] and state["multiplier"] == 0.5
@@ -603,7 +603,7 @@ async def test_pg_choco_laka_six_oz_saves_half_the_panel_once(env):
         rig.script.push(SIX_OZ)
         second = await rig.say("yes but 6 oz instead of 12")
         assert await _rows(env["url"], "SELECT 1 FROM nutrition_entries") == []
-        assert len(rig.resolver.queries) == 1 and "176 kcal" in second["reply"]
+        assert len(rig.resolver.queries) == 2 and "176 kcal" in second["reply"]  # refresh restricted panel
         done = await rig.say("yes")
     finally:
         reset_user(scope)

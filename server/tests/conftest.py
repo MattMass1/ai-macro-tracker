@@ -4,6 +4,26 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# Test imports must never discover a developer's real credentials. Tests of the
+# dotenv parser explicitly reset this flag against their own temporary fixtures.
+import config
+config._ENV_LOADED = True
+
+
+@pytest.fixture(autouse=True)
+def _deny_real_provider_wire(monkeypatch):
+    import httpx
+    reached = []
+    async def blocked_async(self, request):
+        reached.append(request.url.host)
+        raise AssertionError("real provider transport forbidden in tests")
+    def blocked_sync(self, request):
+        reached.append(request.url.host)
+        raise AssertionError("real provider transport forbidden in tests")
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", blocked_async)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", blocked_sync)
+    yield
+    assert not reached, "a test attempted real provider transport"
 
 
 def pytest_addoption(parser):

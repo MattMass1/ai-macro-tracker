@@ -42,6 +42,10 @@ CLI::
 
     python food_agent_bench.py --bench file.json [--scripts s.json] --lane A --out results.json
     python food_agent_bench.py --bench labels.json --scripts scripts.json --lane B --pg-admin-url URL --out r.json
+    python food_agent_bench.py --bench labels.json --scripts scripts.json --lane C --pg-admin-url LOCAL_URL \
+        [--repeats 3] [--max-model-calls 300] [--max-lookups 200] [--out OUTSIDE_THE_REPO.json]
+
+Lane C (live model and providers) is in ``food_agent_bench_live.py``.
 """
 
 from __future__ import annotations
@@ -471,17 +475,44 @@ class CaseRun:
 # ---------------------------------------------------------------- running a case
 
 
-async def run_case(case: dict[str, Any], script: dict[str, Any], backend) -> CaseRun:
+def error_text(exc: BaseException) -> str:
+    """Lanes A/B: the class and a short message (offline, no provider text can be in it)."""
+    return f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
+def scripted_parts(case: dict[str, Any], script: dict[str, Any], env: "CaseEnv"):
+    """Lanes A/B: the scripted interpreter and the real FoodFinder over a fake resolver."""
+    from food_agent.find_food import FoodFinder
+    resolver = ScriptedResolver(script.get("catalog") or [])
+    options = {norm_query(o["query"]): list(o["names"]) for o in script.get("options") or []}
+
+    async def suggest(query):
+        return list(options.get(norm_query(query), []))
+
+    return ScriptedInterpreter(script["turns"]), FoodFinder(resolver, suggest=suggest, is_ambiguous=lambda _q: False)
+
+
+async def run_case(case: dict[str, Any], script: dict[str, Any], backend, *, parts=None, errors=None,
+                   hooks=None) -> CaseRun:
+    """Play one case through ``CanvasService.turn``.
+
+    ``parts(case, script, env) -> (interpreter, finder)`` picks the model and the lookups (default: scripted,
+    lanes A/B; lane C passes the live ones). The interpreter exposes ``index``, ``sent`` and ``unexpected``.
+    ``errors(exc) -> str`` formats a recorded error. ``hooks`` (optional) gets ``turn_start(index)`` and
+    ``turn_end(record)`` around every turn, and ``case_ready(env)`` once the synthetic users exist.
+    """
     from agent_canvas import CanvasService
     from auth import bind_user, reset_user
     from food_agent import confirm
     from food_agent.coordinator import FoodAgent
-    from food_agent.find_food import FoodFinder
     from food_agent.recall import HistoryRecaller
 
+    errors = errors or error_text
     wall0 = time.perf_counter()
     run = CaseRun(case_id=case["id"])
     env = await backend.new_case()
+    if hooks is not None:
+        hooks.case_ready(env)
     env.seeded_ids = []
     seeds = script.get("history") or []
     env.seeded_ids += await env.seed(env.user_a, seeds)
@@ -490,14 +521,7 @@ async def run_case(case: dict[str, Any], script: dict[str, Any], backend) -> Cas
     decoy_ids = await env.seed(env.user_b, decoys)
     run.decoy_markers = [DECOY_MARKER, *decoy_ids]
 
-    resolver = ScriptedResolver(script.get("catalog") or [])
-    options = {norm_query(o["query"]): list(o["names"]) for o in script.get("options") or []}
-
-    async def suggest(query):
-        return list(options.get(norm_query(query), []))
-
-    interpreter = ScriptedInterpreter(script["turns"])
-    finder = FoodFinder(resolver, suggest=suggest, is_ambiguous=lambda _q: False)
+    interpreter, finder = (parts or scripted_parts)(case, script, env)
     agent = FoodAgent(env.drafts, interpreter, finder, HistoryRecaller(env.history, env.clock), env.clock)
     spy = SpyAgent(agent)
     old = OldPath()
@@ -524,11 +548,13 @@ async def run_case(case: dict[str, Any], script: dict[str, Any], backend) -> Cas
             sent0 = len(interpreter.sent)
             record = TurnRecord(idx=len(run.turns), user=text, synthetic=synthetic, scripted_index=index,
                                 decision=confirm.classify(text))
+            if hooks is not None:
+                hooks.turn_start(record.idx)
             t0 = time.perf_counter()
             try:
                 snapshot = await service.turn(session_id, str(uuid4()), text, adapter="text")
             except Exception as exc:  # an error is an outcome: timed and recorded
-                snapshot, record.error = None, f"{type(exc).__name__}: {str(exc)[:200]}"
+                snapshot, record.error = None, errors(exc)
             record.elapsed_ms = (time.perf_counter() - t0) * 1000
             result = spy.last
             record.model_types = [t for turn_types in interpreter.sent[sent0:] for t in turn_types]
@@ -557,6 +583,8 @@ async def run_case(case: dict[str, Any], script: dict[str, Any], backend) -> Cas
             record.rows = copy.deepcopy(now)
             before = {e["id"]: e["entry_revision"] for e in now}
             run.turns.append(record)
+            if hooks is not None:
+                hooks.turn_end(record)  # lane C: may raise its cap stop (a BaseException) here
             return record
 
         def awaiting_yes(record: TurnRecord) -> bool:
@@ -572,7 +600,7 @@ async def run_case(case: dict[str, Any], script: dict[str, Any], backend) -> Cas
             await say("yes", None, "final")
         run.entries = await env.entries()
     except Exception as exc:  # a harness crash, never a score
-        run.harness_error = f"{type(exc).__name__}: {str(exc)[:300]}"
+        run.harness_error = errors(exc)
         run.entries = run.entries or []
     finally:
         reset_user(scope)
@@ -630,6 +658,58 @@ def _expected(scoring: dict[str, Any], gold: dict[str, Any], index: int, key: st
         return float(gold[key])
     given = (scoring.get(key) or {}).get(str(index))
     return None if given is None else float(given)
+
+
+def consumed_matches(gold, saved, expected_grams=None):
+    """Compare consumed units against the ACTUAL serving, not a scripted multiplier.
+
+    None means the evidence does not define comparable units; it is not success.
+    This oracle intentionally does not import the production portion calculator.
+    """
+    basis = saved.get("serving_basis") or {}
+    mult = float(saved.get("multiplier") or 0)
+    portion = gold.get("portion") or {}
+    amount = portion.get("amount")
+    if amount is None:
+        return None
+    amount = float(amount)
+    mass = {"g": 1, "kg": 1000, "oz": 28.349523125, "lb": 453.59237}
+    volume = {"ml": 1, "l": 1000, "fl oz": 29.5735295625, "fl_oz": 29.5735295625,
+              "cup": 236.5882365, "tbsp": 14.78676478125, "tsp": 4.92892159375}
+    def near(actual, expected):
+        return actual is not None and abs(float(actual) - expected) <= max(.01, abs(expected) * .02)
+    if expected_grams is not None:
+        per = basis.get("grams") or (float(basis.get("amount") or 0) * mass.get(basis.get("unit"), 0))
+        return near(float(per) * mult if per else None, expected_grams)
+    kind, unit = portion.get("kind"), portion.get("unit")
+    if kind in ("mass", "volume"):
+        scales = mass if kind == "mass" else volume
+        if unit not in scales:
+            return None
+        per = basis.get("grams" if kind == "mass" else "ml")
+        if per is None and basis.get("unit") in scales:
+            per = float(basis.get("amount") or 0) * scales[basis["unit"]]
+        return near(float(per) * mult if per else None, amount * scales[unit])
+    if kind == "count":
+        noun = str(unit or "").lower().rstrip("s")
+        text = str(basis.get("text") or "").lower()
+        # Explicit counted units can sit inside a multi-unit serving, e.g. 1 order (3 tacos).
+        found = re.search(r"(\d+(?:\.\d+)?)\s+(?:large |small |medium )?" + re.escape(noun) + r"s?\b", text) if noun else None
+        if found:
+            return near(float(found[1]) * mult, amount)
+        if basis.get("unit") == "count" and basis.get("count_noun") and noun in str(basis["count_noun"]).lower():
+            return near(float(basis.get("amount") or 0) * mult, amount)
+        return None
+    if kind == "serving_fraction":
+        # Fractions mean the named serving, not an arbitrary per-100g panel.
+        if basis.get("basis", "per_serving") != "per_serving":
+            return None
+        if basis.get("unit") == "count" and basis.get("amount"):
+            return near(float(basis["amount"]) * mult, amount)
+        if re.search(r"^1 (?:logged portion|serving)\b", str(basis.get("text") or "")):
+            return near(mult, amount)
+        return None
+    return None
 
 
 def _saved_items(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -690,7 +770,7 @@ def _counted(n: int, d: int) -> dict[str, int]:
     return {"n": n, "d": d}
 
 
-def score_case(case: dict[str, Any], script: dict[str, Any], run: CaseRun) -> dict[str, Any]:
+def score_case(case: dict[str, Any], script: dict[str, Any], run: CaseRun, *, live_basis: bool = False) -> dict[str, Any]:
     """Score one run (pure). ``success`` follows AGENT.md section 8; every failure has a reason."""
     scoring = (script or {}).get("scoring") or {}
     gold_items = case.get("gold_items") or []
@@ -714,12 +794,14 @@ def score_case(case: dict[str, Any], script: dict[str, Any], run: CaseRun) -> di
         best = None
         expected = _expected(scoring, gold, g, "expected_multiplier")
         expected_grams = _expected(scoring, gold, g, "expected_grams")
-        if expected is None:
+        if expected is None and not live_basis:
             reasons.append(f"no expected_multiplier for gold item {g} (the portion cannot be checked)")
+
         for i in candidates:
             saved_mult = float(saved[i].get("multiplier") or 0)
-            good = expected is not None and abs(saved_mult - expected) <= 0.01 * expected
-            if good and expected_grams is not None:
+            consumed = consumed_matches(gold, saved[i], gold.get("expected_grams") if live_basis else expected_grams)
+            good = consumed is True if live_basis else expected is not None and abs(saved_mult - expected) <= 0.01 * expected
+            if good and expected_grams is not None and not live_basis:
                 per = (saved[i].get("serving_basis") or {}).get("grams")
                 grams_ok = per is not None and abs(float(per) * saved_mult - expected_grams) <= 0.02 * expected_grams
                 if not grams_ok:
@@ -768,6 +850,20 @@ def score_case(case: dict[str, Any], script: dict[str, Any], run: CaseRun) -> di
     if wrong_past:
         reasons.append("wrong past meal copied from history")
 
+    if any(t.status in ("error", "unknown") or t.error for t in run.turns):
+        reasons.append("interpreter or infrastructure error is not a quality success")
+
+    # Independent golden consumed totals, not receipt/row self-consistency.
+    expected_nutrients = case.get("expected_nutrients")
+    if expect_log:
+        if not expected_nutrients:
+            reasons.append("independent gold nutrition unavailable (not verified)")
+        else:
+            for key, expected_value in expected_nutrients.items():
+                values = [e.get(key) for e in run.entries]
+                if not values or any(v is None for v in values) or abs(sum(float(v) for v in values) - float(expected_value)) > .55:
+                    reasons.append(f"gold nutrition mismatch: {key}")
+
     if run.old_path_calls:
         reasons.append(f"old path ran ({run.old_path_calls} call/write attempt(s)) for a food-agent dialogue")
 
@@ -779,7 +875,8 @@ def score_case(case: dict[str, Any], script: dict[str, Any], run: CaseRun) -> di
         if claims_logged(turn.reply) and not turn.commits:
             false_logged += 1
         for commit in turn.commits:
-            shown = [t.preview for t in run.turns[:turn.idx] if t.preview and t.preview["draft_id"] == commit["draft_id"]]
+            prior = run.turns[turn.idx - 1] if turn.idx else None
+            shown = [prior.preview] if prior and prior.preview and prior.preview["draft_id"] == commit["draft_id"] else []
             if not shown or shown[-1]["content_hash"] != commit["content_hash"]:
                 stale += 1
             # the row as that turn left it: a later amend of the same entry must not retroactively fail this receipt
@@ -817,6 +914,19 @@ def score_case(case: dict[str, Any], script: dict[str, Any], run: CaseRun) -> di
             reasons.append("expected a clarifying question, got none")
         elif not run.turns[-1].reply.rstrip().endswith("?"):
             reasons.append("the final reply is not a question")
+        expected_question = case.get("expected_question")
+        if not expected_question:
+            reasons.append("expected clarification meaning unavailable")
+        else:
+            # Explicit expected concepts, not just a question mark. Gold may name
+            # alternatives per concept; all concepts must be represented.
+            concepts = expected_question if isinstance(expected_question, list) else [expected_question]
+            actual = " ".join(t.reply.lower() for t in question_turns if t.status not in ("error", "unknown"))
+            for concept in concepts:
+                alternatives = concept if isinstance(concept, list) else [concept]
+                if not any(set(_tokens(term)) <= set(_tokens(actual)) for term in alternatives):
+                    reasons.append("wrong clarification meaning")
+                    break
         if numbered:
             reasons.append("a numbered list in the reply")
         if run.entries:
@@ -941,10 +1051,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--bench", required=True, help="labels file (or a file holding cases and scripts)")
     parser.add_argument("--scripts", help="scripts file when separate from the labels")
-    parser.add_argument("--lane", choices=("A", "B"), default="A")
+    parser.add_argument("--lane", choices=("A", "B", "C"), default="A",
+                        help="A: offline; B: throwaway PostgreSQL; C: LIVE providers (food_agent_bench_live)")
     parser.add_argument("--pg-admin-url", default=os.environ.get("MMMACROS_TEST_PG_ADMIN_URL", ""))
-    parser.add_argument("--out", required=True)
+    parser.add_argument("--out", help="results file (required for A/B; lane C has a private default)")
+    parser.add_argument("--repeats", type=int, default=3, help="lane C: runs per case")
+    parser.add_argument("--max-model-calls", type=int, default=300, help="lane C: hard cap on model attempts")
+    parser.add_argument("--max-lookups", type=int, default=200, help="lane C: hard cap on provider attempts")
+    parser.add_argument("--rate-card", help="lane C: reviewed nonsecret versioned JSON route prices")
     args = parser.parse_args(argv)
+    if args.lane == "C":
+        import food_agent_bench_live  # noqa: PLC0415 - lane C lives in its own module
+        return food_agent_bench_live.main_live(args)
+    if not args.out:
+        parser.error("--out is required for lanes A and B")
     spec = load_bench(args.bench, args.scripts)
 
     async def go():

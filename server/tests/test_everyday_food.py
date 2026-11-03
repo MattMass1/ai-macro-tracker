@@ -17,6 +17,11 @@ async def test_live_wording_chicken_and_cooked_white_rice_commits_one_composite(
         raise AssertionError("known generic aliases must resolve locally")
 
     monkeypatch.setattr(srv.food_lookup, "search_fatsecret", forbidden)
+    # This is the local-alias test, not a live CoFID workbook download test.
+    # Model/provider suites cover their own mocked transports separately.
+    async def no_cofid(*args, **kwargs):
+        return None
+    monkeypatch.setattr(srv.food_lookup.cofid_lookup, "lookup", no_cofid)
     scope = bind_user(uuid4())
     try:
         result = await srv._voice_tool_handlers()["log_meal"]("canary-words", {

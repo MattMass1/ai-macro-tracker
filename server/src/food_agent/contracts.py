@@ -338,6 +338,9 @@ class ResolvedFood(_Strict):
     macro_source: _text(200)
     serving_basis: ServingBasis
     panel: NutrientPanel
+    cache_allowed: bool = True
+    attribution: dict[str, Any] = Field(default_factory=dict)
+    component_attributions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class DraftItemState(_Strict):
@@ -375,8 +378,8 @@ def content_hash(items: Sequence[DraftItemState | Mapping[str, Any]]) -> str:
     """Canonical sha256 of what would be logged.
 
     Covers identity, portion (kind, amount, unit), modifications, resolved
-    food id and multiplier. Independent of dict key order and item order;
-    excludes the user's portion wording and display text.
+    food id, source panel/basis/display name and multiplier. Independent of
+    dict key order and item order; excludes only the user's portion wording.
     """
     entries = []
     for item in items:
@@ -388,6 +391,11 @@ def content_hash(items: Sequence[DraftItemState | Mapping[str, Any]]) -> str:
                         "unit": state.portion.unit},
             "modifications": [m.model_dump(mode="json") for m in state.modifications],
             "food_id": state.resolved.food_id if state.resolved else None,
+            "evidence": ({"panel": state.resolved.panel.model_dump(mode="json"),
+                          "basis": state.resolved.serving_basis.model_dump(mode="json"),
+                          "display_name": state.resolved.display_name,
+                          "macro_source": state.resolved.macro_source}
+                         if state.resolved else None),
             "multiplier": state.multiplier,
         }), sort_keys=True, separators=(",", ":")))
     payload = json.dumps(sorted(entries), separators=(",", ":"))
@@ -432,6 +440,7 @@ class PendingConfirm(_Strict):
     draft_id: UuidText
     revision: Annotated[int, Field(ge=1)]
     content_hash: Sha256
+    session_ref: _text(200) | None = None
 
     def to_pending_question(self) -> str:
         text = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))

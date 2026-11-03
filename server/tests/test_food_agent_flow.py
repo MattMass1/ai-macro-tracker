@@ -715,7 +715,8 @@ async def test_recall_that_finds_nothing_asks_honestly_and_writes_nothing(rig, s
 
 
 def _openai_response(content: str) -> httpx.Response:
-    return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": content}}],
+    return httpx.Response(200, json={"status": "completed", "output": [{"type": "message", "role": "assistant",
+                                     "status": "completed", "content": [{"type": "output_text", "text": content}]}],
                                      "model": "fake", "usage": {}},
                           request=httpx.Request("POST", "https://example.invalid"))
 
@@ -732,9 +733,9 @@ async def test_model_adapter_sends_strict_schema_and_parses_agent_turn(monkeypat
     turn = await interpret("hi", {"open_draft": None})
     assert turn.actions[0].type == "not_food"
     token, payload = sent[0]
-    fmt = payload["response_format"]
-    assert fmt["type"] == "json_schema" and fmt["json_schema"]["strict"] is True
-    assert fmt["json_schema"]["schema"] == c.agent_turn_json_schema()
+    fmt = payload["text"]["format"]
+    assert fmt["type"] == "json_schema" and fmt["strict"] is True
+    assert fmt["schema"] == c.agent_turn_json_schema()
     assert payload["model"] == "fake-model" and "tools" not in payload
 
 

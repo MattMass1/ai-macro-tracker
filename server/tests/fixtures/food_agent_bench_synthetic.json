@@ -13,6 +13,7 @@
         {"identity": {"name": "Smokehouse Burger with Bacon", "brand": "Harbor Grill", "variant": null, "kind": "restaurant", "preparation": null},
          "portion": {"kind": "serving_fraction", "amount": 0.5, "unit": "serving"}, "modifications": []}
       ],
+      "expected_nutrients": {"calories": 320.0, "protein": 18.0, "carbs": 20.5, "fat": 18.0, "fiber": 1.0},
       "expected_question": null,
       "old_app": {"outcome": "lost_fraction", "logged_items_summary": "synthetic: whole burger logged for a half", "questions_asked": 2, "false_logged": true, "duplicate": false, "wrong_past_meal": false, "lost_fraction": true, "reasked_confirmed_item": false, "case_success": false},
       "notes": "synthetic"
@@ -27,6 +28,7 @@
         {"identity": {"name": "Berry Blast Smoothie", "brand": "Juice Hut", "variant": "12 oz", "kind": "restaurant", "preparation": null},
          "portion": {"kind": "volume", "amount": 6, "unit": "fl oz"}, "modifications": []}
       ],
+      "expected_nutrients": {"calories": 170.0, "protein": 2.5, "carbs": 39.0, "fat": 0.5, "fiber": 2.0},
       "expected_question": null,
       "old_app": {"outcome": "reasked", "logged_items_summary": "synthetic: nothing logged, confirmation asked three times", "questions_asked": 3, "false_logged": false, "duplicate": false, "wrong_past_meal": false, "lost_fraction": false, "reasked_confirmed_item": true, "case_success": false},
       "notes": "synthetic"
@@ -41,6 +43,7 @@
         {"identity": {"name": "Teriyaki Salmon Bowl", "brand": null, "variant": null, "kind": "history", "preparation": null},
          "portion": {"kind": "serving_fraction", "amount": 1, "unit": "serving"}, "modifications": []}
       ],
+      "expected_nutrients": {"calories": 640, "protein": 38, "carbs": 70, "fat": 22, "fiber": 6},
       "expected_question": null,
       "old_app": {"outcome": "wrong_food", "logged_items_summary": "synthetic: logged the newest unrelated entry", "questions_asked": 0, "false_logged": false, "duplicate": false, "wrong_past_meal": true, "lost_fraction": false, "reasked_confirmed_item": false, "case_success": false},
       "notes": "synthetic"
@@ -55,6 +58,7 @@
         {"identity": {"name": "Boiled Egg", "brand": null, "variant": null, "kind": "generic", "preparation": null},
          "portion": {"kind": "count", "amount": 2, "unit": "egg"}, "modifications": []}
       ],
+      "expected_nutrients": {"calories": 156, "protein": 12.6, "carbs": 1.2, "fat": 10.6, "fiber": 0},
       "expected_question": null,
       "old_app": {"outcome": "correct", "logged_items_summary": "synthetic: two boiled eggs", "questions_asked": 0, "false_logged": false, "duplicate": false, "wrong_past_meal": false, "lost_fraction": false, "reasked_confirmed_item": false, "case_success": true},
       "notes": "synthetic"

@@ -1,12 +1,7 @@
-"""Production interpreter: one strict structured-output model call per turn.
+"""New food interpreter: bounded, non-stored OpenAI Responses strict JSON.
 
-Calls the existing ``coach.post_openai`` (Chat Completions) with
-``response_format={"type": "json_schema", "strict": true}`` built from
-:func:`contracts.agent_turn_json_schema`, then validates the reply with
-Pydantic. Anything that does not validate (for example a ``confirmed`` flag or
-nutrient numbers) raises :class:`InterpreterError`; the coordinator then makes
-no change. Tests pass a fake ``post``; nothing here is exercised on the network
-in this repo's test suite.
+Unrelated coach and lookup model routes are deliberately unchanged. No retries,
+SDK, tools, partial JSON execution or credential logging.
 """
 
 from __future__ import annotations
@@ -47,49 +42,74 @@ class InterpreterError(RuntimeError):
     """The model reply was unavailable or did not match the AgentTurn contract."""
 
 
+DEFAULT_MODEL = "gpt-6.1-terra"
+RESPONSES_URL = "https://api.openai.com/v1/responses"
+
+
+async def post_responses(token: str, payload: dict[str, Any]) -> httpx.Response:
+    """One backend-only request; callers may wrap this seam for metering."""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), follow_redirects=False, trust_env=False) as client:
+        return await client.post(RESPONSES_URL, headers={"Authorization": f"Bearer {token}"}, json=payload)
+
+
+def api_key() -> str:
+    """Standard backend key wins; the old app token remains explicit compatibility."""
+    return os.environ.get("OPENAI_API_KEY", "").strip() or os.environ.get("OPENAI_ACCESS_TOKEN", "").strip()
+
+
 class ModelInterpreter:
-    """``await ModelInterpreter()(message, context) -> AgentTurn``."""
+    """Validate exactly one completed assistant message before returning an action."""
 
     def __init__(self, *, post: PostFn | None = None, token: str | None = None, model: str | None = None,
-                 instructions: str = INSTRUCTIONS, max_completion_tokens: int = 800):
-        if post is None:
-            from coach import post_openai
-            post = post_openai
-        self.post = post
-        self.token = token
-        self.model = model
+                 instructions: str = INSTRUCTIONS, max_completion_tokens: int = 2000):
+        self.post = post or post_responses
+        self.token, self.model = token, model
         self.instructions = instructions
+        if not 1 <= max_completion_tokens <= 2000:
+            raise ValueError("food interpreter output cap must be 1..2000")
         self.max_completion_tokens = max_completion_tokens
 
     def payload(self, message: str, context: Mapping[str, Any]) -> dict[str, Any]:
         return {
-            "model": self.model or os.environ.get("FOOD_AGENT_MODEL") or os.environ.get("COACH_MODEL", "gpt-5.6-luna"),
-            "max_completion_tokens": self.max_completion_tokens,
-            "messages": [
+            "model": self.model or os.environ.get("FOOD_AGENT_MODEL") or DEFAULT_MODEL,
+            "store": False,
+            "service_tier": "default",
+            "reasoning": {"effort": "none"},
+            "max_output_tokens": self.max_completion_tokens,
+            "input": [
                 {"role": "system", "content": self.instructions},
                 {"role": "user", "content": "Context (the user's own open meals):\n"
                  + json.dumps(context, default=str, sort_keys=True) + "\n\nMessage:\n" + message},
             ],
-            "response_format": {"type": "json_schema", "json_schema": {
-                "name": "agent_turn", "strict": True, "schema": agent_turn_json_schema()}},
+            "text": {"format": {"type": "json_schema", "name": "agent_turn", "strict": True,
+                                "schema": agent_turn_json_schema()}},
         }
 
     async def __call__(self, message: str, context: Mapping[str, Any]) -> AgentTurn:
-        token = self.token if self.token is not None else os.environ.get("OPENAI_ACCESS_TOKEN", "").strip()
-        if not token:
+        token = self.token if self.token is not None else api_key()
+        if not token.strip():
             raise InterpreterError("the food agent model is not configured")
         try:
             response = await self.post(token, self.payload(message, context))
             response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-            raise InterpreterError("the food agent model did not answer") from exc
-        if not isinstance(content, str):
-            raise InterpreterError("the food agent model returned no content")
-        try:
-            return AgentTurn.model_validate_json(content)
-        except ValidationError as exc:
-            raise InterpreterError("the food agent model reply did not match the contract") from exc
+            data = response.json()
+            if data.get("status") != "completed" or data.get("error"):
+                raise ValueError("response not completed")
+            output = data["output"]
+            # Reasoning metadata is not executable. Everything else must be the single message.
+            messages = [item for item in output if item.get("type") != "reasoning"]
+            if len(messages) != 1:
+                raise ValueError("ambiguous output")
+            item = messages[0]
+            if item.get("type") != "message" or item.get("role") != "assistant" or item.get("status") != "completed":
+                raise ValueError("not a completed assistant message")
+            parts = item["content"]
+            if len(parts) != 1 or parts[0].get("type") != "output_text" or not isinstance(parts[0].get("text"), str):
+                raise ValueError("refusal or ambiguous content")
+            return AgentTurn.model_validate_json(parts[0]["text"])
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
+            # No provider body, request headers or exception text in this public error.
+            raise InterpreterError("the food agent model did not return a complete valid answer") from None
 
 
-__all__ = ["ModelInterpreter", "InterpreterError", "INSTRUCTIONS"]
+__all__ = ["ModelInterpreter", "InterpreterError", "INSTRUCTIONS", "post_responses", "DEFAULT_MODEL"]

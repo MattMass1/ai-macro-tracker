@@ -43,6 +43,8 @@ EDITABLE_STATES = ("collecting", "needs_detail")
 RECENT_WINDOW = timedelta(hours=24)
 NEW_MEAL_AFTER = timedelta(minutes=20)
 MAX_DRAFT_ITEMS = 24
+OVERSIZED = "This meal is too large to show completely. Please split it into smaller meals before confirming."
+_SESSION_UNSET = object()
 
 COULD_NOT_VERIFY = ("I could not verify it saved. I'll check it first thing on your next message, "
                     "so don't log it again.")
@@ -153,6 +155,19 @@ class FoodAgent:
         result: FoodTurnResult | None = None
         try:
             result = await self._turn(message, decision, recent, now, session_ref, {d.id for d in live})
+            # Canvas' existing reply/clarification contract is 1000 characters.
+            # Invalidate BEFORE returning, including compound reconciliation replies.
+            if len(result.reply) > 1000 and (result.preview or result.shown_draft_ids):
+                ids = set(result.shown_draft_ids)
+                if result.preview:
+                    ids.add(result.preview.draft_id)
+                for draft_id in ids:
+                    draft = await self.drafts.get(draft_id)
+                    if draft:
+                        await self.drafts.mark_seen(draft.id, draft.revision)
+                        await self.drafts.save(draft.with_(pending=None), draft.revision)
+                result = _result("This meal is too large to show completely. Please split it into smaller meals before confirming.",
+                                 "needs_detail", "not_applied")
             return result
         finally:
             # Check two: clear every binding this turn did not show, even if the turn raised.
@@ -186,15 +201,18 @@ class FoodAgent:
             logger.warning("food agent could not reconcile: %s", type(exc).__name__)
             return _result("I couldn't reach your log just now. Try again in a moment.", "error", "unknown")
         if reconciled is not None:
-            if decision != "other":
+            if decision != "other" or reconciled.outcome.effect == "unknown":
                 return reconciled  # "yes" again after "could not verify": the check IS the answer
             try:
                 recent = await self.drafts.recent(now - self.recent_window)
             except Exception:
                 return reconciled
             rest = await self._handle(message, decision, recent, now, session_ref, live)
+            combined = " ".join(part for part in (reconciled.reply, rest.reply) if part)
+            if rest.preview and len(combined) > 1000:
+                return rest
             return FoodTurnResult(
-                reply=" ".join(part for part in (reconciled.reply, rest.reply) if part),
+                reply=combined,
                 handed_off=rest.handed_off, preview=rest.preview, receipt=reconciled.receipt,
                 outcome=rest.outcome if rest.outcome.effect != "not_attempted" else reconciled.outcome,
                 draft_id=rest.draft_id or reconciled.draft_id, question=rest.question)
@@ -206,7 +224,14 @@ class FoodAgent:
         # stale binding touches updated_at, so recency alone cannot decide.
         open_ = sorted((d for d in recent if d.state in EDITABLE_STATES), key=lambda d: d.pending is None)
         # Only a preview that was the LAST thing shown may be confirmed or cancelled.
-        bound = [d for d in open_ if d.pending_confirm() is not None and d.id in live]
+        bound = [d for d in open_ if d.pending_confirm() is not None and d.id in live
+                 and d.pending_confirm().session_ref == session_ref]
+        unseen = [d for d in open_ if d.pending_confirm() is not None
+                  and d.pending_confirm().session_ref != session_ref]
+        if decision == "yes" and not bound and unseen:
+            return await self._reshow(unseen[0], now, session_ref=session_ref)
+        if decision == "yes" and len(bound) + len(unseen) > 1:
+            return self._ask_which(bound + unseen)
         if decision == "yes" and len(bound) == 1:
             return await self._confirm(bound[0], now)
         if decision == "yes" and len(bound) > 1:
@@ -237,7 +262,7 @@ class FoodAgent:
             return await self._edit(actions, open_, recent, now, session_ref)
         confirm_action = next((a for a in actions if a.type == "confirm"), None)
         if confirm_action is not None:
-            return await self._model_confirm(confirm_action, decision, bound, open_, now)
+            return await self._model_confirm(confirm_action, decision, bound, open_, now, session_ref)
         ask = next((a for a in actions if a.type == "ask"), None)
         if ask is not None:
             return _result(ask.question, "needs_detail", question=ask.question)
@@ -271,10 +296,12 @@ class FoodAgent:
     def _ask_which(self, bound: list[AgentDraft]) -> FoodTurnResult:
         names = [" and ".join(item_label(i) for i in d.items) for d in bound]
         reply = f"You have {len(bound)} meals waiting to log: {_join(names)}. Which one should I log?"
+        if len(reply) > 1000:
+            return _result("Several meals are waiting. Which food should I show you first?", "needs_detail")
         return _result(reply, "needs_detail", question=reply, shown_draft_ids=tuple(d.id for d in bound))
 
     async def _model_confirm(self, action, decision: str, bound: list[AgentDraft], open_: list[AgentDraft],
-                             now: datetime) -> FoodTurnResult:
+                             now: datetime, session_ref: str | None) -> FoodTurnResult:
         """The model thinks the user confirmed. That is a hint: it never commits."""
         if len(bound) > 1:
             chosen = next((d for d in bound if d.id == str(action.draft_ref).lower()), None)
@@ -283,18 +310,21 @@ class FoodAgent:
             for other in bound:  # unbind the others; their items stay as they were
                 if other.id != chosen.id:
                     await self.drafts.save(other.with_(pending=None), other.revision)
-            return await self._reshow(chosen, now)
+            return await self._reshow(chosen, now, session_ref=session_ref)
         if len(bound) == 1:
             # This turn marked the old binding seen: show it again under a fresh revision.
             return await self._reshow(bound[0], now, prefix="Nothing changed yet.")
         ready = next((d for d in open_ if d.question() is None and items_ready(d.items)), None)
         if ready is not None:  # its preview was not the last thing shown: show it again, never commit
-            return await self._reshow(ready, now)
+            return await self._reshow(ready, now, session_ref=session_ref)
         return _result("There's nothing waiting to log right now.")
 
     async def _confirm(self, draft: AgentDraft, now: datetime) -> FoodTurnResult:
         binding = draft.pending_confirm()
         assert binding is not None
+        draft, questions = await self._refresh(draft)
+        if questions:
+            return _result(questions[0], "needs_detail", "not_applied", question=questions[0])
         current_hash = content_hash(list(draft.items))
         if binding.revision != draft.revision or binding.content_hash != current_hash:
             return await self._reshow(draft, now, prefix="That meal changed since I showed it.")
@@ -355,7 +385,7 @@ class FoodAgent:
             row = await self.drafts.fetch_entry(str(entry_id))
         except Exception as exc:
             logger.warning("food agent readback failed: %s", type(exc).__name__)
-            row = None
+            return _result(COULD_NOT_VERIFY, "unknown", "unknown", draft_id=draft.id)
         if row is None:
             if reconciling:  # the operation completed durably, yet the row is gone
                 await self._ack(draft, intent, entry_id)
@@ -398,7 +428,7 @@ class FoodAgent:
     async def _reconcile(self, recent: list[AgentDraft], now: datetime,
                          decision: str = "other") -> FoodTurnResult | None:
         """Finish or verify an earlier commit whose outcome was not verified. Same key, same hash."""
-        for draft in recent:  # newest first
+        for draft in await self.drafts.recovery():  # owner-scoped, independent of conversational recency
             intent = draft.commit_intent()
             if intent is None:
                 continue
@@ -406,7 +436,7 @@ class FoodAgent:
                 if draft.committed_operation_key != op_key(draft.id, intent.revision):
                     continue
                 if await self.drafts.is_acknowledged(draft.id, intent.revision):
-                    break  # everything older was reconciled before this one
+                    continue  # older unresolved intents must remain discoverable
                 return await self._reconcile_one(draft, now)
             if draft.state == "ready" and draft.revision == intent.revision:
                 if decision == "no":
@@ -422,10 +452,26 @@ class FoodAgent:
         intent = draft.commit_intent()
         if intent is None:
             return None
-        try:
-            plan = build_commit(draft, intent.content_hash)
-        except (DraftNotReady, ValueError):
-            plan = None
+        operation = await self.drafts.fetch_operation(op_key(draft.id, intent.revision))
+        original = ((operation or {}).get("stored_response") or {}).get("entry")
+        if original:
+            values = {k: original.get(k) for k in ("name", "meal", "macro_source", "calories", "protein", "carbs", "fat", "fiber")}
+            values["day"] = draft.log_date
+            from food_agent.drafts import request_hash_of
+            if request_hash_of(values) != intent.request_hash:
+                return _result(COULD_NOT_VERIFY, "unknown", "unknown", draft_id=draft.id)
+            unknown = tuple(k for k in ("calories", "protein", "carbs", "fat", "fiber") if values[k] is None)
+            plan = CommitPlan(values, {}, intent.request_hash, unknown, NutrientPanel(**{k: values[k] for k in
+                              ("calories", "protein", "carbs", "fat", "fiber")}))
+        else:
+            if draft.state == "committed":
+                # Operation retention expired: never create a second entry or forget recovery facts.
+                return _result(COULD_NOT_VERIFY, "unknown", "unknown", draft_id=draft.id)
+            draft, questions = await self._refresh(draft)
+            try:
+                plan = None if questions else build_commit(draft, intent.content_hash)
+            except (DraftNotReady, ValueError):
+                plan = None
         if draft.state == "committed":
             if plan is None:
                 return None
@@ -555,8 +601,12 @@ class FoodAgent:
         new_revision = 1 if is_new else target.revision + 1
         if question is None:
             binding = PendingConfirm(draft_id=target.id, revision=new_revision,
-                                     content_hash=content_hash(items)).to_pending_question()
+                                     content_hash=content_hash(items), session_ref=session_ref).to_pending_question()
             changed = target.with_(items=tuple(items), state="collecting", pending=binding)
+            trial = self._preview(changed.with_(revision=new_revision), now)
+            if trial is not None and len(self._preview_text(changed, trial, notes)) > 1000:
+                question = OVERSIZED
+                changed = changed.with_(state="needs_detail", pending=question)
         else:
             changed = target.with_(items=tuple(items), state="needs_detail", pending=question)
         try:
@@ -629,7 +679,14 @@ class FoodAgent:
                        questions: list[str]) -> list[DraftItemState]:
         out = []
         for item in items:
-            if item.resolved is not None:
+            # No source-backed component modification adapter exists yet. Never pretend
+            # the standard panel reflects an adjustment, including recalled items.
+            if item.modifications:
+                detail = ", ".join(f"{m.op} {m.text}" for m in item.modifications)
+                questions.append(f"I don't have source-backed nutrition for {detail}. Can you choose a listed variant or remove the adjustment?")
+                out.append(item.model_copy(update={"resolved": None, "multiplier": None}))
+                continue
+            if item.resolved is not None and item.resolved.panel.calories is not None:
                 if item.multiplier is None and not questions:
                     found = portion_multiplier(item.portion, item.resolved.serving_basis, item.identity)
                     if found is None:
@@ -659,6 +716,11 @@ class FoodAgent:
                 questions.append(result.question or f"I couldn't find {identity_text(item)}. Where was it from?")
             out.append(item)
         return out
+
+    async def _refresh(self, draft: AgentDraft) -> tuple[AgentDraft, list[str]]:
+        questions: list[str] = []
+        items = await self._resolve(list(draft.items), [], questions)
+        return draft.with_(items=tuple(items)), questions
 
     @staticmethod
     def _calorie_questions(items: Sequence[DraftItemState]) -> list[str]:
@@ -692,21 +754,33 @@ class FoodAgent:
         if len(parts) > 1:
             body += f". Total: {nutrient_text(preview.totals)}"
         text = body + "."
-        for note in dict.fromkeys(notes):
+        from food_agent.source_policy import attribution_texts
+        source_notes = [text for item in draft.items if item.resolved for text in
+                        attribution_texts([item.resolved.attribution, item.resolved.component_attributions])]
+        for note in dict.fromkeys([*notes, *source_notes]):
             text += f" {note[0].upper()}{note[1:]}."
         text += " Save the change?" if draft.is_amend else " Log it?"
         return text
 
-    async def _reshow(self, draft: AgentDraft, now: datetime, *, prefix: str = "") -> FoodTurnResult:
+    async def _reshow(self, draft: AgentDraft, now: datetime, *, prefix: str = "", session_ref: Any = _SESSION_UNSET) -> FoodTurnResult:
         """Bind a fresh preview to the draft's CURRENT content and show it. Never commits."""
         lead = f"{prefix} " if prefix else ""
+        draft, questions = await self._refresh(draft)
+        if questions:
+            return _result(questions[0], "needs_detail", question=questions[0])
         if not items_ready(draft.items) or self._calorie_questions(draft.items):
             question = draft.question() or (self._calorie_questions(draft.items) or [
                 "Tell me again what you had?"])[0]
             return _result(f"{lead}{question}", "needs_detail", draft_id=draft.id, question=question)
         binding = PendingConfirm(draft_id=draft.id, revision=draft.revision + 1,
-                                 content_hash=content_hash(list(draft.items))).to_pending_question()
-        saved = await self.drafts.save(draft.with_(state="collecting", pending=binding), draft.revision)
+                                 content_hash=content_hash(list(draft.items)),
+                                 session_ref=session_ref if session_ref is not _SESSION_UNSET else (draft.pending_confirm().session_ref if draft.pending_confirm() else draft.session_ref)).to_pending_question()
+        candidate = draft.with_(state="collecting", pending=binding)
+        trial = self._preview(candidate.with_(revision=draft.revision + 1), now)
+        if trial is not None and len(lead + self._preview_text(candidate, trial, [])) > 1000:
+            await self.drafts.save(draft.with_(state="needs_detail", pending=OVERSIZED), draft.revision)
+            return _result(OVERSIZED, "needs_detail", "not_applied", question=OVERSIZED)
+        saved = await self.drafts.save(candidate, draft.revision)
         if saved is None or saved.pending_confirm() is None or saved.pending_confirm().revision != saved.revision:
             return _result(f"{lead}That meal changed just now. Check Today.", "conflict", "not_applied")
         preview = self._preview(saved, now)
@@ -716,7 +790,7 @@ class FoodAgent:
 
 
 def items_ready(items: Sequence[DraftItemState]) -> bool:
-    return bool(items) and all(i.resolved is not None and i.multiplier is not None for i in items)
+    return bool(items) and all(not i.modifications and i.resolved is not None and i.multiplier is not None for i in items)
 
 
 def _same_values(row: Mapping[str, Any], values: Mapping[str, Any]) -> bool:

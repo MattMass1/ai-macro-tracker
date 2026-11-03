@@ -1248,6 +1248,24 @@ class Store:
                 "ORDER BY updated_at DESC, id LIMIT $3", user_id, since, int(limit))
             return [await self._draft_conn(conn, user_id, row["id"]) for row in ids]
 
+    async def fetch_food_agent_recovery_drafts(self) -> list[dict[str, Any]]:
+        """Owner-scoped recovery, NOT the eight-row conversation window.
+
+        Keep committed intent facts after request-operation retention expires. The
+        coordinator refuses to replay a committed draft without proof; it never
+        converts it into a fresh consume operation.
+        """
+        pool = await self.connect(); user_id = current_user_id()
+        async with pool.acquire() as conn:
+            ids = await conn.fetch(
+                "SELECT d.id FROM meal_drafts d WHERE d.user_id=$1 "
+                "AND d.state IN ('ready','committed') "
+                "AND d.pending_question LIKE '%\"kind\":\"commit\"%' "
+                "AND EXISTS (SELECT 1 FROM meal_draft_items i WHERE i.user_id=$1 AND i.draft_id=d.id "
+                "AND i.resolution->>'food_agent'='food-agent/1') "
+                "ORDER BY d.updated_at DESC,d.id", user_id)
+            return [await self._draft_conn(conn, user_id, row["id"]) for row in ids]
+
     async def fetch_operation(self, key: str) -> dict[str, Any] | None:
         """Read-only: the current user's idempotent operation for ``key``, if any."""
         pool = await self.connect(); user_id = current_user_id()

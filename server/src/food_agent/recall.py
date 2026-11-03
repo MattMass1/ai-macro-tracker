@@ -406,13 +406,24 @@ def _items(chosen: _Candidate) -> tuple[DraftItemState, ...]:
             unknown = [k for k in (item.get("unknown_nutrients") or []) if k in NUTRIENT_KEYS]
             panel = _panel(nutrients, unknown)
             food_id = f"history:{entry_id}:{item.get('item_ref') or index}"
+        from food_agent.source_policy import permits_cache, policy_only
+        modifications = item.get("modifications") or []
+        if not permits_cache(item):
+            # Recalled consumed facts are not a reusable provider panel. Keep the
+            # original consumed quantity, refresh its source and show a new preview.
+            original_portion = Portion.model_validate(item["portion"], strict=False)
+            out.append(DraftItemState(item_ref=f"r{index}", identity=_identity(item.get("identity"), display),
+                                      portion=original_portion, modifications=modifications))
+            continue
         food = ResolvedFood(food_id=food_id[:200], provider="history", external_id=entry_id,
+                            attribution=policy_only(item.get("attribution") or {}),
+                            component_attributions=policy_only(item.get("component_attributions") or []),
                             display_name=display[:200],
                             macro_source=_source(item.get("macro_source"), row.get("macro_source"),
                                                  fallback=fallback),
                             serving_basis=_basis(day, item), panel=panel)
         out.append(DraftItemState(item_ref=f"r{index}", identity=_identity(item.get("identity"), display),
-                                  portion=one, resolved=food, multiplier=1.0))
+                                  portion=one, modifications=modifications, resolved=food, multiplier=1.0))
     return tuple(out)
 
 

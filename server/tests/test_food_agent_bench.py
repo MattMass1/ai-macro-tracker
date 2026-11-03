@@ -219,7 +219,8 @@ async def test_scorer_wrong_past_meal_when_an_unrelated_history_entry_is_copied(
 
 
 def test_clarify_case_scoring_needs_a_question_and_no_rows():
-    case = {"id": "x", "expected_action": "recall_not_found_ask", "gold_items": [], "old_app": {}}
+    case = {"id": "x", "expected_action": "recall_not_found_ask", "gold_items": [], "old_app": {},
+            "expected_question": ["tuna bowl", ["where", "what"]]}
     ask = bench.TurnRecord(idx=0, user="the tuna bowl again", reply="I couldn't find a tuna bowl in your log. "
                            "Where was it from, or what was in it?", is_question=True, question="Where?")
     run = bench.CaseRun(case_id="x", turns=[ask], entries=[], decoy_markers=[])

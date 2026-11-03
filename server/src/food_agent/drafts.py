@@ -222,6 +222,8 @@ def build_commit(draft: AgentDraft, content_hash: str) -> CommitPlan:
     """
     if not draft.items:
         raise DraftNotReady("the meal has no items")
+    if any(i.modifications for i in draft.items):
+        raise DraftNotReady("modifications require source-backed component evidence")
     panels = item_panels(draft.items)
     totals = sum_panels(panels)
     unknown = tuple(key for key in NUTRIENT_KEYS if getattr(totals, key) is None)
@@ -250,6 +252,9 @@ def build_commit(draft: AgentDraft, content_hash: str) -> CommitPlan:
             "display_name": item.resolved.display_name,  # type: ignore[union-attr]
             "macro_source": item.resolved.macro_source,  # type: ignore[union-attr]
             "serving_basis": item.resolved.serving_basis.model_dump(mode="json"),  # type: ignore[union-attr]
+            "attribution": item.resolved.attribution,
+            "component_attributions": item.resolved.component_attributions,
+            "cache_allowed": item.resolved.cache_allowed,
             "nutrients": panel.model_dump(mode="json"),
             "unknown_nutrients": [key for key in NUTRIENT_KEYS if getattr(panel, key) is None],
         } for item, panel in zip(draft.items, panels)],
@@ -262,6 +267,7 @@ def build_commit(draft: AgentDraft, content_hash: str) -> CommitPlan:
 
 
 def _item_row(item: DraftItemState) -> dict[str, Any]:
+    from food_agent.source_policy import persistable_state
     portion = item.portion
     needs = None
     if item.resolved is None:
@@ -275,7 +281,7 @@ def _item_row(item: DraftItemState) -> dict[str, Any]:
         "quantity": portion.amount if portion.amount is not None and portion.amount <= 5000 else None,
         "unit": portion.unit, "preparation": prep if prep in ("raw", "cooked") else None, "size": None,
         "field_origins": {"source": AGENT_MARKER}, "needs": needs, "question": None,
-        "resolution": {AGENT_MARKER: SCHEMA_VERSION, "state": item.model_dump(mode="json")},
+        "resolution": {AGENT_MARKER: SCHEMA_VERSION, "state": persistable_state(item)},
         "estimate_consent": None, "template_item_id": None,
     }
 
@@ -343,6 +349,7 @@ def row_to_draft(row: Mapping[str, Any] | None) -> AgentDraft | None:
 class DraftPort(Protocol):
     """What the coordinator needs from persistence. Every call is owner-scoped."""
 
+    async def recovery(self) -> list[AgentDraft]: ...
     async def recent(self, since: datetime) -> list[AgentDraft]: ...
     async def get(self, draft_id: str) -> AgentDraft | None: ...
     async def create(self, draft: AgentDraft) -> AgentDraft: ...
@@ -366,6 +373,10 @@ class StoreDrafts:
         self.store = store
         self.limit = limit
 
+    async def recovery(self) -> list[AgentDraft]:
+        rows = await self.store.fetch_food_agent_recovery_drafts()
+        return [d for d in map(row_to_draft, rows) if d is not None and d.commit_intent() is not None]
+
     async def recent(self, since: datetime) -> list[AgentDraft]:
         rows = await self.store.fetch_recent_meal_drafts(since=since, limit=self.limit)
         return [draft for draft in map(row_to_draft, rows) if draft is not None]
@@ -377,10 +388,11 @@ class StoreDrafts:
         created = row_to_draft(await self.store.create_meal_draft(draft_to_row(draft)))
         if created is None:
             raise RuntimeError("created draft could not be read back")
-        return created
+        return created.with_(items=draft.items)  # transient panel, never stored in the row
 
     async def save(self, draft: AgentDraft, expected_revision: int) -> AgentDraft | None:
-        return row_to_draft(await self.store.save_meal_draft(draft_to_row(draft), int(expected_revision)))
+        saved = row_to_draft(await self.store.save_meal_draft(draft_to_row(draft), int(expected_revision)))
+        return saved.with_(items=draft.items) if saved else None
 
     async def cancel(self, draft_id: str, expected_revision: int) -> bool:
         return await self.store.cancel_meal_draft(draft_id, int(expected_revision))
@@ -403,6 +415,12 @@ class StoreDrafts:
 
     async def acknowledge(self, draft_id, revision, request_hash, entry_id) -> None:
         async def write(_conn):
+            from auth import current_user_id
+            from uuid import UUID
+            await _conn.execute(
+                "UPDATE meal_drafts SET pending_question=NULL WHERE user_id=$1 AND id=$2 "
+                "AND state='committed' AND revision=$3 AND committed_operation_key=$4",
+                current_user_id(), UUID(str(draft_id)), int(revision), op_key(draft_id, revision))
             return {"acknowledged": True, "entry_id": str(entry_id)}
         await self.store.run_idempotent(ack_key(draft_id, revision), request_hash, write)
 
@@ -448,6 +466,11 @@ class MemoryDrafts:
     def _row(self, draft_id: str) -> dict[str, Any] | None:
         return self.drafts.get(str(draft_id).lower())
 
+    async def recovery(self):
+        drafts = [d for d in map(row_to_draft, copy.deepcopy(list(self.drafts.values())))
+                  if d is not None and d.commit_intent() is not None and d.state in ("ready", "committed")]
+        return sorted(drafts, key=lambda d: d.updated_at, reverse=True)
+
     async def recent(self, since):
         rows = sorted((row for row in self.drafts.values() if row["updated_at"] >= since),
                       key=lambda row: row["updated_at"], reverse=True)[:self.limit]
@@ -461,7 +484,7 @@ class MemoryDrafts:
         row = {**draft_to_row(draft), "id": draft.id.lower(), "revision": 1, "updated_at": self.clock(),
                "committed_entry_id": None, "committed_entry_revision": None, "committed_operation_key": None}
         self.drafts[row["id"]] = row
-        return row_to_draft(copy.deepcopy(row))
+        return row_to_draft(copy.deepcopy(row)).with_(items=draft.items)
 
     async def save(self, draft, expected_revision):
         row = self._row(draft.id)
@@ -472,7 +495,7 @@ class MemoryDrafts:
             row[key] = new[key]
         row["revision"] += 1
         row["updated_at"] = self.clock()
-        return row_to_draft(copy.deepcopy(row))
+        return row_to_draft(copy.deepcopy(row)).with_(items=draft.items)
 
     async def cancel(self, draft_id, expected_revision):
         row = self._row(draft_id)
@@ -540,6 +563,9 @@ class MemoryDrafts:
                 "stored_response": copy.deepcopy(response)}
 
     async def acknowledge(self, draft_id, revision, request_hash, entry_id):
+        row = self._row(draft_id)
+        if row and row["state"] == "committed" and row["revision"] == revision and row["committed_operation_key"] == op_key(draft_id, revision):
+            row["pending_question"] = None
         self.ops.setdefault(ack_key(draft_id, revision), (request_hash, {"acknowledged": True,
                                                                            "entry_id": str(entry_id)}))
 

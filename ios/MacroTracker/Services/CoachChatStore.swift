@@ -11,6 +11,11 @@ final class CoachChatStore: ObservableObject {
     private let api: APIClient
     private let defaults: UserDefaults
     @Published private(set) var sessionId: String
+    /// Requests the agent has not answered yet. The companion writes in the
+    /// journal exactly while this is above zero; a reply, cancel or error
+    /// brings it back down, so the pen stops on real agent state, not a timer.
+    @Published private(set) var inFlight = 0
+    var isResponding: Bool { inFlight > 0 }
 
     init(api: APIClient, defaults: UserDefaults = .standard) {
         self.api = api
@@ -22,18 +27,28 @@ final class CoachChatStore: ObservableObject {
     /// sessions in memory, so a deploy forgets them; an "unknown session"
     /// rejection mints a fresh id and retries exactly once.
     func send(_ text: String) async throws -> CoachTurn {
-        do {
-            return try await api.canvasTurn(sessionId: sessionId, turnId: Self.newId(), message: text)
-        } catch let error as APIError where error.status == 400 && error.message.lowercased().contains("session") {
-            sessionId = Self.rotateSession(scope: Self.scope(api), defaults: defaults)
-            return try await api.canvasTurn(sessionId: sessionId, turnId: Self.newId(), message: text)
+        try await tracked {
+            do {
+                return try await api.canvasTurn(sessionId: sessionId, turnId: Self.newId(), message: text)
+            } catch let error as APIError where error.status == 400 && error.message.lowercased().contains("session") {
+                sessionId = Self.rotateSession(scope: Self.scope(api), defaults: defaults)
+                return try await api.canvasTurn(sessionId: sessionId, turnId: Self.newId(), message: text)
+            }
         }
     }
 
     /// Confirms or cancels a pending workout change by its approval id.
     func respond(approval id: String, confirm: Bool) async throws -> CoachTurn {
-        try await api.canvasAction(sessionId: sessionId,
-                                   intent: CoachIntent(action: confirm ? "confirm" : "cancel", reference: id))
+        try await tracked {
+            try await api.canvasAction(sessionId: sessionId,
+                                       intent: CoachIntent(action: confirm ? "confirm" : "cancel", reference: id))
+        }
+    }
+
+    private func tracked<T>(_ operation: () async throws -> T) async rethrows -> T {
+        inFlight += 1
+        defer { inFlight -= 1 }
+        return try await operation()
     }
 
     func history(limit: Int = 100) async throws -> [ChatHistoryMessage] {

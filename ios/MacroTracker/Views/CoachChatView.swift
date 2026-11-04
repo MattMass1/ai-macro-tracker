@@ -102,7 +102,11 @@ struct CoachChatView: View {
                 messages.append(CoachMessage(role: .assistant, text: "Logged \(name), \(Int(calories)) kcal."))
             })
         }
-        .task { await loadChatHistory() }
+        .task {
+            await loadChatHistory()
+            await sendPendingFromHome()
+        }
+        .onChange(of: store.pendingCoachMessage) { _, _ in Task { await sendPendingFromHome() } }
         .confirmationDialog("Sign out?", isPresented: $showSignOutConfirm, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { auth.signOut() }
         } message: {
@@ -117,19 +121,12 @@ struct CoachChatView: View {
             Menu {
                 Button("Sign out", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { showSignOutConfirm = true }
             } label: {
-                Image(systemName: "figure.mind.and.body")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(Theme.accent)
-                    .frame(width: 44, height: 44)
-                    .background(Theme.accentTint, in: Circle())
+                CompanionStage(chat: store.chat, character: character, size: 64)
+                    .background(Theme.accentTint, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).stroke(Theme.edge))
             }
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Coach").font(.headline).foregroundStyle(Theme.ink)
-                HStack(spacing: 5) {
-                    Circle().fill(Theme.accent).frame(width: 7, height: 7)
-                    Text("Online").font(.caption).foregroundStyle(Theme.muted)
-                }
-            }
+            .accessibilityLabel("Coach menu")
+            CoachStatus(chat: store.chat)
             Spacer()
             Button("Manual", systemImage: "slider.horizontal.3") { showManual = true }
                 .font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
@@ -193,7 +190,17 @@ struct CoachChatView: View {
 
     private var trimmedInput: String { input.trimmingCharacters(in: .whitespacesAndNewlines) }
 
+    @AppStorage(CompanionPreferences.characterKey) private var characterRaw = CompanionCharacter.male.rawValue
+    private var character: CompanionCharacter { CompanionCharacter(rawValue: characterRaw) ?? .male }
+
     // MARK: - Actions
+
+    /// A message typed into the home dock is sent exactly once, here.
+    private func sendPendingFromHome() async {
+        guard let message = store.pendingCoachMessage, !isSending else { return }
+        store.pendingCoachMessage = nil
+        await sendChat(message)
+    }
 
     private func send() async {
         let message = trimmedInput
@@ -331,6 +338,20 @@ struct CoachChatView: View {
     private static func formatPounds(_ value: Double) -> String {
         let rounded = (value * 10).rounded() / 10
         return rounded.rounded() == rounded ? String(Int(rounded)) : String(format: "%.1f", rounded)
+    }
+}
+
+/// "Writing" while a request is pending, "Ready" otherwise; same source as the pen.
+private struct CoachStatus: View {
+    @ObservedObject var chat: CoachChatStore
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Coach").font(.headline).foregroundStyle(Theme.ink)
+            HStack(spacing: 5) {
+                Circle().fill(Theme.accent).frame(width: 7, height: 7)
+                Text(chat.isResponding ? "Writing" : "Ready").font(.caption).foregroundStyle(Theme.muted)
+            }
+        }
     }
 }
 

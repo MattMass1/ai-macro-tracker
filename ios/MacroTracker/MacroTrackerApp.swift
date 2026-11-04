@@ -8,8 +8,8 @@ struct MacroTrackerApp: App {
     init() {
         let appearance = UITabBarAppearance()
         appearance.configureWithOpaqueBackground()
-        appearance.backgroundColor = UIColor(Theme.surface)
-        appearance.shadowColor = UIColor.separator.withAlphaComponent(0.25)
+        appearance.backgroundColor = UIColor(Theme.dock)
+        appearance.shadowColor = UIColor(Theme.accentEdge)
         UITabBar.appearance().standardAppearance = appearance
         UITabBar.appearance().scrollEdgeAppearance = appearance
     }

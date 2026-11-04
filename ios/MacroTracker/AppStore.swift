@@ -22,6 +22,8 @@ final class AppStore: ObservableObject {
     @Published var isLoadingWorkouts = false
     @Published var errorMessage: String?
     @Published var toast: String?
+    /// Text typed into the home Ask Coach dock; the Coach tab sends it once.
+    @Published var pendingCoachMessage: String?
     private let api: APIClient
     /// Bumped by reset() so requests still in flight from a previous session
     /// can never publish data, errors, or toasts into the next user's session.
@@ -290,7 +292,7 @@ final class AppStore: ObservableObject {
         selectCurrentDay()
         day = nil; presets = []; workouts = []; workoutHistoryEntries = []; trendsPayload = nil; exercises = []; plan = nil; stats = nil; brief = nil
         isLoadingDay = true; isLoadingWorkouts = false
-        errorMessage = nil; toast = nil
+        errorMessage = nil; toast = nil; pendingCoachMessage = nil
         WorkoutSessionCompletions.removeAll()
     }
 

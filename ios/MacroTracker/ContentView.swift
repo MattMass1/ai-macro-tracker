@@ -2,27 +2,27 @@ import SwiftUI
 import UIKit
 import Charts
 
-/// The classic four-tab app: Workouts, Coach (default), Today, Progress.
+/// Four tabs: Today (the studio home, default), Coach, Workouts, Progress.
 struct ContentView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.scenePhase) private var scenePhase
-    @State private var selectedTab = 1  // Coach home
+    @State private var selectedTab = 0  // Today home
 
-    init(initialTab: Int = 1) {
+    init(initialTab: Int = 0) {
         _selectedTab = State(initialValue: initialTab)
     }
 
     var body: some View {
         ZStack(alignment: .top) {
             TabView(selection: $selectedTab) {
-                NavigationStack { WorkoutsView() }
-                    .tabItem { Label("Workouts", systemImage: "dumbbell.fill") }
+                NavigationStack { HomeView(openCoach: openCoach) }
+                    .tabItem { Label("Today", systemImage: "house.fill") }
                     .tag(0)
                 NavigationStack { CoachChatView() }
                     .tabItem { Label("Coach", systemImage: "bubble.left.and.bubble.right.fill") }
                     .tag(1)
-                NavigationStack { TodayView(onAskCoach: { selectedTab = 1 }) }
-                    .tabItem { Label("Today", systemImage: "chart.pie.fill") }
+                NavigationStack { WorkoutsView() }
+                    .tabItem { Label("Workouts", systemImage: "dumbbell.fill") }
                     .tag(2)
                 NavigationStack { ProgressDashboardView() }
                     .tabItem { Label("Progress", systemImage: "chart.line.uptrend.xyaxis") }
@@ -56,6 +56,12 @@ struct ContentView: View {
         } message: {
             Text(store.errorMessage ?? "Unknown error")
         }
+    }
+
+    /// Home dock and session sheet hand off here; the Coach tab sends the text.
+    private func openCoach(_ message: String?) {
+        if let message, !message.isEmpty { store.pendingCoachMessage = message }
+        selectedTab = 1
     }
 
     private func dismissKeyboard() {

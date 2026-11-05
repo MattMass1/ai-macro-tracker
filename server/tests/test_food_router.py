@@ -46,12 +46,28 @@ DUCK_EGG = _fdc(172189, "SR Legacy", "Egg, duck, whole, fresh, raw", 185, 12.8, 
 NO_FIBER = _fdc(999, "Foundation", "Egg, bread, whole", 200, 5, 30, 2, None)
 
 
+ROTISSERIE = _fdc(2705963, "Survey (FNDDS)", "Chicken breast, rotisserie, skin eaten", 175, 27, 0.09, 7, 0)
+RAW_BREAST = _fdc(171077, "SR Legacy", "Chicken, broilers or fryers, breast, meat only, raw", 120, 22.5, 0, 2.6, 0.0)
+FOUNDATION_BREAST = {"fdcId": 331960, "dataType": "Foundation", "description": "Chicken, breast, boneless, skinless, raw",
+                     "foodNutrients": [{"nutrientId": 1003, "value": 22.5}, {"nutrientId": 1005, "value": 0},
+                                       {"nutrientId": 1004, "value": 1.9}, {"nutrientId": 1079, "value": 0},
+                                       {"nutrientId": 2048, "value": 106}]}  # no 1008 in search rows
+GRILLED = _fdc(2705960, "Survey (FNDDS)", "Chicken breast, grilled with sauce, skin eaten", 200, 26, 3, 8, 0)
+
+
 def test_select_prefers_fewest_extra_words_then_fndds_and_skips_unknown_fiber():
     chosen = usda_lookup.select("egg", [DUCK_EGG, EGG_SR, EGG_FNDDS, NO_FIBER])
     assert chosen["fdcId"] == 2707152  # FNDDS "Egg, whole, raw" over SR "..., fresh" over duck
     assert usda_lookup.select("duck egg", [DUCK_EGG, EGG_SR]) is DUCK_EGG
     assert usda_lookup.select("bread", [NO_FIBER]) is None  # carbs with unknown fiber is never 0
     assert usda_lookup.select("quinoa", [EGG_SR]) is None  # every query word must be present
+
+
+def test_select_prefers_the_plain_raw_row_over_an_unasked_preparation():
+    chosen = usda_lookup.select("chicken breast", [ROTISSERIE, GRILLED, FOUNDATION_BREAST, RAW_BREAST])
+    assert chosen["fdcId"] == 331960  # boneless skinless raw: no form words, Atwater energy fills calories
+    assert usda_lookup.to_result(chosen)["macros_per_100g"]["calories"] == 106
+    assert usda_lookup.select("grilled chicken breast", [ROTISSERIE, GRILLED, RAW_BREAST]) is None
 
 
 def test_to_result_is_resolver_shaped_cc0_and_portioned_by_household_measure():
@@ -99,7 +115,7 @@ def test_route_kind_is_code_checked_not_model_trusted():
     assert food_lookup.route_kind("chick fil a grilled chicken", "generic") == "restaurant"
     assert food_lookup.route_kind("Cheetos", "packaged") == "packaged"
     assert food_lookup.route_kind("eggs", None) is None
-    assert food_lookup.route_kind("eggs", "history") is None
+    assert food_lookup.route_kind("eggs", "history") == "other"
 
 
 @pytest.fixture
@@ -143,6 +159,12 @@ async def test_whole_food_never_reaches_fatsecret(lanes):
     found = await food_lookup.resolve_food("sunny side up eggs", atomic=True, kind="generic")
     assert found["attribution"]["provider"] == "USDA FDC", found
     assert lanes["fatsecret"] == [] and lanes["usda"]
+
+
+async def test_curated_pinned_row_beats_usda_for_an_exact_whole_food(lanes):
+    found = await food_lookup.resolve_food("eggs", atomic=True, kind="generic")
+    assert found["source"].startswith("Generic: chicken egg")
+    assert lanes["usda"] == [] and lanes["fatsecret"] == []
 
 
 async def test_whole_food_miss_goes_to_web_estimate_not_fatsecret(lanes):
@@ -276,22 +298,26 @@ async def test_short_answer_to_an_open_question_is_never_handed_to_the_old_path(
 
 # ---------------------------------------------------------------- scorer
 
-def test_scorer_tolerates_reference_qualifiers_and_a_brand_prefix_for_unbranded_gold():
+def test_scorer_requires_explicit_evidence_for_reference_qualifiers_and_brands():
     egg = {"name": "egg", "brand": None, "variant": None, "preparation": None}
     assert bench.identity_matches(egg, "chicken egg")
-    assert bench.identity_matches(egg, "Egg, whole, raw")
+    assert not bench.identity_matches(egg, "Egg, whole, raw")
     assert not bench.identity_matches(egg, "Egg Salad")
     assert not bench.identity_matches(egg, "Egg, duck, whole, fresh, raw")
     bagel = {"name": "blueberry bagel", "brand": None, "variant": None, "preparation": None}
-    assert bench.identity_matches(bagel, "Thomas' Blueberry Bagel")
+    assert not bench.identity_matches(bagel, "Thomas' Blueberry Bagel")
+    assert bench.identity_matches({**bagel, "accepted_names": ["Thomas' Blueberry Bagel"]},
+                                  "Thomas' Blueberry Bagel")
     assert not bench.identity_matches(bagel, "Thomas' Mini Blueberry Bagel")
     branded = {"name": "Quarter Pounder", "brand": "McDonald's", "variant": None, "preparation": None}
     assert not bench.identity_matches(branded, "McDonald's Quarter Pounder with Cheese")
 
 
-def test_scorer_counts_one_serving_of_a_single_item_as_that_item():
+def test_scorer_does_not_infer_item_counts_from_unspecified_servings():
     gold = {"portion": {"kind": "count", "amount": 2, "unit": "wrap"}}
     saved = {"multiplier": 2.0, "serving_basis": {"unit": "count", "amount": 1.0, "count_noun": "serving",
                                                    "text": "1 serving", "basis": "per_serving"}}
-    assert bench.consumed_matches(gold, saved) is True
-    assert bench.consumed_matches(gold, {**saved, "multiplier": 1.0}) is False
+    assert bench.consumed_matches(gold, saved) is None
+    assert bench.consumed_matches(gold, {**saved, "multiplier": 1.0}) is None
+    counted = {**saved, "serving_basis": {"unit": "count", "amount": 1, "count_noun": "wrap", "text": "1 wrap"}}
+    assert bench.consumed_matches(gold, counted) is True

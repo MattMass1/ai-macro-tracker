@@ -128,7 +128,7 @@ _CALORIES_ONLY = re.compile(
 _RESOLVED_CACHE_MAX = 256
 _RESOLVED_CACHE_TTL_SECONDS = 90.0
 _resolved_food_cache: OrderedDict[
-    tuple[str, str, bool, bool], tuple[float, dict[str, Any]]
+    tuple[str, str, bool, bool, bool, bool, str | None], tuple[float, dict[str, Any]]
 ] = OrderedDict()
 # One food tool call resolves several components; they share one presets read.
 # The holder lives only for that call, so nothing can go stale across calls.
@@ -374,11 +374,12 @@ async def resolve_food(query: str, **kwargs):
         # Legacy in-process parser callers predate tenant binding. They may
         # use local sources, but must never participate in the shared cache.
         tenant = ""
+    lane = food_lookup.route_kind(query, kwargs.get("kind"))
     normalized = food_lookup.normalize_food_name(query)
     cache_key = (
         tenant, normalized, bool(kwargs.get("whole_item", False)),
         bool(kwargs.get("atomic", False)), bool(kwargs.get("allow_web", True)),
-        bool(kwargs.get("assume_variant", False)), kwargs.get("kind"),
+        bool(kwargs.get("assume_variant", False)), lane,
     )
     cached = _resolved_food_cache.get(cache_key) if tenant else None
     now = time.monotonic()
@@ -417,6 +418,8 @@ async def resolve_food(query: str, **kwargs):
                     count = float(counted.group(1))
         if preset is not None:
             food = _preset_food(preset)
+            if not food_lookup.lane_allows(food, lane):
+                return None
             if count is None:
                 return food
             if not 0 < count <= 100:
@@ -432,10 +435,15 @@ async def resolve_food(query: str, **kwargs):
         if catalog_lookup is not None:
             try:
                 catalog = await catalog_lookup(local_query)
-                if catalog is not None:
+                if food_lookup.lane_allows(catalog, lane):
                     return catalog
             except Exception:
                 logger.exception("Catalog lookup failed; isolating provider")
+        if lane in food_lookup.BRANDED_KINDS or lane == "other":
+            return None
+        if lane in food_lookup.WHOLE_FOOD_KINDS:
+            # Route explicit whole-food queries in one place after local evidence.
+            return food_lookup.resolve_generic_whole_food(local_query)
         # The adapter rejects everything except its tiny exact identity map
         # before touching the network. Prefer those official rows over local
         # bounded estimates, while leaving portion-specific local assumptions
@@ -459,11 +467,11 @@ async def resolve_food(query: str, **kwargs):
     # The whole-phrase probe, the component pass and food_lookup's own catalog
     # step all ask the local layer about the same texts; one catalog SQL read
     # per distinct text per tool call (the holder is call-scoped).
-    local_memo: dict[str, dict[str, Any] | None] = (
+    local_memo: dict[tuple[str, str | None], dict[str, Any] | None] = (
         shared.setdefault("local", {}) if shared is not None else {})
 
     async def local_lookup(local_query: str) -> dict[str, Any] | None:
-        key = food_lookup.normalize_food_name(local_query)
+        key = (food_lookup.normalize_food_name(local_query), lane)
         if key in local_memo:
             cached_local = local_memo[key]
             return deepcopy(cached_local) if cached_local is not None else None

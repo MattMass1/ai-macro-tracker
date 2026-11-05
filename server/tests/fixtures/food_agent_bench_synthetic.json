@@ -25,7 +25,7 @@
       "user_turns": ["One Berry Blast smoothie from Juice Hut", "yes but 6 oz instead of 12", "yes"],
       "expected_action": "log",
       "gold_items": [
-        {"identity": {"name": "Berry Blast Smoothie", "brand": "Juice Hut", "variant": "12 oz", "kind": "restaurant", "preparation": null},
+        {"identity": {"name": "Berry Blast Smoothie", "brand": "Juice Hut", "variant": null, "kind": "restaurant", "preparation": null},
          "portion": {"kind": "volume", "amount": 6, "unit": "fl oz"}, "modifications": []}
       ],
       "expected_nutrients": {"calories": 170.0, "protein": 2.5, "carbs": 39.0, "fat": 0.5, "fiber": 2.0},
@@ -130,7 +130,7 @@
       ],
       "catalog": [
         {"queries": ["boiled egg"],
-         "row": {"name": "Boiled Egg", "brand": "", "serving": "1 large egg", "grams": 50, "kcal": 78, "p": 6.3, "c": 0.6, "f": 5.3, "fiber": 0}}
+         "row": {"name": "Boiled Egg", "brand": "", "serving": "1 egg", "grams": 50, "kcal": 78, "p": 6.3, "c": 0.6, "f": 5.3, "fiber": 0}}
       ],
       "options": [],
       "history": [],

@@ -26,6 +26,9 @@ Rules:
 - Food identity, portion and modifications are separate. "Half of a McDonald's quarter pounder" is identity
   {name: "Quarter Pounder", brand: "McDonald's", kind: "restaurant"} with portion
   {kind: "serving_fraction", amount: 0.5}. Never put an amount in the name.
+- Classify EACH food separately: whole foods and ingredients are generic; named restaurant meals are
+  restaurant; branded snacks/products (such as Cheetos) are packaged with their brand; an unidentified
+  dish is other. Split named homemade ingredients individually. Code selects the data source.
 - To change an item already in open_drafts or last_logged, use revise_item with its item_ref and ONLY the fields
   that change; leave the rest null so they are kept. "quarter pounder with cheese" after a half quarter pounder
   changes identity.name only (the half is kept). "6 oz instead of 12" changes portion only
@@ -36,8 +39,10 @@ Rules:
 - "the one I had last time", "again", "my usual X": use recall_meal with the food words as query.
 - A bare "oz" is unit "oz". Fluid ounces are "fl_oz". No amount given: portion kind "unspecified".
 - If the user is clearly confirming the shown meal, you may return confirm; code decides if it counts.
-- "cancel", "never mind": cancel. Unclear food: ask ONE short question. Anything that is not about food the user
-  ate (training, questions, chat): not_food, alone.
+- "cancel", "never mind": cancel. Do not ask which brand or product variant. Return the food identity
+  you understood and let code resolve it. Only ask for a missing amount or raw/cooked on weighed food.
+  A short reply answering last_question belongs to its open draft; revise that item instead of not_food.
+  Genuinely unrelated training/questions/chat: not_food, alone.
 - portion.text is the user's own words for the amount ("" when none)."""
 
 

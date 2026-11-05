@@ -1,7 +1,19 @@
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# Sanitize before application imports and test collection. A live smoke test may
+# have exported provider credentials into the parent shell; blocking dotenv alone
+# does not isolate those. Each offline test opts into its synthetic configuration.
+# Keep MMMACROS_TEST_PG_ADMIN_URL: it is the explicit disposable-database seam.
+_TEST_ENV_PREFIXES = ("OPENAI_", "FATSECRET_", "EXA_", "USDA_", "WEB_LOOKUP_", "FOOD_AGENT_")
+for _key in tuple(os.environ):
+    if _key == "FOOD_AGENT_BENCH_DIR":
+        continue  # explicit private fixture location, not a provider credential
+    if _key.startswith(_TEST_ENV_PREFIXES) or _key in {"COACH_MODEL", "DATABASE_URL", "APP_SHARED_TOKEN"}:
+        os.environ.pop(_key, None)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 # Test imports must never discover a developer's real credentials. Tests of the

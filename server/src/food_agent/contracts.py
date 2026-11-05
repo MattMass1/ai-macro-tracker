@@ -60,7 +60,7 @@ Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 PositiveAmount = Annotated[float, Field(gt=0, le=10000, allow_inf_nan=False)]
 Nutrient = Annotated[float, Field(ge=0, le=100000, allow_inf_nan=False)]
 
-FoodKind = Literal["history", "restaurant", "packaged", "generic", "homemade"]
+FoodKind = Literal["history", "restaurant", "packaged", "generic", "homemade", "other"]
 PortionKind = Literal["serving_fraction", "count", "mass", "volume", "unspecified"]
 MassUnit = Literal["g", "kg", "oz", "lb"]
 VolumeUnit = Literal["fl_oz", "ml", "l", "cup", "tbsp", "tsp"]

@@ -640,43 +640,30 @@ def _tokens(text: Any) -> list[str]:
     return [_stem(t) for t in _TOKEN.findall(text)]
 
 
-# Words a reference row adds to a whole food without naming a different one: the
-# species or state a generic source spells out ("chicken egg", "egg, whole, raw, fresh").
-_GENERIC_QUALIFIERS = frozenset({"chicken", "whole", "raw", "fresh", "cooked", "plain", "usda", "fdc", "generic",
-                                 "yellowfin", "ahi"})  # size words stay identity: "Large Fries" is not "fries"
-
-
 def identity_matches(gold: dict[str, Any], display_name: str) -> bool:
-    """The resolver food IS the gold food: every gold word present, nothing else that changes the product.
+    """Independent oracle: preserve preparation, species, flavor and numeric ratios.
 
-    An unbranded gold food tolerates a reference row's own qualifiers ("chicken egg" for "egg") and a
-    brand prefix of at most two words ("Thomas' Blueberry Bagel" for "blueberry bagel"): the user asked
-    for the food, not for the absence of a brand. A branded gold still requires an exact product.
+    Do not infer a brand from an arbitrary prefix or discard unexplained words.
+    A label may explicitly declare accepted display names; missing independent
+    evidence remains a failure rather than being made true by production output.
     """
     wanted = set(_tokens(gold.get("brand"))) | set(_tokens(gold.get("name")))
-    wanted |= {t for t in _tokens(gold.get("variant")) if not t.isdigit() and t not in _UNIT_TOKENS}
-    shown = set(_tokens(display_name))
-    extras = shown - wanted
-    prepared = set(_tokens(gold.get("preparation")))  # the gold's own preparation words are not a different product
-    extras = {t for t in extras if not (t in _DESCRIPTORS or t.isdigit() or t in _UNIT_TOKENS or t in prepared)}
-    if extras and not gold.get("brand"):
-        extras -= _GENERIC_QUALIFIERS
-        shown_order = _tokens(display_name)
-        first_gold = next((i for i, t in enumerate(shown_order) if t in wanted), len(shown_order))
-        brand_prefix = set(shown_order[:first_gold])
-        # A brand prefix is at most one capitalised maker name ("Thomas'"), never a size or flavor.
-        if extras and extras <= brand_prefix and len(extras) == 1 and not (extras & _VARIANT_WORDS):
-            extras = set()
-    return bool(wanted) and wanted <= shown and not extras
-
-
-# Words that make a different product even for an unbranded gold food.
-_VARIANT_WORDS = frozenset({"double", "triple", "deluxe", "cheese", "bacon", "spicy", "diet", "zero", "light",
-                            "lite", "sugar", "free", "mini", "jumbo", "duck", "goose", "quail", "turkey",
-                            "frozen", "pasteurized", "dried", "powder", "substitute", "with", "and", "regular",
-                            "large", "medium", "small", "decaf", "iced", "hot",
-                            "strawberry", "chocolate", "vanilla", "banana", "mango", "caramel", "mocha",
-                            "peanut", "mint", "lemon", "orange", "cherry", "berry", "blueberry", "coconut"})
+    wanted |= set(_tokens(gold.get("variant"))) | set(_tokens(gold.get("preparation")))
+    wanted -= _DESCRIPTORS
+    shown = set(_tokens(display_name)) - _DESCRIPTORS
+    if wanted == {"egg"} and not gold.get("brand") and shown == {"chicken", "egg"}:
+        return True  # a chicken egg, not a different species or cooked preparation
+    # Preparation is required, not merely allowed among additional descriptors.
+    constraints = set(_tokens(gold.get("preparation"))) | set(_tokens(gold.get("variant")))
+    constraints |= set(_tokens(gold.get("brand")))
+    if not constraints <= shown:
+        return False
+    if wanted == shown and wanted:
+        return True
+    return bool(wanted) and any(
+        shown == set(_tokens(alias)) - _DESCRIPTORS
+        for alias in gold.get("accepted_names", [])
+    )
 
 
 def _expected(scoring: dict[str, Any], gold: dict[str, Any], index: int, key: str) -> float | None:
@@ -686,9 +673,6 @@ def _expected(scoring: dict[str, Any], gold: dict[str, Any], index: int, key: st
         return float(gold[key])
     given = (scoring.get(key) or {}).get(str(index))
     return None if given is None else float(given)
-
-
-_ONE_ITEM_NOUNS = frozenset({"serving", "item", "portion", "piece", "each", "unit"})
 
 
 def consumed_matches(gold, saved, expected_grams=None):
@@ -729,9 +713,6 @@ def consumed_matches(gold, saved, expected_grams=None):
         if found:
             return near(float(found[1]) * mult, amount)
         if basis.get("unit") == "count" and basis.get("count_noun") and noun in str(basis["count_noun"]).lower():
-            return near(float(basis.get("amount") or 0) * mult, amount)
-        if basis.get("unit") == "count" and str(basis.get("count_noun") or "").lower() in _ONE_ITEM_NOUNS:
-            # A provider's "1 serving" of a single counted item (a wrap, a bar) IS one item.
             return near(float(basis.get("amount") or 0) * mult, amount)
         return None
     if kind == "serving_fraction":

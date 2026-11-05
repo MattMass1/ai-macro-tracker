@@ -67,6 +67,8 @@ async def production_suggest(query: str) -> Sequence[str]:
     """Closest provider names for a query the strict resolver did not accept."""
     import food_lookup  # noqa: PLC0415
 
+    if food_lookup.route_kind(query, ROUTE_KIND.get()) not in food_lookup.BRANDED_KINDS:
+        return []
     return await food_lookup.fatsecret_name_options(query)
 
 
@@ -395,6 +397,9 @@ def _identity_check(identity: FoodIdentity, cand_name: str, cand_brand: str,
     asked_cook, cand_cook = _cook_class(asked), _cook_class(_tokens(cook_text))
     if asked_cook and cand_cook and asked_cook != cand_cook:
         return "cook"
+    if found is not None and _provider(found) == "USDA FDC":
+        import usda_lookup
+        return "ok" if usda_lookup.compatible(identity_query(identity), cand_name) else "variant"
     if found is not None and _curated_generic(found) and not identity.brand:
         # Curated generic rows add descriptors ("chicken egg", "farmed
         # salmon"); everything asked must still be there.
@@ -483,10 +488,15 @@ class FoodFinder:
     async def find(self, identity: FoodIdentity, portion: Portion) -> FindResult:
         query = identity_query(identity)
         asked = _asked_display(identity)
-        token = ROUTE_KIND.set(identity.kind)
+        import food_lookup
+        kind = "packaged" if identity.brand and identity.kind in food_lookup.WHOLE_FOOD_KINDS else identity.kind
+        lane = food_lookup.route_kind(query, kind)
+        token = ROUTE_KIND.set(lane)
         try:
             found = await self._lookup(query)
             if found is None:
+                if lane not in food_lookup.BRANDED_KINDS:
+                    return FindResult("no_match", None, note=f"I couldn't find nutrition for {asked}.")
                 return await self._from_options(identity, portion, query, asked)
         finally:
             ROUTE_KIND.reset(token)
@@ -511,18 +521,21 @@ class FoodFinder:
         if identity.brand:
             options = [option for option in options if _brand_agrees(identity.brand, "", option)]
         cosmetic = [option for option in options if _identity_check(identity, option, "") == "ok"]
-        ranked = cosmetic or self._closest(identity, options)
+        ranked = self._closest(identity, cosmetic)
         for option in ranked[:2]:
             found = await self._lookup(option)
             if found is None:
                 continue
-            judged = self._judge(identity, portion, found, asked, accept_variant=not cosmetic)
+            judged = self._judge(identity, portion, found, asked)
             if judged.status != "no_match":
                 return judged
         return FindResult("no_match", None, note=f"I couldn't find nutrition for {asked}.")
 
     def _judge(self, identity: FoodIdentity, portion: Portion, found: Mapping[str, Any],
-               asked: str, *, accept_variant: bool = False) -> FindResult:
+               asked: str) -> FindResult:
+        if _provider(found) == "USDA FDC":
+            import usda_lookup
+            found = usda_lookup.for_portion(dict(found), identity_query(identity), portion.text, portion.kind)
         food = to_resolved_food(found)
         if food is None:
             return FindResult("no_match", None,
@@ -536,14 +549,9 @@ class FoodFinder:
             other = "raw" if said == "cooked" else "cooked"
             return FindResult("no_match", None, note=(
                 f"I only found {other} nutrition for {food.display_name}, not {said}."))
-        if verdict == "variant" and not accept_variant:
-            return FindResult("needs_detail", None,
-                              note=f"I found {food.display_name}, not {asked}.",
-                              question=_one_question(
-                                  f"I found the {food.display_name}, not the {asked}. "
-                                  f"Was it the {food.display_name}?"))
-        note = (f"matched to {food.display_name} (closest match)" if verdict == "variant"
-                else f"matched to {food.display_name}")
+        if verdict == "variant":
+            return FindResult("no_match", None, note=f"I couldn't match {asked} without changing the food.")
+        note = f"matched to {food.display_name}"
         if _needs_raw_or_cooked(identity, portion, found):
             amount = _squash(portion.text) or f"{portion.amount:g} {portion.unit}"
             return FindResult("needs_detail", None, note=note, question=_one_question(

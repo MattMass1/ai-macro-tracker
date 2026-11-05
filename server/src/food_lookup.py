@@ -1096,7 +1096,28 @@ def route_kind(query: str, kind: str | None) -> str | None:
     if kind in WHOLE_FOOD_KINDS:
         from meal_intent import chain_in  # noqa: PLC0415 (import cycle guard)
         return "restaurant" if chain_in(query) else kind
-    return kind if kind in BRANDED_KINDS else None
+    return kind if kind in BRANDED_KINDS else ("other" if kind is not None else None)
+
+
+def lane_allows(found: Mapping[str, Any] | None, lane: str | None) -> bool:
+    """Apply the same source policy to catalog hits and provider results."""
+    if not found:
+        return False
+    if lane is None:
+        return True  # omitted kind preserves the legacy route
+    source = str(found.get("source") or "").casefold()
+    attribution = found.get("attribution") or {}
+    provider = str(attribution.get("provider") or "").casefold()
+    if lane in WHOLE_FOOD_KINDS:
+        allowed = not found.get("brand_name") and "fatsecret" not in provider + source
+    elif lane in BRANDED_KINDS:
+        allowed = not any(p in provider + source for p in ("generic:", "cofid", "usda"))
+    else:
+        allowed = found.get("estimate_provenance") == "server_web_estimate"
+    for component in found.get("component_attributions") or []:
+        if not lane_allows({"attribution": component}, lane):
+            return False
+    return allowed
 
 
 async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,
@@ -1105,8 +1126,8 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,
                              kind: str | None = None) -> dict[str, Any] | None:
     """The single-food cascade, routed by ``kind`` (owner decision 2026-11-04):
 
-    * whole foods (``generic``/``homemade``): tenant catalog, CoFID, USDA FDC,
-      curated generic rows, then the web estimate. FatSecret never sees them:
+    * whole foods (``generic``/``homemade``): tenant catalog, curated generic
+      rows, USDA FDC, CoFID, then the web estimate. FatSecret never sees them:
       its branded hits outrank generic rows ("3 eggs" became a frozen meal).
     * ``restaurant``/``packaged``: tenant catalog, FatSecret, then the web.
     * unknown kind: the full cascade as before.
@@ -1115,16 +1136,23 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,
     if catalog_lookup:
         try:
             found = await catalog_lookup(query)
-            if found: return found
+            if lane_allows(found, lane): return found
         except Exception: pass
-    if lane not in BRANDED_KINDS:
-        cofid = await cofid_lookup.lookup(query)
-        if cofid: return cofid
+    if lane == "other":
+        if not allow_web:
+            return None
+        try:
+            return await web_nutrition_lookup.lookup(query)
+        except web_nutrition_lookup.NutritionLookupError:
+            return None
     if lane in WHOLE_FOOD_KINDS:
-        usda = await usda_lookup.lookup(query)
-        if usda: return usda
+        # Curated pinned rows first (exact identities, no network), then USDA FDC, then CoFID.
         generic = _bounded_generic_fallback(query) or _generic_whole_food(query)
         if generic: return generic
+        usda = await usda_lookup.lookup(query)
+        if usda: return usda
+        cofid = await cofid_lookup.lookup(query)
+        if cofid: return cofid
         if not allow_web:
             return None
         try:
@@ -1132,6 +1160,9 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,
         except web_nutrition_lookup.NutritionLookupError as exc:
             logger.info("web nutrition lookup unavailable: reason=%s", exc.reason)
             return None
+    if lane not in BRANDED_KINDS:
+        cofid = await cofid_lookup.lookup(query)
+        if cofid: return cofid
     fatsecret_enabled = _fatsecret_provider_mode() is not None
     # The plain callable keeps single-argument test doubles working; the
     # assume_variant form is only bound when the caller asked for it.
@@ -1201,7 +1232,7 @@ async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,
                             valid.append((rank, found))
                 return min(valid, key=lambda item: item[0])[1]
         provider_result = (min(valid, key=lambda item: item[0])[1] if valid
-                else _bounded_generic_fallback(query))
+                else (_bounded_generic_fallback(query) if lane is None else None))
         if provider_result is not None:
             return provider_result
         if not allow_web:

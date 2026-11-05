@@ -156,6 +156,29 @@ def item_text(item: Mapping[str, Any]) -> str:
     return text
 
 
+def _weight_state(text: str) -> str | None:
+    """Cooking state as words, not substrings (uncooked is raw, not cooked)."""
+    if re.search(r"\b(?:raw|uncooked)\b", text, re.IGNORECASE):
+        return "raw"
+    return "cooked" if _COOKED_WORD.search(text) else None
+
+
+def _weight_basis_conflict(item: Mapping[str, Any], found: Mapping[str, Any]) -> bool:
+    if item.get("unit") not in MASS_UNITS:
+        return False
+    wanted = item.get("preparation") or _weight_state(str(item.get("description") or ""))
+    source = _weight_state(str(found.get("basis") or ""))
+    if source is None and found.get("estimate_provenance") == TYPICAL:
+        # Typical recipes are another source, not permission to disregard the
+        # weight basis. Their source-pinned ingredient labels carry preparation.
+        labels = [str(part.get("label") or "") for part in found.get("built_from") or []]
+        states = {_weight_state(label) for label in labels} - {None}
+        if wanted and any(state != wanted for state in states):
+            return True
+        source = _weight_state(str(found.get("name") or ""))
+    return bool(wanted and source and wanted != source)
+
+
 def needs_weight_basis(item: Mapping[str, Any]) -> bool:
     return (item.get("unit") in MASS_UNITS and not item.get("preparation")
             and not _PREP_WORD.search(item["description"])
@@ -557,6 +580,8 @@ class MealDrafts:
         item["needs"] = None
         item["question"] = None
         item["estimate_consent"] = None
+        item["field_origins"] = {k: v for k, v in (item.get("field_origins") or {}).items()
+                                 if k != "basis_conflict"}
 
     def _apply_fields(self, item, spec, origin: str) -> None:
         origins = dict(item.get("field_origins") or {})
@@ -754,11 +779,10 @@ class MealDrafts:
             return None
         if found is None or found.get("portion_error"):
             return found
-        basis = str(found.get("basis") or "").casefold()
-        if item.get("unit") in MASS_UNITS and (
-                (item.get("preparation") == "cooked" and "raw" in basis)
-                or (item.get("preparation") == "raw" and "cooked" in basis)):
-            return None
+        if _weight_basis_conflict(item, found):
+            # Preserve the refusal so later fallback code cannot treat this as
+            # a provider miss and replace it with an incompatible recipe.
+            return {"portion_error": True, "preparation_error": True}
         return found
 
     async def _refresh(self, item) -> dict[str, Any] | None:
@@ -773,7 +797,19 @@ class MealDrafts:
         return found
 
     @staticmethod
+    def _hold_weight_basis(item) -> None:
+        item["resolution"] = None
+        item.pop("_live", None)
+        item["needs"] = "preparation"
+        item["field_origins"] = {**(item.get("field_origins") or {}), "basis_conflict": True}
+        item["question"] = (f"The nutrition I found for {item['description']} doesn't match its stated weight basis. "
+                            "Please correct the raw/cooked basis or choose a matching food; this item isn't logged.")
+
+    @staticmethod
     def _accept(item, found, **extra) -> None:
+        if found.get("preparation_error") or _weight_basis_conflict(item, found):
+            MealDrafts._hold_weight_basis(item)
+            return
         item["resolution"] = {**_persistable(found), **extra}
         # Keep live numbers for this turn even when they may not be stored.
         item["_live"] = {k: found.get(k) for k in MACROS}
@@ -783,6 +819,9 @@ class MealDrafts:
         """Ask once: an item still open on a later turn for the question it was
         already asked is not asked again. Raw/cooked is assumed only when the
         resolver has a source for exactly one basis; otherwise it is not counted."""
+        if (item.get("field_origins") or {}).get("basis_conflict"):
+            self._not_count(item, "no nutrition source matching the stated weight basis")
+            return  # never substitute an available cooked panel for explicit raw weight
         if item.get("needs") == "preparation":
             sourced = {}
             for basis in sorted(PREPARATIONS):
@@ -855,6 +894,9 @@ class MealDrafts:
                 self._accept(item, typical)
                 return
             found = await self._lookup(item, gate)
+            if found is not None and found.get("preparation_error"):
+                self._hold_weight_basis(item)
+                return
             if lane in {"restaurant", "packaged"} and (found is None or found.get("portion_error")):
                 # "McDonald's breakfast burrito with eggs and sausage": menus list the
                 # item by its name, so search the place plus the dish name alone.

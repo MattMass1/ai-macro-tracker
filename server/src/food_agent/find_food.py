@@ -26,6 +26,7 @@ import logging
 import math
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextvars import ContextVar
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -43,6 +44,9 @@ AmbiguityProbe = Callable[[str], bool]
 
 # ---------------------------------------------------------------- production defaults
 
+ROUTE_KIND: ContextVar[str | None] = ContextVar("food_route_kind", default=None)
+
+
 async def production_resolve(query: str) -> Mapping[str, Any] | None:
     """The live resolver: ``server.resolve_food`` (tenant presets and catalog,
     CoFID, generic foods, FatSecret, web estimate) gated by the same
@@ -50,11 +54,12 @@ async def production_resolve(query: str) -> Mapping[str, Any] | None:
 
     ``server`` is imported lazily so importing this module has no server
     side effects. ``atomic=True``: the agent already split the meal into
-    items, so one identity is never split again on "and" or commas.
+    items, so one identity is never split again on "and" or commas. The
+    item's kind (set by :class:`FoodFinder`) routes the source lane.
     """
     import server  # noqa: PLC0415 (lazy on purpose)
 
-    found = await server.resolve_food(query, atomic=True)
+    found = await server.resolve_food(query, atomic=True, kind=ROUTE_KIND.get())
     return found if server._trusted_food(found) else None
 
 
@@ -123,6 +128,9 @@ _COOKABLE = frozenset({
     "couscous", "lentil", "bean", "chickpea", "potato", "barley", "bulgur", "farro",
 })
 _CURATED_STATES = frozenset({"official_source_exact_row", "official_curated", "internal_curated"})
+# Variety and ripeness words describe a whole food, never a different one
+# ("green apple" is an apple). Only consulted for unbranded curated rows.
+_DESCRIPTOR_WORDS = frozenset({"green", "red", "yellow", "golden", "pink", "ripe", "organic", "fresh"})
 _NUMBERED_LIST = re.compile(r"(^|\s)\d+\s*[.)](\s|$)")
 
 
@@ -391,7 +399,7 @@ def _identity_check(identity: FoodIdentity, cand_name: str, cand_brand: str,
         # Curated generic rows add descriptors ("chicken egg", "farmed
         # salmon"); everything asked must still be there.
         cook_words = _STATE_WORDS | _COOKED_WORDS
-        missing = (asked - cook_words) - cand
+        missing = (asked - cook_words - _DESCRIPTOR_WORDS) - cand
         return "ok" if not missing or _cosmetic(missing, (cand - cook_words) - asked) else "variant"
     asked = asked - _STATE_WORDS if asked_cook != "raw" else asked
     cand = cand - _STATE_WORDS if asked_cook != "raw" else cand
@@ -475,34 +483,46 @@ class FoodFinder:
     async def find(self, identity: FoodIdentity, portion: Portion) -> FindResult:
         query = identity_query(identity)
         asked = _asked_display(identity)
-        found = await self._lookup(query)
-        if found is None:
-            return await self._from_options(identity, portion, query, asked)
+        token = ROUTE_KIND.set(identity.kind)
+        try:
+            found = await self._lookup(query)
+            if found is None:
+                return await self._from_options(identity, portion, query, asked)
+        finally:
+            ROUTE_KIND.reset(token)
         return self._judge(identity, portion, found, asked)
+
+    @staticmethod
+    def _closest(identity: FoodIdentity, options: list[str]) -> list[str]:
+        """Options ordered by how little they differ from what was asked."""
+        brand_tokens = _tokens(identity.brand)
+        asked = _tokens(" ".join(filter(None, (identity.name, identity.variant)))) - brand_tokens
+
+        def distance(option: str) -> tuple[int, int]:
+            cand = _tokens(option) - brand_tokens
+            return (len(asked - cand), len(cand - asked))
+        return sorted(options, key=distance)
 
     async def _from_options(self, identity: FoodIdentity, portion: Portion, query: str,
                             asked: str) -> FindResult:
+        """The user named the product: take the closest real one and SAY which.
+        Never "Did you mean X?" or "Was it X or Y?"; a wrong pick costs one correction."""
         options = await self._options(query)
+        if identity.brand:
+            options = [option for option in options if _brand_agrees(identity.brand, "", option)]
         cosmetic = [option for option in options if _identity_check(identity, option, "") == "ok"]
-        if len(cosmetic) == 1:
-            found = await self._lookup(cosmetic[0])
-            if found is not None:
-                return self._judge(identity, portion, found, asked)
-        others = [option for option in options
-                  if _brand_agrees(identity.brand or "", "", option)] if identity.brand else options
-        if len(others) == 1:
-            return FindResult("needs_detail", None, note=f"I couldn't find {asked} exactly.",
-                              question=_one_question(f"Did you mean {others[0]}?"))
-        if len(others) >= 2:
-            return FindResult("needs_detail", None, note=f"{asked} comes in more than one version.",
-                              question=_one_question(f"Was it the {others[0]} or the {others[1]}?"))
-        if self._ambiguous(query):
-            return FindResult("needs_detail", None, note=f"{asked} comes in more than one version.",
-                              question=_one_question(f"Which {asked} was it exactly?"))
+        ranked = cosmetic or self._closest(identity, options)
+        for option in ranked[:2]:
+            found = await self._lookup(option)
+            if found is None:
+                continue
+            judged = self._judge(identity, portion, found, asked, accept_variant=not cosmetic)
+            if judged.status != "no_match":
+                return judged
         return FindResult("no_match", None, note=f"I couldn't find nutrition for {asked}.")
 
     def _judge(self, identity: FoodIdentity, portion: Portion, found: Mapping[str, Any],
-               asked: str) -> FindResult:
+               asked: str, *, accept_variant: bool = False) -> FindResult:
         food = to_resolved_food(found)
         if food is None:
             return FindResult("no_match", None,
@@ -516,13 +536,14 @@ class FoodFinder:
             other = "raw" if said == "cooked" else "cooked"
             return FindResult("no_match", None, note=(
                 f"I only found {other} nutrition for {food.display_name}, not {said}."))
-        if verdict == "variant":
+        if verdict == "variant" and not accept_variant:
             return FindResult("needs_detail", None,
                               note=f"I found {food.display_name}, not {asked}.",
                               question=_one_question(
                                   f"I found the {food.display_name}, not the {asked}. "
                                   f"Was it the {food.display_name}?"))
-        note = f"matched to {food.display_name}"
+        note = (f"matched to {food.display_name} (closest match)" if verdict == "variant"
+                else f"matched to {food.display_name}")
         if _needs_raw_or_cooked(identity, portion, found):
             amount = _squash(portion.text) or f"{portion.amount:g} {portion.unit}"
             return FindResult("needs_detail", None, note=note, question=_one_question(
@@ -533,5 +554,5 @@ class FoodFinder:
         return FindResult("matched", food, note=note)
 
 
-__all__ = ["FoodFinder", "identity_query", "to_resolved_food", "is_estimate",
+__all__ = ["FoodFinder", "ROUTE_KIND", "identity_query", "to_resolved_food", "is_estimate",
            "production_resolve", "production_suggest", "production_is_ambiguous"]

@@ -9,6 +9,7 @@ from urllib.parse import quote
 import httpx
 from food_catalog import normalize_food_name
 import cofid_lookup
+import usda_lookup
 import web_nutrition_lookup
 from generic_foods import COFID, FOODS as GENERIC_WHOLE_FOODS
 
@@ -1081,19 +1082,56 @@ def _split_components(query: str) -> list[str]:
     return [part.strip() for part in restored if part.strip()]
 
 
+WHOLE_FOOD_KINDS = frozenset({"generic", "homemade"})
+BRANDED_KINDS = frozenset({"restaurant", "packaged"})
+
+
+def route_kind(query: str, kind: str | None) -> str | None:
+    """The source lane for a query: the interpreter's kind, checked by code.
+
+    A chain or brand word in the text makes it branded whatever the model said
+    ("Chick-fil-A grilled chicken" is never a whole food). Unknown kinds keep
+    the full cascade.
+    """
+    if kind in WHOLE_FOOD_KINDS:
+        from meal_intent import chain_in  # noqa: PLC0415 (import cycle guard)
+        return "restaurant" if chain_in(query) else kind
+    return kind if kind in BRANDED_KINDS else None
+
+
 async def _resolve_component(query: str, *, whole_item: bool, catalog_lookup,
                              allow_web: bool = True,
-                             assume_variant: bool = False) -> dict[str, Any] | None:
-    """The single-food cascade: tenant catalog, official CoFID rows, then
-    Layer 1 (FatSecret over normalized-query variants) and Layer 2 (web
-    estimate). Shared by the simple and composite paths."""
+                             assume_variant: bool = False,
+                             kind: str | None = None) -> dict[str, Any] | None:
+    """The single-food cascade, routed by ``kind`` (owner decision 2026-11-04):
+
+    * whole foods (``generic``/``homemade``): tenant catalog, CoFID, USDA FDC,
+      curated generic rows, then the web estimate. FatSecret never sees them:
+      its branded hits outrank generic rows ("3 eggs" became a frozen meal).
+    * ``restaurant``/``packaged``: tenant catalog, FatSecret, then the web.
+    * unknown kind: the full cascade as before.
+    """
+    lane = route_kind(query, kind)
     if catalog_lookup:
         try:
             found = await catalog_lookup(query)
             if found: return found
         except Exception: pass
-    cofid = await cofid_lookup.lookup(query)
-    if cofid: return cofid
+    if lane not in BRANDED_KINDS:
+        cofid = await cofid_lookup.lookup(query)
+        if cofid: return cofid
+    if lane in WHOLE_FOOD_KINDS:
+        usda = await usda_lookup.lookup(query)
+        if usda: return usda
+        generic = _bounded_generic_fallback(query) or _generic_whole_food(query)
+        if generic: return generic
+        if not allow_web:
+            return None
+        try:
+            return await web_nutrition_lookup.lookup(query)
+        except web_nutrition_lookup.NutritionLookupError as exc:
+            logger.info("web nutrition lookup unavailable: reason=%s", exc.reason)
+            return None
     fatsecret_enabled = _fatsecret_provider_mode() is not None
     # The plain callable keeps single-argument test doubles working; the
     # assume_variant form is only bound when the caller asked for it.
@@ -1237,7 +1275,7 @@ def _quantify(
 async def resolve_food(
     query: str, classify: bool = True, *, whole_item: bool = False,
     atomic: bool = False, catalog_lookup=None, allow_web: bool = True,
-    assume_variant: bool = False,
+    assume_variant: bool = False, kind: str | None = None,
 ) -> dict[str, Any] | None:
     """Resolve one query or `and`/`,`/`+`-joined composite to real macro data.
 
@@ -1253,7 +1291,7 @@ async def resolve_food(
             _resolve_food_text(
                 text, whole_item=whole_item, atomic=atomic,
                 catalog_lookup=catalog_lookup, allow_web=allow_web,
-                assume_variant=assume_variant,
+                assume_variant=assume_variant, kind=kind,
             ),
             timeout=RESOLUTION_DEADLINE_SECONDS,
         ) if text else None
@@ -1270,7 +1308,7 @@ async def resolve_food(
 
 async def _resolve_food_text(
     text: str, *, whole_item: bool, atomic: bool, catalog_lookup,
-    allow_web: bool = True, assume_variant: bool = False,
+    allow_web: bool = True, assume_variant: bool = False, kind: str | None = None,
 ) -> dict[str, Any] | None:
     text = _normalize_query_text(text)
     raw_parts = [text] if atomic else _split_components(text)
@@ -1280,7 +1318,7 @@ async def _resolve_food_text(
         quantity, unit, remainder = _clean_component(raw_parts[0] if raw_parts else text)
         found = await _resolve_component(remainder or text, whole_item=whole_item,
                                          catalog_lookup=catalog_lookup, allow_web=allow_web,
-                                         assume_variant=assume_variant)
+                                         assume_variant=assume_variant, kind=kind)
         if (found and quantity is None
                 and isinstance(found.get("attribution"), Mapping)
                 and found["attribution"].get("verification_state") == "provider_exact_identity"):
@@ -1313,7 +1351,7 @@ async def _resolve_food_text(
             return part, None, None
         found = await _resolve_component(remainder, whole_item=False,
                                          catalog_lookup=catalog_lookup, allow_web=allow_web,
-                                         assume_variant=assume_variant)
+                                         assume_variant=assume_variant, kind=kind)
         quantified = _quantify(found, quantity, unit) if found else None
         return part, found, quantified
 

@@ -486,7 +486,9 @@ class Receipt(_Strict):
     name: _text(300)
     nutrients: NutrientPanel
     verified: bool
-    macro_source: _text(200) | None = None
+    # The saved row joins one source per item ("Composite: ...") up to 1000 chars;
+    # a tighter cap here made a verified save read as "something went wrong".
+    macro_source: _text(1000) | None = None
 
     @classmethod
     def from_saved_row(cls, row: Mapping[str, Any], *, verified: bool,

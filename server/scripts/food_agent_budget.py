@@ -51,7 +51,7 @@ class RateCard:
         if not isinstance(version, str) or not version.strip():
             raise PricingRefused("rate card version required")
         for key in self.providers:
-            if key not in {"fatsecret", "exa", "cofid"} or not self.evidence.get(key):
+            if key not in {"fatsecret", "exa", "cofid", "usda"} or not self.evidence.get(key):
                 raise PricingRefused("provider price evidence required")
 
     @classmethod

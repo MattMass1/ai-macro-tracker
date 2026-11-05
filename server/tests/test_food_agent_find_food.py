@@ -190,17 +190,19 @@ async def test_plain_quarter_pounder_does_not_match_the_cheese_or_deluxe_variant
         assert result.food is None
 
 
-async def test_close_variants_with_no_exact_hit_ask_one_plain_question():
+async def test_close_variants_with_no_exact_hit_take_the_closest_and_say_so():
     """The real resolver returns nothing for close variants and lists them as
-    name options; the finder asks once, never as a numbered list."""
-    resolver = Resolver(default=None)
-    finder = _finder(resolver, options=["McDonald's Quarter Pounder with Cheese",
-                                         "McDonald's Double Quarter Pounder with Cheese",
+    name options; the finder takes the closest one and says "matched to",
+    never "Was it X or Y?" (owner rule: a wrong pick costs one correction)."""
+    option = "McDonald's Quarter Pounder with Cheese"
+    resolver = Resolver({option: QPC}, default=None)
+    finder = _finder(resolver, options=[option, "McDonald's Double Quarter Pounder with Cheese",
                                          "McDonald's Quarter Pounder with Cheese Deluxe"],
                      ambiguous=True)
     result = await finder.find(_identity("Quarter Pounder", brand="McDonald's"), HALF)
-    assert result.status == "needs_detail" and result.food is None
-    _assert_plain_question(result)
+    assert result.status == "matched" and result.food is not None and result.question is None
+    assert result.note == "matched to McDonald's Quarter Pounder with Cheese (closest match)"
+    assert resolver.queries[-1] == option
 
 
 # ---------------------------------------------------------------- real failure 3

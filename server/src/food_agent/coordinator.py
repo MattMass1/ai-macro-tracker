@@ -282,6 +282,12 @@ class FoodAgent:
         actions = list(turn.actions)
         types = [a.type for a in actions]
         if "not_food" in types:
+            # A short reply ("Yes", "Do 1 slice") while a draft is waiting on a question
+            # answers that draft; it never leaves for the old coach path.
+            waiting = next((d for d in open_ if d.question()), None)
+            if waiting is not None and (decision in ("yes", "no") or len(message.split()) <= 4):
+                question = waiting.question() or "Tell me again what you had?"
+                return _result(question, "needs_detail", draft_id=waiting.id, question=question)
             return _result("", handed_off=True)
         if "cancel" in types and not EDIT_TYPES.intersection(types):
             target = bound[0] if len(bound) == 1 else (open_[0] if open_ else None)

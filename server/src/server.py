@@ -378,7 +378,7 @@ async def resolve_food(query: str, **kwargs):
     cache_key = (
         tenant, normalized, bool(kwargs.get("whole_item", False)),
         bool(kwargs.get("atomic", False)), bool(kwargs.get("allow_web", True)),
-        bool(kwargs.get("assume_variant", False)),
+        bool(kwargs.get("assume_variant", False)), kwargs.get("kind"),
     )
     cached = _resolved_food_cache.get(cache_key) if tenant else None
     now = time.monotonic()

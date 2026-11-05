@@ -443,15 +443,24 @@ def counted_client(make_client, budget: Budget):
 
 
 @contextlib.contextmanager
-def install_counters(budget: Budget, *, exa_post=None, web_post=None, cofid_fetch=None):
+def install_counters(budget: Budget, *, exa_post=None, web_post=None, cofid_fetch=None, usda_post=None):
     """Wrap the outbound provider functions, in this process only, for the duration of the run."""
     import cofid_lookup
     import food_lookup
+    import usda_lookup
     import web_nutrition_lookup as web
 
     saved = [(food_lookup, "_client", food_lookup._client), (web, "post_exa_search", web.post_exa_search),
-             (web, "post_responses", web.post_responses), (cofid_lookup, "_fetch_workbook", cofid_lookup._fetch_workbook)]
+             (web, "post_responses", web.post_responses), (cofid_lookup, "_fetch_workbook", cofid_lookup._fetch_workbook),
+             (usda_lookup, "post_search", usda_lookup.post_search)]
     food_lookup._client = counted_client(food_lookup._client, budget)
+    real_usda = usda_post or usda_lookup.post_search
+
+    async def counted_usda(params):
+        record = budget.reserve_lookup("usda")
+        return await _timed(record, lambda: real_usda(params))
+    usda_lookup.post_search = counted_usda
+    usda_lookup.clear_cache()
     web.post_exa_search = counted_post(exa_post or web.post_exa_search, budget, "exa")
     real_web = counted_model_post(web_post or web.post_responses, budget)
     async def counted_web(key, payload):
@@ -640,7 +649,8 @@ def score_live(case: dict[str, Any], script: dict[str, Any], run, brands: Mappin
 
 
 async def run_live_bench(spec: dict[str, Any], backend, budget: Budget, *, repeats: int = 3, model_post=None,
-                         exa_post=None, web_post=None, cofid_fetch=None, local_store=None) -> dict[str, Any]:
+                         exa_post=None, web_post=None, cofid_fetch=None, local_store=None,
+                         usda_post=None) -> dict[str, Any]:
     """Every case x repeat (repeat-major, so a cap still leaves one pass over the cases), stopping at a cap."""
     errors = route_errors(os.environ, budget.rate_card)
     if getattr(backend, "url", None) and not is_local_pg_url(backend.url):
@@ -669,7 +679,8 @@ async def run_live_bench(spec: dict[str, Any], backend, budget: Budget, *, repea
     saved_client = server._client
     server._client = local_store  # server.resolve_food reads presets/catalog from the throwaway store
     try:
-        with install_counters(budget, exa_post=exa_post, web_post=web_post, cofid_fetch=cofid_fetch):
+        with install_counters(budget, exa_post=exa_post, web_post=web_post, cofid_fetch=cofid_fetch,
+                              usda_post=usda_post):
             model = build_interpreter(budget, model_post)
             for repeat, case in plan:
                 entry: dict[str, Any] = {"case_id": case["id"], "repeat": repeat}
@@ -778,6 +789,7 @@ def build_results(spec, runs, budget: Budget, backend, repeats: int, stopped: st
                  "not_run_configuration": sum(r["status"] == "not run (configuration)" for r in runs)},
         "case_success": bench._counted(sum(1 for s in scores if s["success"]), planned),
         "case_success_strict": bench._counted(sum(1 for s in scores if s["success_strict"]), planned),
+        "case_success_behavior": bench._counted(sum(1 for s in scores if s.get("success_behavior")), planned),
         "case_success_of_completed": bench._counted(sum(1 for s in scores if s["success"]), len(scores)),
         "case_success_strict_of_completed": bench._counted(sum(1 for s in scores if s["success_strict"]),
                                                            len(scores)),

@@ -341,16 +341,21 @@ def test_half_against_a_per_100g_catalog_is_a_question_not_fifty_grams():
 @pytest.mark.parametrize("gold,shown,expected", [
     ({"name": "fries", "brand": "McDonald's"}, "McDonald's Large Fries", False),
     ({"name": "fries", "brand": "McDonald's"}, "McDonald's Fries", True),
-    ({"name": "chicken breast"}, "Chicken breast, raw", False),
+    # A reference row's own state words ("raw", "cooked") and a brand prefix are not a different
+    # product for an unbranded gold: "egg" is "chicken egg" and "Thomas' Blueberry Bagel".
+    ({"name": "chicken breast"}, "Chicken breast, raw", True),
     ({"name": "chicken breast", "preparation": "raw"}, "Raw chicken breast", True),
     ({"name": "Quarter Pounder", "brand": "McDonald's"}, "McDonald's Quarter Pounder with Cheese", False),
     ({"name": "coffee"}, "Regular Coffee", False),
     ({"name": "burger"}, "Double Burger", False),
     ({"name": "smoothie"}, "Mini Smoothie", False),
     ({"name": "smoothie"}, "Small Strawberry Smoothie", False),
-    ({"name": "rice"}, "Cooked Rice", False),
+    ({"name": "rice"}, "Cooked Rice", True),
     ({"name": "large fries"}, "Fries", False),
     ({"name": "rice", "preparation": "cooked"}, "Cooked Rice", True),
+    ({"name": "egg"}, "chicken egg", True),
+    ({"name": "blueberry bagel"}, "Thomas' Blueberry Bagel", True),
+    ({"name": "egg"}, "Egg, duck, whole, fresh, raw", False),
 ])
 def test_identity_keeps_size_preparation_and_flavor_words(gold, shown, expected):
     assert bench.identity_matches({"brand": None, "variant": None, "preparation": None, **gold}, shown) is expected

@@ -49,15 +49,16 @@ def _no_real_network(monkeypatch):
         monkeypatch.delenv(key, raising=False)
     # All credentials and prices below are synthetic test fixtures, never a live plan.
     from food_agent_budget import RateCard, TERRA
-    rates = RateCard(version="synthetic-offline-only", providers={"fatsecret": 0, "exa": 0, "cofid": 0},
-                    evidence={p: "synthetic fixture" for p in ("fatsecret", "exa", "cofid")},
+    rates = RateCard(version="synthetic-offline-only", providers={"fatsecret": 0, "exa": 0, "cofid": 0, "usda": 0},
+                    evidence={p: "synthetic fixture" for p in ("fatsecret", "exa", "cofid", "usda")},
                     hosted_models={"synthetic-hosted": {"version": "fixture", "source": "synthetic fixture",
                         "input_per_million": 1, "output_per_million": 5, "max_context_tokens": 32000,
                         "tool_per_call_usd": .01}})
     monkeypatch.setattr(live, "RateCard", lambda: rates)
     for key, value in {"FOOD_AGENT_MODEL": TERRA, "COACH_MODEL": "synthetic-hosted",
                        "WEB_LOOKUP_EXTRACT_MODEL": TERRA, "WEB_LOOKUP_PROVIDER": "exa",
-                       "EXA_API_KEY": "synthetic", "FATSECRET_ATTRIBUTION_ENABLED": "true",
+                       "EXA_API_KEY": "synthetic", "USDA_API_KEY": "synthetic",
+                       "FATSECRET_ATTRIBUTION_ENABLED": "true",
                        "FATSECRET_CLIENT_ID": "synthetic", "FATSECRET_CLIENT_SECRET": "synthetic"}.items():
         monkeypatch.setenv(key, value)
     enable_fake_fatsecret(monkeypatch, _spec())
@@ -181,15 +182,37 @@ class LocalStoreStub:
         return None
 
 
-def _providers(model, *, web=None, exa=None):
+def fake_usda(spec):
+    """A fake FoodData Central search built from the scripts' UNBRANDED catalog rows (the whole-food lane)."""
+    foods = []
+    for script in spec["scripts"].values():
+        for entry in script.get("catalog") or []:
+            row = entry["row"]
+            if row.get("brand"):
+                continue
+            foods.append({"fdcId": 500000 + len(foods), "dataType": "SR Legacy", "description": row["name"],
+                          "foodNutrients": [{"nutrientId": i, "value": round(v * 100 / row["grams"], 2)} for i, v in
+                                            ((1008, row["kcal"]), (1003, row["p"]), (1005, row["c"]),
+                                             (1004, row["f"]), (1079, row["fiber"]))],
+                          "foodMeasures": [{"disseminationText": row["serving"], "gramWeight": row["grams"]}]})
+
+    async def post(params):
+        wanted = set(bench.norm_query(params["query"]).split())
+        hits = [f for f in foods if wanted <= set(bench.norm_query(f["description"]).split())]
+        return httpx.Response(200, json={"foods": hits}, request=httpx.Request("GET", "https://fake.invalid/fdc"))
+    return post
+
+
+def _providers(model, *, web=None, exa=None, usda=None, spec=None):
     return {"model_post": model, "web_post": web or FakeWeb(), "exa_post": exa or FakeWeb(),
-            "cofid_fetch": _no_cofid, "local_store": LocalStoreStub()}
+            "cofid_fetch": _no_cofid, "local_store": LocalStoreStub(),
+            "usda_post": usda or fake_usda(spec or _spec())}
 
 
 async def _run(spec, *, budget=None, repeats=1, model=None, **kw):
     budget = budget or live.Budget(max_model_calls=300, max_lookups=200)
     model = model or FakeModel(spec)
-    providers = _providers(model, **kw)
+    providers = _providers(model, spec=spec, **kw)
     results = await live.run_live_bench(spec, bench.MemoryBackend(), budget, repeats=repeats, **providers)
     return results, budget, model
 
@@ -213,7 +236,9 @@ async def test_live_harness_runs_the_real_turn_with_fake_providers_and_records_e
     assert item["raw_display_name"] and item["macro_source"].startswith("FatSecret:")
     assert item["matches_gold"] == [0]
     assert "fatsecret" in {c["provider"] for c in burger["resolver_calls"]}
-    assert fs_calls and budget.lookups_used == len(fs_calls)
+    usda_calls = [a for a in budget.lookup_attempts if a["provider"] == "usda"]
+    assert fs_calls and usda_calls  # both lanes ran: eggs went to USDA, the burger to FatSecret
+    assert budget.lookups_used == len(fs_calls) + len(usda_calls)  # every wire attempt is counted once
     call = burger["model_calls"][0]
     assert call["status"] == "ok" and call["model"] == "fake-model-1"
     assert (call["prompt_tokens"], call["completion_tokens"], call["total_tokens"]) == (100, 20, 120)

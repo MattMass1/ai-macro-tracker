@@ -1426,7 +1426,7 @@ async def _resolve_food_text(
         quantity, unit, remainder = _clean_component(text)
         whole = await _resolve_component(
             remainder or text, whole_item=whole_item, catalog_lookup=catalog_lookup,
-            allow_web=False, assume_variant=assume_variant,
+            allow_web=False, assume_variant=assume_variant, kind=kind,
         )
         quantified = _quantify(whole, quantity, unit) if whole and quantity is not None else None
         if whole:

@@ -167,16 +167,16 @@ def _weight_basis_conflict(item: Mapping[str, Any], found: Mapping[str, Any]) ->
     if item.get("unit") not in MASS_UNITS:
         return False
     wanted = item.get("preparation") or _weight_state(str(item.get("description") or ""))
+    if not wanted:
+        return False
+    if found.get("estimate_provenance") == TYPICAL:
+        # A typical recipe declares the basis of its pinned rows (dish_estimates):
+        # cooked rows never price a raw weight; an as-served recipe (cheese,
+        # greens) has no raw/cooked weight; no declaration at all prices nothing.
+        basis = found.get("basis")
+        return basis != dish_estimates.AS_SERVED_BASIS and basis != wanted
     source = _weight_state(str(found.get("basis") or ""))
-    if source is None and found.get("estimate_provenance") == TYPICAL:
-        # Typical recipes are another source, not permission to disregard the
-        # weight basis. Their source-pinned ingredient labels carry preparation.
-        labels = [str(part.get("label") or "") for part in found.get("built_from") or []]
-        states = {_weight_state(label) for label in labels} - {None}
-        if wanted and any(state != wanted for state in states):
-            return True
-        source = _weight_state(str(found.get("name") or ""))
-    return bool(wanted and source and wanted != source)
+    return bool(source and wanted != source)
 
 
 def needs_weight_basis(item: Mapping[str, Any]) -> bool:
@@ -406,6 +406,15 @@ class MealDrafts:
         if args.get("log_now"):
             log_now()
         self._decide_state(draft)
+        if draft.get("amends_entry_id"):
+            dropped = [item for item in draft["items"] if self._dropped_from_entry(item)]
+            if dropped:
+                # Ask-once, log_now or a missing source left out a food the entry
+                # already counts: refuse the amendment; the entry stays as logged.
+                await self.store.cancel_meal_draft(str(draft["id"]), expected)
+                reason = (dropped[0].get("field_origins") or {}).get("not_counted")
+                return {"status": "failed", "draft_ref": str(draft["id"]),
+                        "confirmation": f"I couldn't count {item_text(dropped[0])} ({reason}), so nothing changed."}
         if draft["state"] == "ready" and draft["intent"] == "consume":
             # Panels that may not be stored are fetched again before the save,
             # so a source that no longer answers is left out of this meal (and
@@ -471,6 +480,12 @@ class MealDrafts:
         if source is not None:
             draft["items"] = [{**item, "id": str(uuid4())} for item in source["items"]]
             for item in draft["items"]:
+                origins = {k: v for k, v in (item.get("field_origins") or {}).items() if k != "amended_from_entry"}
+                if args.get("amend_ref") and item["status"] == "included":
+                    # Counted in the logged entry: only the user may drop it
+                    # (remove/skip); a source failure never rewrites the entry without it.
+                    origins["amended_from_entry"] = True
+                item["field_origins"] = origins
                 resolution = item.get("resolution") or {}
                 # A web estimate is fetched fresh for a repeat, never reused;
                 # unlicensed panels were never stored, so they are fetched again.
@@ -522,6 +537,14 @@ class MealDrafts:
         item["field_origins"] = {**(item.get("field_origins") or {}), "not_counted": reason}
         item["needs"] = item["question"] = item["resolution"] = None
         item.pop("_live", None)
+
+    @staticmethod
+    def _dropped_from_entry(item) -> bool:
+        """A food counted in the amended entry that this call left out without
+        the user saying so (remove clears not_counted; skip is the user's)."""
+        origins = item.get("field_origins") or {}
+        return (item["status"] == "removed" and bool(origins.get("amended_from_entry"))
+                and origins.get("not_counted") not in (None, "skipped") and not origins.get("user_removed"))
 
     @staticmethod
     def _user_remove(item) -> None:

@@ -116,6 +116,29 @@ async def test_lanes_remain_task_local_and_reset_after_options():
     assert ROUTE_KIND.get() is None
 
 
+@pytest.mark.parametrize('kind', ['generic', 'homemade', 'other'])
+async def test_composite_whole_phrase_retry_keeps_the_lane(kind, monkeypatch):
+    # Review R3: the retry after unresolved parts must carry `kind`, never
+    # re-enter the omitted-kind legacy cascade (FatSecret for a whole food).
+    async def forbidden(query, **kwargs):
+        pytest.fail(f'FatSecret reached from the {kind} lane: {query!r}')
+    monkeypatch.setattr(food_lookup, 'search_fatsecret', forbidden)
+    result = await food_lookup.resolve_food('kumquat and persimmon', kind=kind, allow_web=False)
+    assert result is None
+
+
+@pytest.mark.parametrize('kind', ['packaged', 'restaurant', None])
+async def test_composite_whole_phrase_retry_reaches_branded_or_legacy_sources(kind, monkeypatch):
+    calls = []
+
+    async def fatsecret(query, **kwargs):
+        calls.append(query)
+        return None
+    monkeypatch.setattr(food_lookup, 'search_fatsecret', fatsecret)
+    await food_lookup.resolve_food('kumquat and persimmon', kind=kind, allow_web=False)
+    assert 'kumquat and persimmon' in calls
+
+
 @pytest.mark.parametrize('query,description', [
     ('egg', 'Egg, goose, raw'), ('salmon', 'Salmon, canned'),
     ('chicken breast', 'Chicken breast, skin eaten'),

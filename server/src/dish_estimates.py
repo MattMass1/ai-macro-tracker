@@ -118,6 +118,18 @@ _I = {
                     ("wheat bread", "whole wheat bread", "wheat")),
 }
 DRESSINGS = frozenset({"ranch", "caesar dressing", "italian dressing", "blue cheese"})
+# Pinned rows that are a COOKED preparation of a food whose weight changes with
+# cooking: a recipe built from any of them is a cooked (as-served) weight, so a
+# weight stated raw can never be priced by it. Every other row is as served
+# (cheese, greens, bread...): raw/cooked does not apply to its weight.
+_COOKED_ROWS = frozenset({"egg", "boiled egg", "sausage", "bacon", "ham", "turkey", "chicken", "steak",
+                          "ground beef", "tuna", "shrimp", "potatoes", "rice", "black beans", "refried beans"})
+COOKED_BASIS, AS_SERVED_BASIS = "cooked", "as_served"
+
+
+def row_basis(key: str) -> str:
+    """Declared weight basis of one pinned ingredient row."""
+    return COOKED_BASIS if key in _COOKED_ROWS else AS_SERVED_BASIS
 
 # Dish: base parts always counted (ingredient, medium grams, per-size grams
 # override) and the typical contents used only when the user listed none.
@@ -235,11 +247,14 @@ def _result(name: str, parts: list[dict[str, Any]], multiplier: float, assumptio
     # the validator caps at 1000 characters. The grams live in built_from.
     ids = ", ".join(dict.fromkeys(str(p["fdc"]) for p in parts))
     source = f"BOUNDED ESTIMATE, typical {name}; USDA SR Legacy FDC {ids}"[:300]
+    # The recipe's weight basis is declared from its rows, never read back from
+    # labels: cooked as soon as one row is a cooked preparation.
+    basis = COOKED_BASIS if any(row_basis(p["key"]) == COOKED_BASIS for p in parts) else AS_SERVED_BASIS
     result = {"name": name, "macro_source": source, **totals,
               "estimate_provenance": "typical_serving_estimate", "assumption": assumption,
-              "typical_size": size, "dish": size is not None, "listed": listed,
+              "typical_size": size, "dish": size is not None, "listed": listed, "basis": basis,
               "built_from": [{"label": p["label"], "grams": round(p["grams"] * multiplier, 1),
-                              "fdc": p["fdc"]} for p in parts],
+                              "fdc": p["fdc"], "basis": row_basis(p["key"])} for p in parts],
               "attribution": {"provider": "USDA SR Legacy", "verification_state": "typical_serving_estimate",
                               "cache_allowed": True}}
     if not_counted:

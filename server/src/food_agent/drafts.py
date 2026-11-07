@@ -176,6 +176,22 @@ def portion_label(portion: Portion) -> str:
     return f"{_num(amount)} {_UNIT_TEXT.get(portion.unit or '', portion.unit or '')}".strip()
 
 
+def _unit_label(item: DraftItemState) -> str | None:
+    """"1 slice", "2 slices", "1/2 cup" for a food counted in its serving unit, so the
+    label always says what one of it is. ``None`` for anything else."""
+    food = item.resolved
+    unit = food.attribution.get("serving_unit") if food is not None else None
+    if not isinstance(unit, str) or item.multiplier is None:
+        return None
+    if item.portion.kind not in ("count", "unspecified", "serving_fraction", "volume"):
+        return None
+    if item.portion.kind == "volume" and item.portion.unit != unit:
+        return None  # "8 fl oz" of milk says itself
+    import serving_units  # noqa: PLC0415 (pure module)
+    plural = food.attribution.get("serving_unit_plural")
+    return serving_units.amount_text(item.multiplier, unit, plural if isinstance(plural, str) else unit)
+
+
 def identity_text(item: DraftItemState) -> str:
     ident = item.identity
     return " ".join(part for part in (ident.brand, ident.name, ident.variant) if part)
@@ -185,7 +201,7 @@ def item_label(item: DraftItemState) -> str:
     """Name, then amount and changes: "Grilled Chicken Club (no tomato, no lettuce)"."""
     from food_agent.modifications import mod_text
     name = item.resolved.display_name if item.resolved is not None else identity_text(item)
-    parts = [portion_label(item.portion), *dict.fromkeys(mod_text(m) for m in item.modifications)]
+    parts = [_unit_label(item) or portion_label(item.portion), *dict.fromkeys(mod_text(m) for m in item.modifications)]
     detail = ", ".join(part for part in parts if part)
     return f"{name} ({detail})" if detail else name
 

@@ -120,8 +120,13 @@ def is_ready(item: DraftItemState, unknown_ok: bool) -> bool:
     return unknown_ok or all(getattr(panel, key) is not None for key in NUTRIENT_KEYS)
 
 
-def portion_choices(basis: Any) -> tuple[str, ...]:
-    """Typical amounts for a "how much?" question, in words the interpreter already reads."""
+def portion_choices(basis: Any, name: str | None = None) -> tuple[str, ...]:
+    """Typical amounts for a "how much?" question, in words the interpreter already reads.
+    A food with a serving unit is asked in that unit ("1 slice", "1 cup"), never in ounces."""
+    import serving_units  # noqa: PLC0415 (pure module)
+    own = serving_units.choices_for(name)
+    if own is not None:
+        return own
     if basis.basis == "per_100ml" or basis.unit in VOLUME_UNITS or getattr(basis, "ml", None):
         return ("8 fl oz", "12 fl oz", "16 fl oz")
     if basis.basis == "per_100g" or basis.unit in MASS_UNITS or basis.grams:
@@ -262,7 +267,8 @@ class FoodAgent2:
             item = next((i for i in draft.items if i.resolved is not None and i.multiplier is None), None) \
                 if draft is not None else None
             if item is not None:
-                return replace(result, quick_replies=(*portion_choices(item.resolved.serving_basis), "Cancel"))
+                choices = portion_choices(item.resolved.serving_basis, identity_text(item))
+                return replace(result, quick_replies=(*choices, "Cancel"))
         except Exception as exc:  # noqa: BLE001
             logger.info("food agent quick replies skipped: %s", type(exc).__name__)
         return result

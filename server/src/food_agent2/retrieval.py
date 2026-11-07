@@ -31,7 +31,7 @@ import food_lookup
 import usda_lookup
 from food_agent import portion as portion_math
 from food_agent.contracts import DraftItemState, FoodIdentity, NutrientPanel, Portion, ResolvedFood
-from food_agent.find_food import identity_query, to_resolved_food
+from food_agent.find_food import identity_query, to_resolved_food, with_serving_unit
 from food_agent2 import match
 from food_agent2.sources import Sources
 
@@ -210,13 +210,14 @@ class Retrieval:
                 return _generic(typical, identity, "estimated")
             hit = await self._closest_row(identity, portion, query, scope)
         else:
-            hit = await self._closest_product(identity, query, scope)
+            hit = await self._closest_product(identity, portion, query, scope)
         return hit or Found("needs_web")
 
     async def find_on_web(self, identity: FoodIdentity, portion: Portion, scope: Scope) -> Found:
         query = web_query(identity)
         found = await scope.call(("web", query.casefold()), lambda: self.sources.web(query))
         food = to_resolved_food(found) if isinstance(found, Mapping) else None
+        food = with_serving_unit(food, identity_query(identity), portion)
         if food is None:
             return Found("not_counted", reason="no source had it")
         return Found("estimated", food)
@@ -239,10 +240,10 @@ class Retrieval:
     @staticmethod
     def _food(found: Mapping[str, Any], query: str, portion: Portion) -> ResolvedFood | None:
         if str((found.get("attribution") or {}).get("provider")) == "USDA FDC":
-            found = usda_lookup.for_portion(dict(found), query, portion.text, portion.kind)
+            found = usda_lookup.for_portion(dict(found), query, portion.text, portion.kind, portion.unit)
         else:
             found = named_unit(found, portion)
-        return to_resolved_food(found)
+        return with_serving_unit(to_resolved_food(found), query, portion)
 
     async def _closest_row(self, identity, portion, query, scope) -> Found | None:
         attempts = [(query, True)]
@@ -262,7 +263,7 @@ class Retrieval:
                 return _generic(food, identity, "verified")
         return None
 
-    async def _closest_product(self, identity, query, scope) -> Found | None:
+    async def _closest_product(self, identity, portion, query, scope) -> Found | None:
         hits = await scope.call(("hits", query.casefold()), lambda: self.sources.hits(query), default=[])
         asked = match.asked_text(identity)
         ranked = []
@@ -280,7 +281,7 @@ class Retrieval:
         for _score, _order, hit in sorted(ranked, key=lambda entry: entry[:2])[:_MAX_FETCHES]:
             food_id = str(hit["food_id"])
             found = await scope.call(("food", food_id), lambda food_id=food_id, hit=hit: self.sources.food(food_id, query, hit))
-            food = to_resolved_food(found) if isinstance(found, Mapping) else None
+            food = with_serving_unit(to_resolved_food(found) if isinstance(found, Mapping) else None, query, portion)
             if food is not None:
                 return _branded(food, identity, "verified")
         return None
@@ -299,6 +300,8 @@ class Retrieval:
             fresh = to_resolved_food(found) if isinstance(found, Mapping) else None
         else:
             fresh = (await self.find_on_web(item.identity, item.portion, scope)).food
+        # The same serving unit as when it was shown, so the stored multiplier still means the same amount.
+        fresh = with_serving_unit(fresh, identity_query(item.identity), item.portion)
         if fresh is None:
             return None
         return food.model_copy(update={"panel": fresh.panel, "serving_basis": fresh.serving_basis})

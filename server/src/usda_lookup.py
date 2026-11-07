@@ -22,6 +22,7 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
+import serving_units
 from http_clients import shared_client
 
 logger = logging.getLogger(__name__)
@@ -152,18 +153,38 @@ def compatible(query: str, description: str) -> bool:
     return not (shown - wanted - neutral)
 
 
-def for_portion(found: dict[str, Any], query: str, text: str, kind: str) -> dict[str, Any]:
-    """Rebind source measures for the requested amount; mass stays per 100 g."""
+def for_portion(found: dict[str, Any], query: str, text: str, kind: str, unit: str | None = None) -> dict[str, Any]:
+    """Rebind source measures for the requested amount; mass stays per 100 g.
+
+    When no single household measure fits, a food with a serving unit (a slice of
+    bread, a cup of milk) is counted in that unit instead of 100 g.
+    """
     food = {"description": query, "foodMeasures": found.get("usda_measures") or []}
     selected = None if kind == "mass" else _portion(food, text)
     out = dict(found)
     out["attribution"] = dict(found.get("attribution") or {})
+    family = serving_units.for_food(query)
+    if family is not None and not serving_units.applies(family, text, kind, unit):
+        family = None
+    if selected is None and family is not None:
+        from_row = serving_units.row_measure(food["foodMeasures"], family)
+        grams = from_row[1] if from_row else family.grams
+        out["serving_size"] = serving_units.serving_text(family, grams)
+        out["macros_per_serving"] = {k: None if v is None else round(v * grams / 100, 2)
+                                     for k, v in found["macros_per_100g"].items()}
+        out["attribution"].pop("serving_grams", None)
+        out["attribution"].update(serving_basis="per_serving",
+                                  **serving_units.attribution(family, grams, from_row[0] if from_row else None))
+        return out
     if selected:
         label, grams = selected
         out["serving_size"] = f"{label} ({grams:g} g)"
         out["macros_per_serving"] = {k: None if v is None else round(v * grams / 100, 2)
                                     for k, v in found["macros_per_100g"].items()}
         out["attribution"].update(serving_basis="per_serving", serving_grams=grams)
+        if family is not None and family.measure in _tokens(label):
+            # "1 slice, regular" of rye is still counted in slices.
+            out["attribution"].update(serving_units.attribution(family, grams, label))
     else:
         out.pop("macros_per_serving", None)
         out["serving_size"] = "100 g"

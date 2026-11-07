@@ -35,6 +35,19 @@ the migration 004 tables under the same marker the earlier agent uses.
 Numbers the user types are checked against their own message before use, and a
 number that does not appear there is dropped.
 
+## Serving units
+
+`server/src/serving_units.py` decides in code what one of a food is counted in: bread
+and toast in slices, milk in cups, peanut butter, butter, oil, honey and mayo in
+tablespoons, a banana, apple or orange as one medium. It applies when the user names
+that unit or no unit ("a slice", "2", nothing), never to a weight ("2 oz") or another
+unit ("a loaf"). The weight of one unit is the matched USDA row's own plain or medium
+measure, otherwise the pinned typical weight in the table, and the food's attribution
+records which (`serving_unit_source`). The label and logged name carry the unit
+("Sourdough bread (1 slice)"), and a "how much?" question offers the unit's chips
+instead of 4 / 6 / 8 oz. Both food agents use it through `usda_lookup.for_portion`
+and `find_food.with_serving_unit`.
+
 ## Testing
 
 ```sh

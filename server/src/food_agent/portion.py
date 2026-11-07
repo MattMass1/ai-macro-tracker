@@ -220,7 +220,8 @@ _UNIT_EQUIVALENTS: dict[str, frozenset[str]] = {
 # unit ("three" bacon against a "2 slices" serving).
 _NATURAL_UNIT: dict[str, frozenset[str]] = {
     # Not "cheese": it comes as slices, sticks, cubes or ounces ("string cheese" asks).
-    "slice": frozenset({"bacon", "bread", "toast", "ham", "turkey", "salami", "pepperoni"}),
+    "slice": frozenset({"bacon", "bread", "toast", "ham", "turkey", "salami", "pepperoni", "sourdough", "rye",
+                        "pumpernickel", "brioche", "challah"}),
 }
 # Whole items: a count of these is whole items, never slices or pieces.
 _WHOLE_ITEMS = frozenset({

@@ -331,6 +331,30 @@ def to_resolved_food(found: Mapping[str, Any]) -> ResolvedFood | None:
                         serving_basis=basis, panel=panel)
 
 
+def with_serving_unit(food: ResolvedFood | None, name: str, portion: Portion) -> ResolvedFood | None:
+    """A per-100 g (or per-100 ml) panel for a food with a serving unit, counted in that unit
+    ("1 slice (29 g)", "1 cup") at its pinned typical weight, so "a slice" is never a "how much?"
+    question with ounce choices. Anything else is returned unchanged."""
+    import serving_units  # noqa: PLC0415 (pure module, kept beside its callers)
+    if food is None or food.serving_basis.basis not in ("per_100g", "per_100ml"):
+        return food
+    family = serving_units.for_food(name)
+    if family is None or not serving_units.applies(family, portion.text, portion.kind, portion.unit):
+        return food
+    if food.serving_basis.basis == "per_100ml":
+        if not family.drink:
+            return food
+        factor = float(portion_math.ML_PER[family.unit]) / 100.0
+    else:
+        factor = family.grams / 100.0
+    values = {key: getattr(food.panel, key) for key in NUTRIENT_KEYS}
+    panel = NutrientPanel(**{key: None if value is None else round(value * factor, 2) for key, value in values.items()})
+    basis = portion_math.parse_serving_text(serving_units.serving_text(family, family.grams))
+    attribution = {**food.attribution, "serving_basis": "per_serving",
+                   **serving_units.attribution(family, family.grams, None)}
+    return food.model_copy(update={"serving_basis": basis, "panel": panel, "attribution": attribution})
+
+
 def is_estimate(food: ResolvedFood) -> bool:
     """Whether the preview must label this food's numbers as an estimate."""
     return "estimate" in food.macro_source.casefold()
@@ -535,8 +559,9 @@ class FoodFinder:
                asked: str) -> FindResult:
         if _provider(found) == "USDA FDC":
             import usda_lookup
-            found = usda_lookup.for_portion(dict(found), identity_query(identity), portion.text, portion.kind)
-        food = to_resolved_food(found)
+            found = usda_lookup.for_portion(dict(found), identity_query(identity), portion.text, portion.kind,
+                                             portion.unit)
+        food = with_serving_unit(to_resolved_food(found), identity_query(identity), portion)
         if food is None:
             return FindResult("no_match", None,
                               note=f"I couldn't find usable nutrition for {asked}.")
@@ -562,5 +587,5 @@ class FoodFinder:
         return FindResult("matched", food, note=note)
 
 
-__all__ = ["FoodFinder", "ROUTE_KIND", "identity_query", "to_resolved_food", "is_estimate",
+__all__ = ["FoodFinder", "ROUTE_KIND", "identity_query", "to_resolved_food", "with_serving_unit", "is_estimate",
            "production_resolve", "production_suggest", "production_is_ambiguous"]

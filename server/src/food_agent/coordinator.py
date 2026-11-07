@@ -199,7 +199,8 @@ class FoodAgent:
         item = next((i for i in draft.items if i.resolved is not None and i.multiplier is None), None)
         if item is None:
             return ()
-        return portion_choices(item.resolved.serving_basis) + ("Cancel",)  # type: ignore[union-attr]
+        basis = item.resolved.serving_basis  # type: ignore[union-attr]
+        return portion_choices(basis, identity_text(item)) + ("Cancel",)
 
     async def _settle_bindings(self, shown_before: list[AgentDraft], result: FoodTurnResult | None) -> None:
         """B1: a preview stays confirmable only if this turn's reply showed it.
@@ -833,8 +834,13 @@ def items_ready(items: Sequence[DraftItemState]) -> bool:
     return bool(items) and all(i.resolved is not None and i.multiplier is not None for i in items)
 
 
-def portion_choices(basis: Any) -> tuple[str, ...]:
-    """Typical amounts for a "how much?" question, in words the interpreter already reads."""
+def portion_choices(basis: Any, name: str | None = None) -> tuple[str, ...]:
+    """Typical amounts for a "how much?" question, in words the interpreter already reads.
+    A food with a serving unit is asked in that unit ("1 slice", "1 cup"), never in ounces."""
+    import serving_units  # noqa: PLC0415 (pure module)
+    own = serving_units.choices_for(name)
+    if own is not None:
+        return own
     if basis.basis == "per_100ml" or basis.unit in VOLUME_UNITS or getattr(basis, "ml", None):
         return ("8 fl oz", "12 fl oz", "16 fl oz")
     if basis.basis == "per_100g" or basis.unit in MASS_UNITS or basis.grams:

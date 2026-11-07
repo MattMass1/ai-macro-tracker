@@ -210,15 +210,57 @@ def _fill(node: Any, context: dict[str, Any]) -> Any:
     open_ = (context.get("open_drafts") or [None])[0]
     logged = context.get("last_logged")
     if node == "@open_ref":
-        return open_["draft_ref"] if open_ else "none"
+        return open_.get("draft_ref", "none") if open_ else "none"
     if node == "@open_rev":
-        return int(open_["revision"]) if open_ else 1
+        return int(open_.get("revision", 1)) if open_ else 1
     kind, _, number = node[1:].partition(":")
     source = open_ if kind == "open" else logged
     try:
         return source["items"][int(number) - 1]["item_ref"]
     except (TypeError, KeyError, IndexError, ValueError):
         return "x1"
+
+
+def agent2() -> bool:
+    """Whether this run drives ``food_agent2`` (``--agent 2``) instead of ``food_agent``."""
+    return os.environ.get("FOOD_BENCH_AGENT") == "2"
+
+
+class ScriptedSources:
+    """Lanes A/B for ``food_agent2``: the script's catalog is the exact lane; nothing else exists."""
+
+    def __init__(self, resolver: ScriptedResolver):
+        self.resolver = resolver
+
+    async def exact(self, query, lane):
+        return await self.resolver(query)
+
+    async def rows(self, query, require_all):
+        return []
+
+    async def hits(self, query):
+        return []
+
+    async def food(self, food_id, query, hit):
+        for row in self.resolver.table.values():
+            if row["attribution"]["external_id"] == food_id:
+                return row
+        return None
+
+    async def web(self, query):
+        return None
+
+
+def as_agent2_turn(data: dict[str, Any]):
+    """A scripted reply in the new contract. The model can no longer ask, so a scripted ask is dropped."""
+    from food_agent2.contracts import SCHEMA_VERSION, Turn
+    actions = []
+    for action in data.get("actions") or []:
+        if action.get("type") == "ask":
+            continue
+        actions.append({"type": "confirm"} if action.get("type") == "confirm" else action)
+    return Turn.model_validate_json(json.dumps({"schema_version": SCHEMA_VERSION,
+                                                "actions": actions or [{"type": "confirm"}]}))
 
 
 class ScriptedInterpreter:
@@ -239,7 +281,7 @@ class ScriptedInterpreter:
             self.unexpected += 1
             chosen = {"actions": [{"type": "confirm", "draft_ref": "@open_ref", "shown_revision": "@open_rev"}]}
         data = {"schema_version": SCHEMA_VERSION, **_fill(chosen, dict(context))}
-        turn = AgentTurn.model_validate_json(json.dumps(data))
+        turn = as_agent2_turn(data) if agent2() else AgentTurn.model_validate_json(json.dumps(data))
         self.sent.append([action.type for action in turn.actions])
         return turn
 
@@ -484,6 +526,8 @@ def scripted_parts(case: dict[str, Any], script: dict[str, Any], env: "CaseEnv")
     """Lanes A/B: the scripted interpreter and the real FoodFinder over a fake resolver."""
     from food_agent.find_food import FoodFinder
     resolver = ScriptedResolver(script.get("catalog") or [])
+    if agent2():
+        return ScriptedInterpreter(script["turns"]), ScriptedSources(resolver)
     options = {norm_query(o["query"]): list(o["names"]) for o in script.get("options") or []}
 
     async def suggest(query):
@@ -522,7 +566,13 @@ async def run_case(case: dict[str, Any], script: dict[str, Any], backend, *, par
     run.decoy_markers = [DECOY_MARKER, *decoy_ids]
 
     interpreter, finder = (parts or scripted_parts)(case, script, env)
-    agent = FoodAgent(env.drafts, interpreter, finder, HistoryRecaller(env.history, env.clock), env.clock)
+    if agent2():
+        from food_agent2.history import HistoryRecall
+        from food_agent2.retrieval import Retrieval
+        from food_agent2.turn import FoodAgent2
+        agent = FoodAgent2(env.drafts, interpreter, Retrieval(finder), HistoryRecall(env.history, env.clock), env.clock)
+    else:
+        agent = FoodAgent(env.drafts, interpreter, finder, HistoryRecaller(env.history, env.clock), env.clock)
     spy = SpyAgent(agent)
     old = OldPath()
 
@@ -656,6 +706,7 @@ def identity_matches(gold: dict[str, Any], display_name: str) -> bool:
     # Preparation is required, not merely allowed among additional descriptors.
     constraints = set(_tokens(gold.get("preparation"))) | set(_tokens(gold.get("variant")))
     constraints |= set(_tokens(gold.get("brand")))
+    constraints -= _DESCRIPTORS  # ``shown`` drops these too: "Chick-fil-A" must not require a lone "a"
     if not constraints <= shown:
         return False
     if wanted == shown and wanted:
@@ -1077,7 +1128,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-model-calls", type=int, default=300, help="lane C: hard cap on model attempts")
     parser.add_argument("--max-lookups", type=int, default=200, help="lane C: hard cap on provider attempts")
     parser.add_argument("--rate-card", help="lane C: reviewed nonsecret versioned JSON route prices")
+    parser.add_argument("--agent", choices=("1", "2"), default="1", help="1: food_agent; 2: food_agent2")
     args = parser.parse_args(argv)
+    os.environ["FOOD_BENCH_AGENT"] = args.agent
     if args.lane == "C":
         import food_agent_bench_live  # noqa: PLC0415 - lane C lives in its own module
         return food_agent_bench_live.main_live(args)

@@ -4426,7 +4426,8 @@ async def _food_agent_engine():
     off nothing is read or built. Then the live 004 draft schema must exist,
     and every food agent module (including ``food_agent.recall``) must import.
     """
-    if not release_gates.food_agent_allowed():
+    agent2 = release_gates.food_agent2_allowed()
+    if not agent2 and not release_gates.food_agent_allowed():
         return None
     client = store_client()
     try:
@@ -4435,6 +4436,18 @@ async def _food_agent_engine():
     except Exception:
         logger.exception("Food agent readiness check failed; using the existing canvas path")
         return None
+    if agent2:
+        try:
+            from food_agent.drafts import StoreDrafts
+            from food_agent2.history import HistoryRecall
+            from food_agent2.interpret import ModelInterpreter
+            from food_agent2.retrieval import Retrieval
+            from food_agent2.sources import LiveSources
+            from food_agent2.turn import FoodAgent2
+        except ImportError:
+            logger.exception("food_agent2 modules unavailable; using the existing canvas path")
+            return None
+        return FoodAgent2(StoreDrafts(client), ModelInterpreter(), Retrieval(LiveSources()), HistoryRecall(client))
     try:
         from food_agent.coordinator import FoodAgent
         from food_agent.drafts import StoreDrafts

@@ -1,0 +1,62 @@
+# food_agent2
+
+The food-logging agent and retrieval layer in `server/src/food_agent2/`. It replaces
+the orchestration in `food_agent/` and the legacy `meal_drafts` chat path once it
+passes the live bench. It is off by default. The iPhone app, the schema and the API
+contract do not change.
+
+## Switching it on
+
+| Flag | Meaning |
+|---|---|
+| `FOOD_AGENT2_ENABLED` | Exact `true` opens it. Anything else is closed. |
+| `FOOD_AGENT2_USER_IDS` | Optional comma-separated UUID canary list. Malformed means nobody. |
+
+With the flag off, `_food_agent_engine` behaves as before and `CanvasService.turn` is
+unchanged. If both this flag and `FOOD_AGENT_ENABLED` are open, this one wins.
+Rollback is unsetting the flag. There is no migration, and drafts it wrote stay in
+the migration 004 tables under the same marker the earlier agent uses.
+
+## How a turn works
+
+1. **Interpret.** One strict JSON model call. The model returns identity, portion,
+   changes and intent. It has no way to ask a question.
+2. **Update the draft.** Items are stored as numbers across turns.
+3. **Resolve.** The ladder in `retrieval.py`, run per item in parallel with a per-turn
+   memo and cap: exact match, then (whole foods) the food without its preparation words,
+   a typical dish from pinned rows and the closest USDA row, or (named products) the closest
+   FatSecret hit under the same brand, then a labeled web estimate, then not counted.
+4. **Preview or ask.** Code chooses. There are only two questions, how much and raw or
+   cooked on a weighed food, and each is asked once per draft.
+5. **Commit.** Only on the user's own plain yes to the preview shown last in that session,
+   with revision and content hash matching. The row is read back and the receipt comes
+   from the row. An unverified outcome is reconciled by the same key on the next turn.
+
+Numbers the user types are checked against their own message before use, and a
+number that does not appear there is dropped.
+
+## Testing
+
+```sh
+cd server
+../.venv/bin/python -m pytest -q -p no:cacheprovider tests/test_food_agent2_*.py
+
+# scripted lanes (code paths only, not product quality)
+../.venv/bin/python scripts/food_agent_bench.py --agent 2 --lane A --bench <labels> --scripts <scripts> --out <file>
+
+# live lane C (costs money; needs provider keys)
+../.venv/bin/python scripts/food_agent_bench.py --agent 2 --lane C --bench <labels> --scripts <scripts> \
+  --pg-admin-url <throwaway> --rate-card <card> --repeats 2 --out <outside the worktree>
+```
+
+The scripted lanes use scripts written for the earlier contract. They carry no
+`supplied` numbers or `settle` actions, so user-number cases can only pass on lane C.
+
+## Known limits
+
+- **Strict bench success cannot pass yet.** `success` requires `expected_nutrients`, which no
+  label has. Read `case_success_behavior` until the labels gain independent gold nutrition.
+- **Unknown nutrients.** While `CALORIE_ONLY_WRITES_ENABLED` is closed, a food with an unknown
+  nutrient (often fiber on a web estimate) cannot be saved and is named as not counted. A user's
+  own numbers fill gaps from the matched source, scaled to their calories.
+- **Voice** uses the same agent with no separate behavior yet. Workouts are not part of this layer.

@@ -602,6 +602,21 @@ async def search_fatsecret(query: str, *, assume_variant: bool = False) -> dict[
     return None
 
 
+async def fatsecret_candidates(query: str) -> list[Mapping[str, Any]]:
+    """The raw search hits for ``query``, for callers that rank them themselves."""
+    if _fatsecret_provider_mode() is None:
+        return []
+    return [hit for hit in await _fatsecret_search_hits(query) if isinstance(hit, Mapping)]
+
+
+async def fatsecret_detail(food_id: str, query: str, hit: Mapping[str, Any]) -> dict[str, Any] | None:
+    """One food by id, in the resolver's shape. The caller decides whether it is the right food."""
+    if _fatsecret_provider_mode() is None:
+        return None
+    food = _unwrap_food(await _fatsecret_request({"method": "food.get.v4", "food_id": str(food_id)}))
+    return _fatsecret_result(query, str(food_id), food, hit) if food is not None else None
+
+
 async def fatsecret_name_options(query: str, limit: int = 3) -> list[str]:
     """Closest provider names for a failed resolution, so the coach can ask one
     specific pick-a-variant question instead of demanding a label. Display

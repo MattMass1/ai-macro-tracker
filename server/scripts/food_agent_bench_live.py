@@ -488,6 +488,9 @@ def build_interpreter(budget: Budget, model_post=None):
     if model_post is None:
         from food_agent.model_adapter import post_responses
         model_post = post_responses
+    if bench.agent2():
+        from food_agent2.interpret import ModelInterpreter as Agent2Interpreter
+        return Agent2Interpreter(post=counted_model_post(model_post, budget))
     return ModelInterpreter(post=counted_model_post(model_post, budget))
 
 
@@ -694,6 +697,9 @@ async def run_live_bench(spec: dict[str, Any], backend, budget: Budget, *, repea
                 budget.where = {"case_id": case["id"], "repeat": repeat, "turn": None}
 
                 def parts(_case, _script, _env, log=log):
+                    if bench.agent2():
+                        from food_agent2.sources import LiveSources
+                        return LiveInterpreter(model), LiveSources()
                     finder = FoodFinder(log.wrap_resolve(production_resolve),
                                         suggest=log.wrap_suggest(production_suggest))
                     return LiveInterpreter(model), finder

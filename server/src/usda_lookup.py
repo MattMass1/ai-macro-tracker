@@ -48,6 +48,7 @@ _FORM_WORDS = _COOKED | frozenset({"sauce", "gravy", "breading", "batter", "lunc
 
 PostFn = Callable[[dict[str, Any]], Awaitable[httpx.Response]]
 _cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
+_rows_cache: dict[tuple[str, bool], tuple[float, list[dict[str, Any]]]] = {}
 
 
 def api_key() -> str:
@@ -249,16 +250,17 @@ def _remember(key: str, value: dict[str, Any] | None) -> None:
     _cache[key] = (time.monotonic() + CACHE_TTL_SECONDS, value)
 
 
-async def lookup(query: str, *, post: PostFn | None = None) -> dict[str, Any] | None:
-    """One whole-food lookup; ``None`` when unconfigured, unavailable or no exact row."""
-    text = " ".join(str(query or "").split())
-    if not text or len(text) > 120 or not api_key():
-        return None
-    key = text.casefold()
-    cached = _cache.get(key)
+async def _search(text: str, *, require_all: bool = True, post: PostFn | None = None) -> list[dict[str, Any]] | None:
+    """One FDC search, remembered so an exact lookup and a closest-row search share the wire call.
+
+    ``None`` means unavailable, which is never remembered. An empty list is a real answer.
+    """
+    key = (text.casefold(), require_all)
+    cached = _rows_cache.get(key)
     if cached and cached[0] > time.monotonic():
         return deepcopy(cached[1])
-    params = {"query": text, "dataType": DATA_TYPES, "pageSize": PAGE_SIZE, "requireAllWords": "true"}
+    params = {"query": text, "dataType": DATA_TYPES, "pageSize": PAGE_SIZE,
+              "requireAllWords": "true" if require_all else "false"}
     try:
         response = await (post or post_search)(params)
         if response.status_code != 200:
@@ -269,7 +271,34 @@ async def lookup(query: str, *, post: PostFn | None = None) -> dict[str, Any] | 
         logger.info("usda lookup unavailable: %s", type(exc).__name__)
         return None
     foods = body.get("foods") if isinstance(body, dict) else None
-    chosen = select(text, foods or [])
+    found = [food for food in foods or [] if isinstance(food, dict)]
+    if len(_rows_cache) >= _CACHE_MAX:
+        _rows_cache.pop(next(iter(_rows_cache)))
+    _rows_cache[key] = (time.monotonic() + CACHE_TTL_SECONDS, found)
+    return deepcopy(found)
+
+
+async def rows(query: str, *, require_all: bool = True, post: PostFn | None = None) -> list[dict[str, Any]]:
+    """The raw FDC rows for ``query``, for callers that rank them themselves."""
+    text = " ".join(str(query or "").split())
+    if not text or len(text) > 120 or not api_key():
+        return []
+    return await _search(text, require_all=require_all, post=post) or []
+
+
+async def lookup(query: str, *, post: PostFn | None = None) -> dict[str, Any] | None:
+    """One whole-food lookup; ``None`` when unconfigured, unavailable or no exact row."""
+    text = " ".join(str(query or "").split())
+    if not text or len(text) > 120 or not api_key():
+        return None
+    key = text.casefold()
+    cached = _cache.get(key)
+    if cached and cached[0] > time.monotonic():
+        return deepcopy(cached[1])
+    foods = await _search(text, post=post)
+    if foods is None:
+        return None
+    chosen = select(text, foods)
     result = to_result(chosen) if chosen else None
     _remember(key, result)
     return deepcopy(result)
@@ -277,6 +306,7 @@ async def lookup(query: str, *, post: PostFn | None = None) -> dict[str, Any] | 
 
 def clear_cache() -> None:
     _cache.clear()
+    _rows_cache.clear()
 
 
-__all__ = ["lookup", "select", "to_result", "clear_cache", "api_key"]
+__all__ = ["lookup", "rows", "select", "to_result", "clear_cache", "api_key"]

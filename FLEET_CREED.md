@@ -47,7 +47,12 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 - Food logging requires a real `macro_source` — the domain layer rejects
   estimate/guess placeholders.
 
-## Roles — lean fleet (no stepping on each other)
+## Roles — default owners (hybrid repo)
+
+This is a hybrid repo worked on by many agents. The Agent, Owns and Boundaries
+columns below are defaults for routing work, not locks: any agent may work in any
+area (backend, iOS, tests, docs) when its task calls for it. What still binds
+everyone: one writer per brief, no self-review, the guardrails, and the data gates.
 
 | Role | Agent | Owns | Boundaries |
 |---|---|---|---|
@@ -64,7 +69,7 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 
 ### Legacy role aliases and ownership detail
 
-| Role | Agent | Owns | Never touches |
+| Role | Agent | Usually owns | Usually leaves to others |
 |---|---|---|---|
 | **Orchestrator** | Hermes | Planning, triage, dispatch, review aggregation, deploy | Writing feature code directly |
 | **UI Builder** | Sol/Grok (Codex, VM) | `ios/` SwiftUI: screens, theme, components, Keychain | Backend logic, schema |
@@ -78,8 +83,9 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 - Each brief has exactly one writer. If ownership changes, the orchestrator
   records an explicit handoff before the new writer proceeds.
 - Backend and iOS feature work use separate briefs and separate commits.
-- If you see a problem outside your assigned paths or role, report it to the
-  orchestrator; do not fix it uninvited.
+- Areas are not locked to one agent. If your task needs a change in another
+  area, make it. A problem unrelated to your task is reported to the
+  orchestrator rather than fixed on the side (see Least surprise).
 - Writing Swift files does NOT require Xcode, but the final build and device
   verification require the appropriate Apple tooling.
 - Reviewers review, they don't rewrite. If a fix is needed, the orchestrator
@@ -115,7 +121,8 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 ### Operational ownership detail
 
 1. **Hermes** writes the brief (what + constraints + who owns it).
-2. **Owning builder** implements (Sol for backend, Sol/Grok for SwiftUI — all Codex).
+2. **Owning builder** implements (by default Sol for backend and Sol/Grok for
+   SwiftUI; any agent may take either).
 3. **Reviewers** inspect: Fable (design/idioms) + Grok (edge cases).
    Independent, parallel. Fable's Claude
    session cap (8pm UTC) is known — when capped, Sol/Grok carry design review.

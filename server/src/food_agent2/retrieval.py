@@ -129,6 +129,28 @@ def _typical(identity: FoodIdentity) -> ResolvedFood | None:
         panel=panel, attribution={"verification_state": "typical_serving_estimate"})
 
 
+def named_unit(found: Mapping[str, Any], portion: Portion) -> Mapping[str, Any]:
+    """A curated row measured in the unit the user named ("1 tbsp", "2 slices"), from the row's own
+    per-unit weights, so the amount counts instead of becoming a question. Otherwise unchanged."""
+    weights, per_100g = found.get("unit_grams"), found.get("macros_per_100g")
+    if portion.kind == "mass" or not isinstance(weights, Mapping) or not isinstance(per_100g, Mapping):
+        return found
+    if portion.kind == "volume":
+        unit = portion.unit if portion.unit in weights else None
+    else:
+        unit = next((word for word in re.findall(r"[a-z]+", portion.text.casefold()) if word in weights), None)
+    if unit is None:
+        return found
+    if unit.endswith("s") and unit[:-1] in weights:
+        unit = unit[:-1]
+    grams = float(weights[unit])
+    if not grams > 0:
+        return found
+    return {**found, "serving_size": f"1 {unit} ({grams:g} g)",
+            "macros_per_serving": {key: None if value is None else round(float(value) * grams / 100, 2)
+                                   for key, value in per_100g.items()}}
+
+
 def _row_complete(row: Mapping[str, Any]) -> bool:
     nutrients = usda_lookup._nutrients(dict(row))
     return nutrients["calories"] is not None and not ((nutrients["carbs"] or 0) > 0 and nutrients["fiber"] is None)
@@ -218,6 +240,8 @@ class Retrieval:
     def _food(found: Mapping[str, Any], query: str, portion: Portion) -> ResolvedFood | None:
         if str((found.get("attribution") or {}).get("provider")) == "USDA FDC":
             found = usda_lookup.for_portion(dict(found), query, portion.text, portion.kind)
+        else:
+            found = named_unit(found, portion)
         return to_resolved_food(found)
 
     async def _closest_row(self, identity, portion, query, scope) -> Found | None:

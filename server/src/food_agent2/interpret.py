@@ -36,11 +36,13 @@ Portion:
 - serving_fraction for "half", "a quarter". count for "3", "2 slices". mass for weights, volume for liquids. unspecified
   when no amount was given. A bare "oz" is unit "oz"; fluid ounces are "fl_oz". portion.text is the user's own words
   for the amount, with the unit word ("2 slices", "1 piece"), or "" when none.
+- An amount the user gives against a whole they name in the same unit is that fraction of a serving: "6 oz instead
+  of 12" and "6 of the 12 oz" are serving_fraction 0.5, text "6 oz of 12".
 
 Changing what is open:
 - open_drafts and last_logged list current items with their item_ref. To change one use revise_item with that ref and
   ONLY the fields that change, leaving the rest null. Never add a food that is already listed; revise it.
-- "6 oz instead of 12" changes the portion only. "quarter pounder with cheese" after a half quarter pounder changes
+- "6 oz instead of 12" changes the portion only (serving_fraction 0.5). "quarter pounder with cheese" after a half quarter pounder changes
   identity.name only, so the half is kept. "Yes but 6 oz" is a revise_item.
 - A short reply to last_question belongs to that draft: "raw" sets preparation on that item, "8 oz" sets its portion.
 - "remove the X", "no X": remove_item on it. "just log the tuna": remove_item on every other item, plus settle.

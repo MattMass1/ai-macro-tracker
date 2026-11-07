@@ -587,7 +587,8 @@ class FoodAgent2:
                     assumed.append(amount_key)
                 elif amount_key not in asked:
                     name, basis = item.resolved.display_name, item.resolved.serving_basis
-                    serving = f" One serving is {basis.text}." if basis.basis == "per_serving" and basis.text else ""
+                    says_more = basis.text and basis.text.strip().casefold() not in ("serving", "1 serving")
+                    serving = f" One serving is {basis.text}." if basis.basis == "per_serving" and says_more else ""
                     question = question or (amount_key, f"How much {name} did you have?{serving}"[:300])
 
         if question is not None:
@@ -595,7 +596,14 @@ class FoodAgent2:
         ready = [i for i in items if is_ready(i, unknown_ok)]
         if target.is_amend and len(ready) < sum(1 for i in target.items if i.resolved is not None and
                                                 i.item_ref in {x.item_ref for x in items}):
-            # Nothing the saved meal counts is ever dropped by a failed refresh.
+            # Nothing the saved meal counts is ever dropped by a failed refresh or an unfound change.
+            before = {i.item_ref: i for i in target.items}
+            changed = [user_words(i.identity) for i in items if i.item_ref in before
+                       and before[i.item_ref].resolved is not None and not is_ready(i, unknown_ok)
+                       and i.identity != before[i.item_ref].identity]
+            if changed:
+                return _result(f"I couldn't find {_join(changed)}, so I left the meal as it was.",
+                               "error", "not_applied")
             return _result("I couldn't reload everything in that meal, so I left it as it was. Try again in a moment.",
                            "error", "not_applied")
         asked_keys, assumed_keys = tuple(dict.fromkeys(asked)), tuple(dict.fromkeys(assumed))
@@ -617,7 +625,8 @@ class FoodAgent2:
                 return _result("That meal just changed somewhere else. Tell me again what to change?", "conflict",
                                "not_applied")
             names = self._not_counted(items, unknown_ok)
-            return _result(f"Not counted: {_join(names)}. {ADD_IT}", "needs_detail", "not_applied", draft_id=saved.id)
+            ask = "What was it, so I can add it?" if len(names) == 1 else "What were they, so I can add them?"
+            return _result(f"Not counted: {_join(names)}. {ask}", "needs_detail", "not_applied", draft_id=saved.id)
 
         digest = content_hash(ready)
         waiting = Waiting(stage="preview", revision=revision, content_hash=digest, session_ref=session_ref,

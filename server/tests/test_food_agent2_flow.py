@@ -570,3 +570,39 @@ async def test_model_sees_only_short_fixed_context():
     context = rig.script.calls[-1][1]
     assert set(context) == {"now", "last_question", "open_drafts", "last_logged"}
     assert context["open_drafts"][0]["items"][0]["item_ref"] == "i1"
+
+
+# ---------------------------------------------------------------- live bench 2026-11-07
+
+
+async def test_food_nothing_has_ends_with_a_question():
+    rig = Rig()
+    rig.script.push(add((ident("ahi tuna bowl"), ONE)))
+    result = await rig.say("I had an ahi tuna bowl")
+    assert result.reply.startswith("Not counted: ahi tuna bowl.") and result.reply.endswith("?")
+    assert not rig.entries
+
+
+async def test_amount_question_never_says_one_serving_is_one_serving():
+    sources = FakeSources(hits={"smoothie king choc-a-laka": [
+        {"food_id": "5", "food_name": "Choc-A-Laka", "brand_name": "Smoothie King"}]},
+        foods={"5": fatsecret("Choc-A-Laka", "Smoothie King", "5")})
+    rig = Rig(sources)
+    rig.script.push(add((ident("Choc-A-Laka", "Smoothie King", "restaurant"),
+                         portion("volume", 6, "fl_oz", "6 oz"))))
+    result = await rig.say("6 oz Choc-A-Laka from Smoothie King")
+    assert result.reply.startswith("How much ") and "One serving is 1 serving" not in result.reply
+
+
+async def test_changing_a_saved_food_to_one_nothing_has_names_it_and_keeps_the_meal():
+    sources = club_sources()
+    sources.exact_rows["eggs"] = curated_egg()
+    rig = Rig(sources)
+    rig.script.push(add(CLUB, (ident("eggs"), THREE)))
+    await rig.say("club and 3 eggs")
+    await rig.say("yes")
+    saved = dict(rig.entries[0])
+    rig.script.push(revise("i2", identity=ident("ostrich eggs")))
+    result = await rig.say("they were ostrich eggs")
+    assert result.reply.casefold() == "i couldn't find ostrich eggs, so i left the meal as it was."
+    assert rig.entries == [saved]

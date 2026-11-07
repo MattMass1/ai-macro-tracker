@@ -282,3 +282,55 @@ async def test_per_turn_cap_stops_network_calls():
     for number in range(8):
         await retrieval.find(identity(f"Food {number}", "Acme", "packaged"), ONE, scope)
     assert len([c for c in sources.calls if c[0] != "exact"]) <= 3
+
+
+# ---------------------------------------------------------------- the unit the user named
+
+
+@pytest.mark.parametrize("words,amount,expected", [("1 tablespoon", 1, 1.0), ("0.5 tbsp", 0.5, 0.5)])
+async def test_a_spoon_of_a_curated_fat_counts_without_a_question(words, amount, expected):
+    import food_lookup
+    from food_agent.portion import multiplier
+    spoon = Portion(kind="volume", amount=amount, unit="tbsp", text=words)
+    sources = FakeSources(exact={"butter": food_lookup.resolve_generic_whole_food("butter")})
+    found = await find(sources, identity("butter"), spoon)
+    assert found.food is not None and found.food.serving_basis.grams == pytest.approx(14.2)
+    assert float(multiplier(spoon, found.food.serving_basis, identity("butter"))) == pytest.approx(expected)
+    assert found.food.panel.calories == pytest.approx(105.6, abs=0.2), "one tablespoon, not 100 g"
+
+
+async def test_pieces_of_a_curated_food_use_its_piece_weight():
+    import food_lookup
+    from food_agent.portion import multiplier
+    pieces = Portion(kind="count", amount=2, text="2 pieces")
+    sources = FakeSources(exact={"bacon": food_lookup.resolve_generic_whole_food("bacon")})
+    found = await find(sources, identity("bacon"), pieces)
+    assert found.food.serving_basis.grams == pytest.approx(8)
+    assert float(multiplier(pieces, found.food.serving_basis, identity("bacon"))) == pytest.approx(2)
+
+
+def test_a_piece_of_toast_is_the_rows_slice_unless_a_piece_is_listed():
+    import usda_lookup
+    toast = {"description": "toasted sourdough toast", "foodMeasures": [
+        {"disseminationText": "1 slice", "gramWeight": 32}]}
+    assert usda_lookup._portion(toast, "1 piece of sourdough toast") == ("1 slice", 32.0)
+    toast["foodMeasures"].append({"disseminationText": "1 piece", "gramWeight": 40})
+    assert usda_lookup._portion(toast, "1 piece of sourdough toast") == ("1 piece", 40.0)
+
+
+async def test_one_fatsecret_food_asked_for_twice_in_a_minute_is_one_request(monkeypatch):
+    import food_lookup
+    calls = []
+
+    async def request(data):
+        calls.append(data["food_id"])
+        return {"food": {"food_id": data["food_id"], "food_name": "Royal Crispy Wrap"}} if data["food_id"] == "7" else None
+
+    monkeypatch.setattr(food_lookup, "_fatsecret_request", request)
+    food_lookup.clear_search_cache()
+    first = await food_lookup._fatsecret_food("7")
+    first["food_name"] = "changed by a caller"
+    assert (await food_lookup._fatsecret_food("7"))["food_name"] == "Royal Crispy Wrap"
+    assert calls == ["7"]
+    assert await food_lookup._fatsecret_food("8") is None and await food_lookup._fatsecret_food("8") is None
+    assert calls == ["7", "8", "8"], "a failed request is never remembered"

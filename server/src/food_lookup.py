@@ -150,6 +150,9 @@ _SEARCH_HITS_MAX = 128
 _SEARCH_MAX_RESULTS = 8
 _SEARCH_MAX_INSPECT = 2
 _search_hits: OrderedDict[str, tuple[float, list[Any]]] = OrderedDict()
+# food.get.v4 bodies by id, kept for the same short window: the resolver, the
+# food agent's own ranking and the next turn's refresh ask for one food moments apart.
+_food_details: OrderedDict[str, tuple[float, Any]] = OrderedDict()
 # Queries whose Layer 1 hits were close variants: the answer is a question, so
 # the web fallback (up to 12 s) is skipped for them while the search is fresh.
 _ambiguous_queries: OrderedDict[str, float] = OrderedDict()
@@ -452,7 +455,25 @@ def _full_query_relevant(query: str, food: Mapping[str, Any]) -> bool:
 
 def clear_search_cache() -> None:
     _search_hits.clear()
+    _food_details.clear()
     _ambiguous_queries.clear()
+
+
+async def _fatsecret_food(food_id: str) -> Any:
+    """food.get.v4 for one id, served from the fresh remembered body when the
+    same id was fetched moments ago. A failed request remembers nothing."""
+    key = str(food_id)
+    cached = _food_details.get(key)
+    if cached is not None and time.monotonic() - cached[0] <= _SEARCH_HITS_TTL_SECONDS:
+        _food_details.move_to_end(key)
+        return json.loads(json.dumps(cached[1]))
+    food = _unwrap_food(await _fatsecret_request({"method": "food.get.v4", "food_id": key}))
+    if food is not None:
+        _food_details[key] = (time.monotonic(), json.loads(json.dumps(food)))
+        _food_details.move_to_end(key)
+        while len(_food_details) > _SEARCH_HITS_MAX:
+            _food_details.popitem(last=False)
+    return food
 
 
 def _remember_ambiguous(query: str) -> None:
@@ -587,7 +608,7 @@ async def search_fatsecret(query: str, *, assume_variant: bool = False) -> dict[
         assumed = ranked[0]
     for candidate in ranked[:_SEARCH_MAX_INSPECT]:
         food_id = str(candidate["food_id"])
-        food = _unwrap_food(await _fatsecret_request({"method":"food.get.v4", "food_id":food_id}))
+        food = await _fatsecret_food(food_id)
         if food is None or not _fatsecret_relevant(query, food):
             continue
         result = _fatsecret_result(query, food_id, food, candidate)
@@ -613,7 +634,7 @@ async def fatsecret_detail(food_id: str, query: str, hit: Mapping[str, Any]) -> 
     """One food by id, in the resolver's shape. The caller decides whether it is the right food."""
     if _fatsecret_provider_mode() is None:
         return None
-    food = _unwrap_food(await _fatsecret_request({"method": "food.get.v4", "food_id": str(food_id)}))
+    food = await _fatsecret_food(str(food_id))
     return _fatsecret_result(query, str(food_id), food, hit) if food is not None else None
 
 

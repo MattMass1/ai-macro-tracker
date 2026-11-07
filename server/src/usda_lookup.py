@@ -128,6 +128,9 @@ def _portion(food: dict[str, Any], requested: str = "") -> tuple[str, float] | N
         if not qualifiers <= tokens:
             continue
         candidates.append((text, float(grams)))
+    if not candidates and "piece" in requested_tokens:
+        # A "piece" of toast or bread is the row's slice when no measure says piece.
+        return _portion(food, re.sub(r"\bpieces?\b", "slice", requested, flags=re.IGNORECASE))
     if not candidates or len({grams for _, grams in candidates}) != 1:
         return None
     return min(candidates, key=lambda item: item[0].casefold())

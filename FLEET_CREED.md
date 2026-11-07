@@ -55,7 +55,7 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 | **Primary Builder** | Sol/Codex | Backend, API, auth, database, and complex Swift logic | Does not approve its own work |
 | **Design and Architecture Specialist** | Fable/Claude | SwiftUI and Apple-native design, architecture review, and high-risk cross-family review | Used on demand, not for mechanical work; does not approve its own work |
 | **Mechanical Worker** | Luna/Codex | Tests, fixtures, safe scripts, dry-run reports, pre/post counts, and release-checklist collection | Cannot independently approve destructive work or make architecture decisions |
-| **Quality and Data Safety Reviewer** | Dynamic cross-family assignment | Tenancy, canonical account identity, idempotency, duplicate detection, data integrity, migrations/backfills, and rollback assertions | Sol-written work is reviewed by Fable; Fable-written work by Sol; Luna/Grok work by Sol or Fable |
+| **Quality and Data Safety Reviewer** | Any agent other than the writer | Tenancy, canonical account identity, idempotency, duplicate detection, data integrity, migrations/backfills, and rollback assertions | No fixed reviewer pairing: this is a hybrid repo worked on by many agents. The reviewer is never the writer |
 | **Release and Operations Verifier** | Independent closer: Luna for routine verification; Sol for high-risk account, migration, or destructive releases | Deployed commit, correct immutable account ID, production smoke tests, cron/model/config drift, TestFlight/device evidence, and final go/no-go | Must be independent of the work being verified; alone may close an incident |
 | **Research and Overflow** | Grok/Cursor | Research, adversarial edge-case brainstorming, and overflow | Not a permanent correctness reviewer and cannot review its own work |
 | **Contract Owner** | Temporary designation on one existing builder | Canonical contract decisions and fixture coordination for a cross-surface task | Not a separate agent or standing role |
@@ -84,8 +84,8 @@ small circle of trusted friends via TestFlight. Matt is user #1.
   verification require the appropriate Apple tooling.
 - Reviewers review, they don't rewrite. If a fix is needed, the orchestrator
   routes it back to the owning builder.
-- A writer never reviews or approves its own work. Cross-family review is
-  mandatory as defined in the roles table.
+- A writer never reviews or approves its own work. Any other agent may
+  review it; there is no required pairing (no mandatory Sol review).
 - Any agent may refuse a task that violates the creed — but the orchestrator
   (Hermes) resolves role assignments per Matt's direction, and its routing
   decisions update this creed.
@@ -98,8 +98,8 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 2. **One writer:** the owning writer implements within the brief.
 3. **Automated verification:** the writer runs the relevant full checks and
    records evidence without claiming production or device success.
-4. **Independent Quality and Data Safety review:** the assigned cross-family
-   reviewer checks the diff, contract, tenancy, and any data-safety concerns.
+4. **Independent Quality and Data Safety review:** a reviewer other than the
+   writer checks the diff, contract, tenancy, and any data-safety concerns.
 5. **Optional Fable design review:** add this gate for SwiftUI, Apple-native
    design, architecture, or other high-risk cross-family concerns.
 6. **Owning writer fixes:** findings return to the same writer.
@@ -116,8 +116,8 @@ small circle of trusted friends via TestFlight. Matt is user #1.
 
 1. **Hermes** writes the brief (what + constraints + who owns it).
 2. **Owning builder** implements (Sol for backend, Sol/Grok for SwiftUI — all Codex).
-3. **Reviewers** inspect: Fable (design/idioms) + Grok (edge cases), and Sol
-   for contract when backend touched. Independent, parallel. Fable's Claude
+3. **Reviewers** inspect: Fable (design/idioms) + Grok (edge cases).
+   Independent, parallel. Fable's Claude
    session cap (8pm UTC) is known — when capped, Sol/Grok carry design review.
 4. **Hermes** aggregates findings, routes fixes back to the owner.
 5. **Re-review** until approved. Then commit + push.

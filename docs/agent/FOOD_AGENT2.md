@@ -47,6 +47,18 @@ pizza", then "Domino's pizza") and ranked against what was said. Among a product
 servings, the one naming the user's unit is used ("whole pie" takes "1 pizza", no
 amount on a pizza takes the pizza); a pizza sold only by the slice asks how many slices.
 
+### Menu picker (the agentic step)
+
+Word rules cannot know every chain's menu. When no candidate is a clear word match
+(score below 0.9), `food_agent2/menu_pick.py` makes one strict JSON model call with the
+user's words and the same-brand candidates code found, and the model returns the id of
+the item the user meant, using what it knows about the chain (a "personal" pizza is the
+chain's smallest, no topping named is cheese). It can only return an id it was offered;
+code has already removed candidates that are a different food (species, flavor, variant,
+a stated size). If none fits, it may give two searches in the chain's own words, and code
+searches once more and asks again. A failed call, or `FOOD_AGENT2_MENU_PICK=false`, falls
+back to the word ranking.
+
 ## Serving units
 
 `server/src/serving_units.py` decides in code what one of a food is counted in: bread

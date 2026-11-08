@@ -33,7 +33,7 @@ import usda_lookup
 from food_agent import portion as portion_math
 from food_agent.contracts import DraftItemState, FoodIdentity, NutrientPanel, Portion, ResolvedFood
 from food_agent.find_food import identity_query, to_resolved_food, with_serving_unit
-from food_agent2 import match
+from food_agent2 import match, menu_pick
 from food_agent2.sources import Sources
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,8 @@ logger = logging.getLogger(__name__)
 MAX_CALLS_PER_TURN = 8
 MAX_WEB_PER_TURN = 2
 _MAX_FETCHES = 2
+# A word score this high is the item as named: no inference needed.
+CLEAR_MATCH = 0.9
 _FORM_PENALTY = 0.03
 _TRAILING_CATEGORY = re.compile(r"\s+(?:sandwich|meal|combo|entree|dish|item)$", re.IGNORECASE)
 
@@ -183,8 +185,10 @@ def _pick_row(identity: FoodIdentity, wanted: str, rows: Any) -> Mapping[str, An
 
 
 class Retrieval:
-    def __init__(self, sources: Sources, *, max_calls: int = MAX_CALLS_PER_TURN, max_web: int = MAX_WEB_PER_TURN):
+    def __init__(self, sources: Sources, *, max_calls: int = MAX_CALLS_PER_TURN, max_web: int = MAX_WEB_PER_TURN,
+                 picker: Callable[..., Awaitable[menu_pick.Pick]] | None = None):
         self.sources = sources
+        self.picker = picker
         self.max_calls, self.max_web = max_calls, max_web
 
     def scope(self) -> Scope:
@@ -266,26 +270,79 @@ class Retrieval:
         return None
 
     async def _closest_product(self, identity, portion, query, scope) -> Found | None:
-        """The closest product under the same brand. When the full phrase finds nothing, the
-        search is retried in simpler words ("Domino's cheese pizza", then "Domino's pizza"):
-        a provider's search is literal, the ranking below is not."""
+        """The product the user named, under the same brand.
+
+        Code searches (the phrase as said, then simpler words) and keeps only candidates that
+        are not a different food. A clear word match is used as is. Otherwise the menu picker
+        infers which candidate the user meant from what it knows about the chain, and may
+        suggest the chain's own wording for one more search. Without a picker, or when it
+        picks nothing, the closest word match above the floor is used, as before.
+        """
         asked = match.asked_text(identity)
         # No amount said: the serving that is the named thing itself ("personal pizza" is a pizza,
         # not the provider's first listed slice).
         named = re.findall(r"[a-z]+", food_words.normalize(identity.name).casefold())
         prefer = portion.text.strip() or (named[-1] if named else "")
+        pool: dict[str, tuple[float, int, Mapping[str, Any]]] = {}
+
+        async def search(text: str) -> None:
+            hits = await scope.call(("hits", text.casefold()), lambda: self.sources.hits(text), default=[])
+            for key in _candidates(identity, asked, hits):
+                food_id = str(key[2]["food_id"])
+                if food_id not in pool or key[0] > pool[food_id][0]:
+                    pool[food_id] = (key[0], len(pool), key[2])
+
+        async def fetch(hit: Mapping[str, Any]) -> Found | None:
+            food_id = str(hit["food_id"])
+            found = await scope.call(("food", food_id, prefer),
+                                     lambda: self.sources.food(food_id, query, hit, prefer=prefer))
+            food = with_serving_unit(to_resolved_food(found) if isinstance(found, Mapping) else None, query, portion)
+            return _branded(food, identity, "verified") if food is not None else None
+
         for text in search_queries(identity, query):
-            hits = await scope.call(("hits", text.casefold()), lambda text=text: self.sources.hits(text), default=[])
-            for hit in _ranked_products(identity, asked, hits)[:_MAX_FETCHES]:
-                food_id = str(hit["food_id"])
-                found = await scope.call(("food", food_id, prefer),
-                                         lambda food_id=food_id, hit=hit: self.sources.food(
-                                             food_id, query, hit, prefer=prefer))
-                food = with_serving_unit(to_resolved_food(found) if isinstance(found, Mapping) else None,
-                                         query, portion)
-                if food is not None:
-                    return _branded(food, identity, "verified")
+            await search(text)
+            if any(score >= CLEAR_MATCH for score, _o, _h in pool.values()):
+                break
+
+        clear = [hit for score, _o, hit in _best_first(pool) if score >= CLEAR_MATCH]
+        for hit in clear[:_MAX_FETCHES]:
+            found = await fetch(hit)
+            if found is not None:
+                return found
+
+        if self.picker is not None and menu_pick.enabled():
+            said = {"brand": identity.brand, "item": identity.name, "variant": identity.variant,
+                    "preparation": identity.preparation, "amount_words": portion.text}
+            for _round in range(2):
+                offered = [hit for _s, _o, hit in _best_first(pool)][:menu_pick.MAX_CANDIDATES]
+                pick = await self._pick(said, offered) if offered or _round == 0 else menu_pick.NO_PICK
+                chosen = next((hit for hit in offered if str(hit["food_id"]) == pick.food_id), None)
+                if chosen is not None:  # only a record code offered, whatever the model says
+                    found = await fetch(chosen)
+                    if found is not None:
+                        return found
+                    break
+                if pick.food_id is not None:
+                    break
+                if not pick.search:
+                    break
+                for text in pick.search:
+                    await search(text)
+
+        for hit in [hit for score, _o, hit in _best_first(pool) if score >= match.MIN_CLOSENESS][:_MAX_FETCHES]:
+            found = await fetch(hit)
+            if found is not None:
+                return found
         return None
+
+    async def _pick(self, said: Mapping[str, Any], offered: list[Mapping[str, Any]]) -> menu_pick.Pick:
+        candidates = [{"id": str(hit["food_id"]), "name": str(hit.get("food_name") or ""),
+                       "brand": str(hit.get("brand_name") or "")} for hit in offered]
+        try:
+            return await self.picker(said, candidates)
+        except Exception as exc:  # noqa: BLE001 - the picker is an aid; the code ranking still answers
+            logger.info("food retrieval: menu pick failed: %s", type(exc).__name__)
+            return menu_pick.NO_PICK
 
     # ------------------------------------------------------------ restoring a draft
 
@@ -326,10 +383,10 @@ def search_queries(identity: FoodIdentity, query: str) -> list[str]:
     return list({text.casefold(): text for text in out if text.strip()}.values())
 
 
-def _ranked_products(identity: FoodIdentity, asked: str, hits: Any) -> list[Mapping[str, Any]]:
-    """Hits under the same brand that are not a different food, closest first. On a tie the plain
-    version wins when the user named no topping or flavor ("personal pizza" is cheese)."""
-    ranked = []
+def _candidates(identity: FoodIdentity, asked: str, hits: Any) -> list[tuple[float, int, Mapping[str, Any]]]:
+    """Hits under the same brand that are not a different food, with their word score. A plain
+    version (cheese, original) gets a hair more when the user named no topping or flavor."""
+    out = []
     asked_words = match.tokens(asked)
     for order, hit in enumerate(hits or []):
         if not isinstance(hit, Mapping) or not hit.get("food_id"):
@@ -339,11 +396,14 @@ def _ranked_products(identity: FoodIdentity, asked: str, hits: Any) -> list[Mapp
             continue
         if match.conflict(asked, name):
             continue
-        score = match.closeness(asked, name, identity.brand or brand)
-        if score >= match.MIN_CLOSENESS:
-            plain = bool((match.tokens(name) - asked_words) & _PLAIN_DEFAULTS)
-            ranked.append((-round(score, 4), not plain, order, hit))
-    return [hit for *_key, hit in sorted(ranked, key=lambda entry: entry[:3])]
+        plain = bool((match.tokens(name) - asked_words) & _PLAIN_DEFAULTS)
+        out.append((round(match.closeness(asked, name, identity.brand or brand), 4) + (0.001 if plain else 0.0),
+                    order, hit))
+    return out
+
+
+def _best_first(pool: Mapping[str, tuple[float, int, Mapping[str, Any]]]) -> list[tuple[float, int, Mapping[str, Any]]]:
+    return sorted(pool.values(), key=lambda entry: (-entry[0], entry[1]))
 
 
 def found_text(found: Mapping[str, Any]) -> str:

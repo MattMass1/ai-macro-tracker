@@ -4441,13 +4441,15 @@ async def _food_agent_engine():
             from food_agent.drafts import StoreDrafts
             from food_agent2.history import HistoryRecall
             from food_agent2.interpret import ModelInterpreter
+            from food_agent2.menu_pick import MenuPicker
             from food_agent2.retrieval import Retrieval
             from food_agent2.sources import LiveSources
             from food_agent2.turn import FoodAgent2
         except ImportError:
             logger.exception("food_agent2 modules unavailable; using the existing canvas path")
             return None
-        return FoodAgent2(StoreDrafts(client), ModelInterpreter(), Retrieval(LiveSources()), HistoryRecall(client))
+        return FoodAgent2(StoreDrafts(client), ModelInterpreter(), Retrieval(LiveSources(), picker=MenuPicker()),
+                          HistoryRecall(client))
     try:
         from food_agent.coordinator import FoodAgent
         from food_agent.drafts import StoreDrafts

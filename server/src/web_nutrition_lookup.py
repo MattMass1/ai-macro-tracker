@@ -234,7 +234,10 @@ def _bounded_number(value: Any, *, positive=False) -> float:
 
 
 def _tokens(value: str) -> set[str]:
-    return {token for token in re.findall(r"[a-z0-9]+", value.casefold())
+    """Identity words, with sizes and diameters in one wording on both sides ("personal" is
+    small, `10"` is 10 inch), so a page's "Small (10")" is the user's "personal 10 inch"."""
+    import food_words  # noqa: PLC0415 (pure module)
+    return {token for token in re.findall(r"[a-z0-9]+", food_words.normalize(value).casefold())
             if token not in {"a", "an", "the", "g", "gram", "grams", "serving"}}
 
 

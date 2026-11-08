@@ -547,7 +547,7 @@ def _rank_hits(query: str, hits: list[Any]) -> list[Mapping[str, Any]]:
 
 
 def _fatsecret_result(query: str, food_id: str, food: Mapping[str, Any],
-                      candidate: Mapping[str, Any]) -> dict[str, Any] | None:
+                      candidate: Mapping[str, Any], prefer: str = "") -> dict[str, Any] | None:
     # A search hit alone is not nutrition evidence. Only an exact identity
     # carried through the requested detail record earns the provider state;
     # this deliberately does not claim official-menu or barcode verification.
@@ -560,7 +560,7 @@ def _fatsecret_result(query: str, food_id: str, food: Mapping[str, Any],
     )
     servings_value = food.get("servings")
     if isinstance(servings_value, Mapping): servings_value = servings_value.get("serving")
-    for serving in _as_list(servings_value):
+    for serving in _preferred_serving(_as_list(servings_value), prefer):
         if not isinstance(serving, Mapping): continue
         macros = _macros({k: serving.get({"calories":"calories","protein":"protein","carbs":"carbohydrate","fat":"fat","fiber":"fiber"}[k]) for k in MACRO_KEYS})
         if macros is None: continue
@@ -630,12 +630,45 @@ async def fatsecret_candidates(query: str) -> list[Mapping[str, Any]]:
     return [hit for hit in await _fatsecret_search_hits(query) if isinstance(hit, Mapping)]
 
 
-async def fatsecret_detail(food_id: str, query: str, hit: Mapping[str, Any]) -> dict[str, Any] | None:
-    """One food by id, in the resolver's shape. The caller decides whether it is the right food."""
+async def fatsecret_detail(food_id: str, query: str, hit: Mapping[str, Any],
+                           prefer: str = "") -> dict[str, Any] | None:
+    """One food by id, in the resolver's shape. The caller decides whether it is the right food.
+    ``prefer`` (the user's amount words) picks among the food's servings."""
     if _fatsecret_provider_mode() is None:
         return None
     food = await _fatsecret_food(str(food_id))
-    return _fatsecret_result(query, str(food_id), food, hit) if food is not None else None
+    return _fatsecret_result(query, str(food_id), food, hit, prefer=prefer) if food is not None else None
+
+
+_SERVING_NOISE = frozenset({"a", "an", "the", "of", "one", "serving", "servings", "about", "my", "x"})
+
+
+def _serving_unit_words(text: str) -> set[str]:
+    """The unit words of a serving or an amount, outside parentheses: "1 pizza (10\")" -> {pizza},
+    "whole pie" -> {pizza}, "2 slices" -> {slice}."""
+    import food_words  # noqa: PLC0415 (pure module)
+    outer = re.sub(r"\([^)]*\)", " ", food_words.normalize(text or "")).casefold()
+    words = set()
+    for word in re.findall(r"[a-z]+", outer):
+        if word in _SERVING_NOISE or word == "inch":
+            continue
+        words.add(word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word)
+    return words
+
+
+def _preferred_serving(servings: list[Any], prefer: str) -> list[Any]:
+    """Servings in the order to try: the user's exact serving text, then one naming the same
+    unit ("whole pie" -> "1 pizza", "2 slices" -> "1 slice"), then the provider's order."""
+    if not prefer:
+        return servings
+    wanted, exact = _serving_unit_words(prefer), " ".join(prefer.casefold().split())
+    def rank(item: tuple[int, Any]) -> tuple[int, int]:
+        index, serving = item
+        description = str(serving.get("serving_description") or "") if isinstance(serving, Mapping) else ""
+        if " ".join(description.casefold().split()) == exact:
+            return (0, index)
+        return (1 if wanted and wanted & _serving_unit_words(description) else 2, index)
+    return [serving for _index, serving in sorted(enumerate(servings), key=rank)]
 
 
 async def fatsecret_name_options(query: str, limit: int = 3) -> list[str]:
@@ -675,7 +708,8 @@ def _macros(values: Mapping[str, Any]) -> dict[str, float] | None:
         raw = values.get(key, 0 if key != "calories" else None)
         try: value = float(raw)
         except (TypeError, ValueError): return None
-        if not math.isfinite(value) or value < 0 or value > 1000: return None
+        # A whole pizza or a large burrito is well over 1000 kcal; grams of a macro are not.
+        if not math.isfinite(value) or value < 0 or value > (5000 if key == "calories" else 1000): return None
         result[key] = round(value, 2)
     return result if result["calories"] > 0 else None
 

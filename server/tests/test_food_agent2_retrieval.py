@@ -66,7 +66,7 @@ class FakeSources:
         self.calls.append(("hits", query.casefold()))
         return self.hit_map.get(query.casefold(), [])
 
-    async def food(self, food_id, query, hit):
+    async def food(self, food_id, query, hit, prefer=""):
         self.calls.append(("food", str(food_id)))
         return self.foods.get(str(food_id))
 

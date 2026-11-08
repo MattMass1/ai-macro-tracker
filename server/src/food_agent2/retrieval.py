@@ -28,6 +28,7 @@ from typing import Any, Literal
 
 import dish_estimates
 import food_lookup
+import food_words
 import usda_lookup
 from food_agent import portion as portion_math
 from food_agent.contracts import DraftItemState, FoodIdentity, NutrientPanel, Portion, ResolvedFood
@@ -96,8 +97,9 @@ def user_words(identity: FoodIdentity) -> str:
 
 
 def web_query(identity: FoodIdentity) -> str:
-    """The web source must repeat every query word, and pages rarely say "sandwich" after the name."""
-    return _TRAILING_CATEGORY.sub("", identity_query(identity))
+    """The web source must repeat every query word, and pages rarely say "sandwich" after the name.
+    Sizes, diameters and amounts are said the way pages say them (food_words)."""
+    return _TRAILING_CATEGORY.sub("", food_words.normalize(identity_query(identity)))
 
 
 def _generic(food: ResolvedFood, identity: FoodIdentity, status: Status) -> Found:
@@ -264,26 +266,25 @@ class Retrieval:
         return None
 
     async def _closest_product(self, identity, portion, query, scope) -> Found | None:
-        hits = await scope.call(("hits", query.casefold()), lambda: self.sources.hits(query), default=[])
+        """The closest product under the same brand. When the full phrase finds nothing, the
+        search is retried in simpler words ("Domino's cheese pizza", then "Domino's pizza"):
+        a provider's search is literal, the ranking below is not."""
         asked = match.asked_text(identity)
-        ranked = []
-        for hit in hits or []:
-            if not isinstance(hit, Mapping) or not hit.get("food_id"):
-                continue
-            name, brand = str(hit.get("food_name") or ""), str(hit.get("brand_name") or "")
-            if identity.brand and not _same_brand(identity.brand, brand, name):
-                continue
-            if match.conflict(asked, name):
-                continue
-            score = match.closeness(asked, name, identity.brand or brand)
-            if score >= match.MIN_CLOSENESS:
-                ranked.append((-score, len(ranked), hit))
-        for _score, _order, hit in sorted(ranked, key=lambda entry: entry[:2])[:_MAX_FETCHES]:
-            food_id = str(hit["food_id"])
-            found = await scope.call(("food", food_id), lambda food_id=food_id, hit=hit: self.sources.food(food_id, query, hit))
-            food = with_serving_unit(to_resolved_food(found) if isinstance(found, Mapping) else None, query, portion)
-            if food is not None:
-                return _branded(food, identity, "verified")
+        # No amount said: the serving that is the named thing itself ("personal pizza" is a pizza,
+        # not the provider's first listed slice).
+        named = re.findall(r"[a-z]+", food_words.normalize(identity.name).casefold())
+        prefer = portion.text.strip() or (named[-1] if named else "")
+        for text in search_queries(identity, query):
+            hits = await scope.call(("hits", text.casefold()), lambda text=text: self.sources.hits(text), default=[])
+            for hit in _ranked_products(identity, asked, hits)[:_MAX_FETCHES]:
+                food_id = str(hit["food_id"])
+                found = await scope.call(("food", food_id, prefer),
+                                         lambda food_id=food_id, hit=hit: self.sources.food(
+                                             food_id, query, hit, prefer=prefer))
+                food = with_serving_unit(to_resolved_food(found) if isinstance(found, Mapping) else None,
+                                         query, portion)
+                if food is not None:
+                    return _branded(food, identity, "verified")
         return None
 
     # ------------------------------------------------------------ restoring a draft
@@ -296,7 +297,9 @@ class Retrieval:
         if food.provider == "FatSecret" and food.external_id:
             query = identity_query(item.identity)
             hit = {"food_id": food.external_id, "food_name": item.identity.name, "brand_name": item.identity.brand or ""}
-            found = await scope.call(("food", food.external_id), lambda: self.sources.food(food.external_id, query, hit))
+            shown = food.serving_basis.text  # the same serving as was shown, so the multiplier keeps its meaning
+            found = await scope.call(("food", food.external_id, shown),
+                                     lambda: self.sources.food(food.external_id, query, hit, prefer=shown))
             fresh = to_resolved_food(found) if isinstance(found, Mapping) else None
         else:
             fresh = (await self.find_on_web(item.identity, item.portion, scope)).food
@@ -305,6 +308,42 @@ class Retrieval:
         if fresh is None:
             return None
         return food.model_copy(update={"panel": fresh.panel, "serving_basis": fresh.serving_basis})
+
+
+_PLAIN_DEFAULTS = frozenset({"cheese", "plain", "original", "classic", "regular"})
+_SIZE_OR_INCH = re.compile(r"\b\d+(?:\.\d+)? inch\b|\b(?:small|medium|large|xl)\b", re.IGNORECASE)
+
+
+def search_queries(identity: FoodIdentity, query: str) -> list[str]:
+    """The provider searches for one named product, most specific first: as said, then without
+    sizes and diameters, then the brand and the food's head word."""
+    out = [query]
+    simpler = " ".join(_SIZE_OR_INCH.sub(" ", food_words.normalize(query)).split())
+    out.append(simpler)
+    words = re.findall(r"[A-Za-z]+", food_words.normalize(identity.name))
+    if identity.brand and words:
+        out.append(f"{identity.brand} {words[-1]}")
+    return list({text.casefold(): text for text in out if text.strip()}.values())
+
+
+def _ranked_products(identity: FoodIdentity, asked: str, hits: Any) -> list[Mapping[str, Any]]:
+    """Hits under the same brand that are not a different food, closest first. On a tie the plain
+    version wins when the user named no topping or flavor ("personal pizza" is cheese)."""
+    ranked = []
+    asked_words = match.tokens(asked)
+    for order, hit in enumerate(hits or []):
+        if not isinstance(hit, Mapping) or not hit.get("food_id"):
+            continue
+        name, brand = str(hit.get("food_name") or ""), str(hit.get("brand_name") or "")
+        if identity.brand and not _same_brand(identity.brand, brand, name):
+            continue
+        if match.conflict(asked, name):
+            continue
+        score = match.closeness(asked, name, identity.brand or brand)
+        if score >= match.MIN_CLOSENESS:
+            plain = bool((match.tokens(name) - asked_words) & _PLAIN_DEFAULTS)
+            ranked.append((-round(score, 4), not plain, order, hit))
+    return [hit for *_key, hit in sorted(ranked, key=lambda entry: entry[:3])]
 
 
 def found_text(found: Mapping[str, Any]) -> str:

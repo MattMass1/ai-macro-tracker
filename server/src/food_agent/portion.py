@@ -478,7 +478,14 @@ def multiplier(portion: Portion, basis: ServingBasis,
     """
     amount = _dec(portion.amount)
     if portion.kind == "unspecified":
-        return Decimal(1) if basis.basis == "per_serving" else None
+        if basis.basis != "per_serving":
+            return None
+        # "A pizza" against a "1 slice" serving is not one slice: how many slices is asked.
+        head = _head_noun(identity.name) if identity is not None else None
+        part = _canonical_units(_noun_tokens(basis.count_noun)) & _SUB_UNITS if basis.unit == "count" else set()
+        if part and head is not None and _member(head, _WHOLE_ITEMS):
+            return None
+        return Decimal(1)
     if amount is None:
         return None
     if portion.kind == "serving_fraction":

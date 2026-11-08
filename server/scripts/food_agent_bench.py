@@ -241,7 +241,7 @@ class ScriptedSources:
     async def hits(self, query):
         return []
 
-    async def food(self, food_id, query, hit):
+    async def food(self, food_id, query, hit, prefer=""):
         for row in self.resolver.table.values():
             if row["attribution"]["external_id"] == food_id:
                 return row

@@ -18,6 +18,7 @@ import unicodedata
 from difflib import SequenceMatcher
 from typing import Any
 
+import food_words
 from food_agent.contracts import FoodIdentity, Portion
 
 MIN_CLOSENESS = 0.5
@@ -58,7 +59,9 @@ _STAPLES = frozenset({"bagel", "bread", "toast", "pizza", "rice", "tortilla", "m
 
 
 def _plain(text: Any) -> str:
-    folded = unicodedata.normalize("NFKD", str(text or "")).encode("ascii", "ignore").decode().casefold()
+    """Folded text in the shared food wording ("personal" is small, `10"` is 10 inch)."""
+    text = food_words.normalize(str(text or ""))
+    folded = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().casefold()
     return re.sub(r"['`]", "", folded).replace("&", " and ")
 
 
@@ -94,8 +97,13 @@ def head_present(asked: Any, candidate: Any) -> bool:
 
 
 def closeness(asked: Any, candidate: Any, brand: Any = "", *, extra_penalty: float = _EXTRA_WORD_PENALTY) -> float:
-    """1.0 means every asked word is there. Extra candidate words cost a little."""
-    brand_tokens = tokens(brand)
+    """1.0 means every asked word is there. Extra candidate words cost a little.
+
+    Brand words are not the food, except the food's own head word: "pizza" in
+    "Domino's Pizza" never erases the pizza the user asked for.
+    """
+    asked_words = [_stem(word) for word in re.findall(r"[a-z0-9]+", _plain(asked)) if word not in _CONNECTIVES]
+    brand_tokens = tokens(brand) - set(asked_words[-1:])
     wanted = tokens(asked) - brand_tokens
     wanted = (wanted - _CATEGORY) or wanted
     offered = tokens(candidate) - brand_tokens - _CATEGORY
@@ -111,7 +119,8 @@ def _ratios(text: Any) -> set[tuple[str, ...]]:
 
 
 def conflict(asked: Any, candidate: Any) -> str | None:
-    """Why ``candidate`` is a different food, or ``None``."""
+    """Why ``candidate`` is a different food, or ``None``. A stated size or diameter that the
+    candidate states differently ("large" vs "small", 10 vs 14 inch) is a different food."""
     wanted, offered = tokens(asked), tokens(candidate)
     wanted_species = {_SPECIES[word] for word in wanted if word in _SPECIES}
     offered_species = {_SPECIES[word] for word in offered if word in _SPECIES}
@@ -125,6 +134,12 @@ def conflict(asked: Any, candidate: Any) -> str | None:
         return "flavor"
     if (wanted & _VARIANTS) - offered:
         return "variant"
+    wanted_size, offered_size = wanted & food_words.SIZES, offered & food_words.SIZES
+    if wanted_size and offered_size and not wanted_size & offered_size:
+        return "size"
+    wanted_inches, offered_inches = food_words.inches(_plain(asked)), food_words.inches(_plain(candidate))
+    if wanted_inches and offered_inches and not wanted_inches & offered_inches:
+        return "size"
     return None
 
 

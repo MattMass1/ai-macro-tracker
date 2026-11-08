@@ -841,6 +841,10 @@ def portion_choices(basis: Any, name: str | None = None) -> tuple[str, ...]:
     own = serving_units.choices_for(name)
     if own is not None:
         return own
+    noun = (getattr(basis, "count_noun", None) or "").casefold().split()
+    if getattr(basis, "unit", None) == "count" and noun and noun[0] in ("slice", "slices", "piece", "pieces"):
+        unit = noun[0].rstrip("s")
+        return (f"1 {unit}", f"2 {unit}s", f"4 {unit}s")  # a serving of slices is asked in slices
     if basis.basis == "per_100ml" or basis.unit in VOLUME_UNITS or getattr(basis, "ml", None):
         return ("8 fl oz", "12 fl oz", "16 fl oz")
     if basis.basis == "per_100g" or basis.unit in MASS_UNITS or basis.grams:

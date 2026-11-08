@@ -15,7 +15,8 @@ class Sources(Protocol):
     async def exact(self, query: str, lane: str | None) -> Mapping[str, Any] | None: ...
     async def rows(self, query: str, require_all: bool) -> Sequence[Mapping[str, Any]]: ...
     async def hits(self, query: str) -> Sequence[Mapping[str, Any]]: ...
-    async def food(self, food_id: str, query: str, hit: Mapping[str, Any]) -> Mapping[str, Any] | None: ...
+    async def food(self, food_id: str, query: str, hit: Mapping[str, Any],
+                   prefer: str = "") -> Mapping[str, Any] | None: ...
     async def web(self, query: str) -> Mapping[str, Any] | None: ...
 
 
@@ -37,10 +38,12 @@ class LiveSources:
 
         return await food_lookup.fatsecret_candidates(query)
 
-    async def food(self, food_id, query, hit):
+    async def food(self, food_id, query, hit, prefer=""):
+        """``prefer`` is the user's amount words ("whole pie", "2 slices"): the serving that names
+        the same unit is used when the food lists several."""
         import food_lookup  # noqa: PLC0415
 
-        return await food_lookup.fatsecret_detail(food_id, query, hit)
+        return await food_lookup.fatsecret_detail(food_id, query, hit, prefer=prefer)
 
     async def web(self, query):
         import web_nutrition_lookup  # noqa: PLC0415

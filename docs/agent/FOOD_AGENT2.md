@@ -35,6 +35,18 @@ the migration 004 tables under the same marker the earlier agent uses.
 Numbers the user types are checked against their own message before use, and a
 number that does not appear there is dropped.
 
+## Chain menu wording
+
+`server/src/food_words.py` puts what people say and what a menu says in one wording
+before any comparison: `10"`, `10in` and `10 inch` are the same; "personal" and
+"individual" are the chain's small; "whole pie" and "pizza pie" are "pizza" (the amount
+is the portion's job). The brand never erases the food word ("pizza" in "Domino's
+Pizza"). A stated size or diameter that differs is a different food. A named product
+that the full phrase does not find is searched again in simpler words ("Domino's cheese
+pizza", then "Domino's pizza") and ranked against what was said. Among a product's
+servings, the one naming the user's unit is used ("whole pie" takes "1 pizza", no
+amount on a pizza takes the pizza); a pizza sold only by the slice asks how many slices.
+
 ## Serving units
 
 `server/src/serving_units.py` decides in code what one of a food is counted in: bread

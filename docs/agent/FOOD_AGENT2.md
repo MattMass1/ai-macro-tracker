@@ -59,6 +59,18 @@ a stated size). If none fits, it may give two searches in the chain's own words,
 searches once more and asks again. A failed call, or `FOOD_AGENT2_MENU_PICK=false`, falls
 back to the word ranking.
 
+### Everyday defaults
+
+Foods are read the way a person means them. The kind everybody assumes goes unsaid, as
+databases leave it unsaid: "chicken eggs" are searched as "eggs", "cow's milk" as "milk"
+(`food_words.default_kind`). Another animal is another food: a row naming an animal the
+user did not say or mean is refused (`match.conflict`; "eggs" mean chicken, "bacon" means
+pork, a named animal wins). "Cooked" is a preparation word, so "3 cooked eggs" uses the
+curated chicken egg. When more than one database row could be the food, the menu picker
+chooses with everyday defaults (plain, as usually eaten), among rows code has not refused.
+The interpreter names whole foods in plain words and treats "it's a chicken egg" as a
+revision of the item shown.
+
 ## Serving units
 
 `server/src/serving_units.py` decides in code what one of a food is counted in: bread

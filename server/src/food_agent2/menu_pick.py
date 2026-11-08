@@ -1,13 +1,13 @@
 """The agentic step for named products: which of these real menu records did the user mean?
 
-Code searches the provider and keeps only candidates under the same brand that are not a
-different food by its hard guards (species, flavor, variant, a stated size). When none of
-them is a clear word match, the model reads the user's words and those candidates and
-infers the one they meant, from what it knows about the chain: its size names ("personal"
-at a chain whose smallest pizza is a Small 10"), its default build when no topping is named,
-and common nicknames. It can only return an id it was given. When no candidate is the item,
-it may give up to two search phrases in the chain's own menu words, and code searches once
-more.
+Two places use it. A named product (a chain's menu item): code keeps candidates under the
+same brand that are not a different food, and when none is a clear word match the model
+infers which one was meant from what it knows about the chain ("personal" pizza is the
+chain's smallest). A whole food: when more than one database row could be it, the model
+chooses with everyday defaults (eggs are chicken eggs). Code's hard guards (another animal,
+flavor, variant, a stated size or raw/cooked) have already removed every candidate that is
+a different food, and the model can only return an id it was given. When no candidate is the
+item, it may give up to two search phrases, and code searches once more (named products).
 
 One strict JSON call, not stored, no tools. Any failure is "no pick", and the caller falls
 back to the code ranking.
@@ -32,21 +32,27 @@ MAX_SEARCHES = 2
 FLAG = "FOOD_AGENT2_MENU_PICK"
 
 INSTRUCTIONS = """You match what a person said they ate to one record in a nutrition database.
-You get their words (brand, item, variant, preparation, and the amount words they used) and numbered candidate
-records from the database, all under that brand. Return the id of the candidate that IS the item they mean.
+You get their words (food or menu item, brand if any, variant, preparation, and the amount words they used) and
+numbered candidate records. Return the id of the candidate that IS the food they mean, the way a friend who heard
+them would understand it.
 
-Use what you know about the brand's real menu:
-- Size names and diameters: a "personal" or "individual" pizza at a chain is that chain's smallest pizza (at Domino's,
-  the Small 10"); "10 inch" is the 10" size; "kids" is the kids size.
-- Default build: with no topping or flavor named, the plain version (cheese pizza, original recipe, regular crust).
+Everyday defaults when they did not say otherwise:
+- Eggs are chicken eggs, milk is cow's milk, bacon is pork bacon, rice is white rice, bread is regular sliced bread.
+- The plain, as-usually-eaten form: no added sauce, breading, sugar or flavor they did not mention.
+- "Cooked" with no method is the most ordinary method for that food (eggs: boiled or scrambled, not a recipe).
+For a brand's menu (records under a brand), use what you know about that menu:
+- Size names and diameters: a "personal" or "individual" pizza is that chain's smallest (at Domino's, the Small 10");
+  "10 inch" is the 10" size; "kids" is the kids size.
+- With no topping or flavor named, the plain version (cheese pizza, original recipe, regular crust).
 - Nicknames and spoken forms of menu names.
-Amount words ("whole pie", "half", "2 slices", "a box") describe how much, not which item: ignore them for the pick.
+Amount words ("whole pie", "half", "3", "2 slices", "a box") describe how much, not which food: ignore them for the pick.
 
-Never pick a different item: not another size, flavor, topping, protein, or product line than they stated, and not a
-side or drink for a main. If several candidates are the same item and differ only in how the record is written,
-pick the one whose name says the most of what they said.
-If no candidate is the item, set pick to null and give up to two short search phrases in the brand's own menu words
-that would find it (for example "Domino's Hand Tossed Cheese Pizza Small"). Otherwise search is empty."""
+Never pick a different food: not another animal (a duck egg is not an egg), size, flavor, topping, protein or
+product line than they stated or plainly meant, and not a side or drink for a main.
+If several candidates are the same food and differ only in how the record is written, pick the one whose name says
+the most of what they said.
+If no candidate is the food, set pick to null and give up to two short search phrases that would find it (in a
+brand's own menu words for a menu item). Otherwise search is empty."""
 
 _SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["pick", "search"],

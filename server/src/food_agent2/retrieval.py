@@ -160,10 +160,10 @@ def _row_complete(row: Mapping[str, Any]) -> bool:
     return nutrients["calories"] is not None and not ((nutrients["carbs"] or 0) > 0 and nutrients["fiber"] is None)
 
 
-def _pick_row(identity: FoodIdentity, wanted: str, rows: Any) -> Mapping[str, Any] | None:
-    """The closest row that is not a different food. A complete panel beats a closer word match."""
+def _eligible_rows(identity: FoodIdentity, wanted: str, rows: Any) -> list[tuple[tuple[int, float], Mapping[str, Any]]]:
+    """Rows that are not a different food, best first. A complete panel beats a closer word match."""
     asked = match.asked_text(identity)
-    best: tuple[tuple[int, float], Mapping[str, Any]] | None = None
+    out = []
     for row in rows or []:
         if not isinstance(row, Mapping) or usda_lookup._nutrients(dict(row))["calories"] is None:
             continue
@@ -178,10 +178,15 @@ def _pick_row(identity: FoodIdentity, wanted: str, rows: Any) -> Mapping[str, An
             - _FORM_PENALTY * len(extra & usda_lookup._FORM_WORDS)
         if score < match.MIN_CLOSENESS - _FORM_PENALTY:
             continue
-        rank = (int(_row_complete(row)), score)
-        if best is None or rank > best[0]:
-            best = (rank, row)
-    return best[1] if best else None
+        out.append(((int(_row_complete(row)), score), row))
+    out.sort(key=lambda entry: entry[0], reverse=True)  # stable: the source's order breaks ties
+    return out
+
+
+def _pick_row(identity: FoodIdentity, wanted: str, rows: Any) -> Mapping[str, Any] | None:
+    """The closest row that is not a different food."""
+    eligible = _eligible_rows(identity, wanted, rows)
+    return eligible[0][1] if eligible else None
 
 
 class Retrieval:
@@ -201,6 +206,8 @@ class Retrieval:
         query = identity_query(identity)
         lane = lane_of(identity, query)
         whole = lane in food_lookup.WHOLE_FOOD_KINDS
+        if whole:
+            query = food_words.default_kind(query)  # "chicken eggs" are searched as the database says: "eggs"
         hit = await self._exact(identity, portion, query, lane, whole, scope)
         if hit is not None:
             return hit
@@ -252,6 +259,10 @@ class Retrieval:
         return with_serving_unit(to_resolved_food(found), query, portion)
 
     async def _closest_row(self, identity, portion, query, scope) -> Found | None:
+        """The database row for a whole food. When more than one row could be it ("Egg, whole, cooked,
+        hard-boiled", "..., fried", "..., scrambled"), the picker chooses the one the user means with
+        everyday defaults; code has already removed rows that are a different food (another animal,
+        flavor, a stated raw or cooked)."""
         attempts = [(query, True)]
         head = match.staple_head(identity.name)
         if head and head != query.casefold():
@@ -260,11 +271,18 @@ class Retrieval:
             rows = await scope.call(("rows", text.casefold(), require_all),
                                     lambda text=text, require_all=require_all: self.sources.rows(text, require_all),
                                     default=[])
-            row = _pick_row(identity, text, rows)
-            if row is None:
+            eligible = [row for _rank, row in _eligible_rows(identity, text, rows)]
+            if not eligible:
                 continue
-            found = usda_lookup.to_result(dict(row))
-            food = self._food(found, query, portion)
+            row = eligible[0]
+            if len(eligible) > 1 and self.picker is not None and menu_pick.enabled():
+                offered = eligible[:menu_pick.MAX_CANDIDATES]
+                said = {"food": identity.name, "preparation": identity.preparation, "variant": identity.variant,
+                        "amount_words": portion.text, "source": "generic food database (USDA)"}
+                pick = await self._pick(said, [{"food_id": str(r.get("fdcId")), "food_name": r.get("description"),
+                                                "brand_name": ""} for r in offered])
+                row = next((r for r in offered if str(r.get("fdcId")) == pick.food_id), row)
+            food = self._food(usda_lookup.to_result(dict(row)), query, portion)
             if food is not None:
                 return _generic(food, identity, "verified")
         return None

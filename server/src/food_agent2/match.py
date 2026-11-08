@@ -31,7 +31,13 @@ _CATEGORY = frozenset({"sandwich", "meal", "combo", "item", "food", "product", "
 _SPECIES = {"chicken": "chicken", "turkey": "turkey", "beef": "beef", "steak": "beef", "pork": "pork",
             "ham": "pork", "bacon": "pork", "lamb": "lamb", "tuna": "tuna", "salmon": "salmon", "shrimp": "shrimp",
             "prawn": "shrimp", "cod": "cod", "tilapia": "tilapia", "halibut": "halibut", "trout": "trout",
-            "tofu": "tofu", "venison": "venison", "bison": "bison", "duck": "duck"}
+            "tofu": "tofu", "venison": "venison", "bison": "bison", "duck": "duck", "goose": "goose",
+            "quail": "quail", "ostrich": "ostrich", "emu": "emu", "veal": "beef", "mutton": "lamb", "goat": "goat"}
+# Words in _SPECIES that are a food from an animal, not the animal itself.
+_FOOD_WORDS = frozenset({"steak", "ham", "bacon", "prawn", "veal", "mutton"})
+# The animal a food means when none is said: eggs are chicken eggs, bacon is pork.
+_IMPLIED_SPECIES = {"egg": "chicken", "bacon": "pork", "ham": "pork", "prosciutto": "pork", "pepperoni": "pork",
+                    "steak": "beef", "hamburger": "beef", "burger": "beef", "mince": "beef"}
 _FLAVORS = frozenset({"chocolate", "vanilla", "strawberry", "banana", "caramel", "mocha", "mint", "lemon", "orange",
                       "cherry", "blueberry", "raspberry", "coconut", "cinnamon", "peach", "mango", "pumpkin"})
 # Stated by the user, these make a different product if the candidate lacks them.
@@ -51,7 +57,7 @@ _COOKABLE = frozenset({
 # Preparation words that describe a counted food without changing which food it is.
 _PREPARATION_PHRASES = re.compile(
     r"\b(?:sunny[\s-]+side[\s-]+up|over[\s-]+(?:easy|medium|hard)|soft[\s-]+boiled|hard[\s-]+boiled|poached|scrambled|"
-    r"fried|toasted|grilled|baked|roasted|boiled|steamed|homemade|home[\s-]+made|plain)\b", re.IGNORECASE)
+    r"fried|toasted|grilled|baked|roasted|boiled|steamed|cooked|homemade|home[\s-]+made|plain)\b", re.IGNORECASE)
 _RATIO = re.compile(r"\b(\d{2,3})\s*(?:/|-)\s*(\d{1,2})\b|\b(\d{2,3})\s*%")
 _STAPLES = frozenset({"bagel", "bread", "toast", "pizza", "rice", "tortilla", "muffin", "onion", "potato", "yogurt",
                       "cheese", "milk", "pasta", "cereal", "oatmeal", "apple", "banana", "orange", "sauce", "cracker",
@@ -114,18 +120,26 @@ def closeness(asked: Any, candidate: Any, brand: Any = "", *, extra_penalty: flo
     return max(0.0, len(found) / len(wanted) - extra_penalty * len(extras)) if found else 0.0
 
 
+def _animals(words: set[str]) -> set[str]:
+    """The animal a food is from. A named animal wins ("turkey bacon" is turkey); otherwise what the
+    food word means by default ("bacon" is pork, "eggs" are chicken)."""
+    named = {_SPECIES[word] for word in words if word in _SPECIES and word not in _FOOD_WORDS}
+    return named or {_SPECIES.get(word) or _IMPLIED_SPECIES[word] for word in words
+                     if word in _FOOD_WORDS or word in _IMPLIED_SPECIES}
+
+
 def _ratios(text: Any) -> set[tuple[str, ...]]:
     return {tuple(part for part in found if part) for found in _RATIO.findall(str(text or ""))}
 
 
 def conflict(asked: Any, candidate: Any) -> str | None:
-    """Why ``candidate`` is a different food, or ``None``. A stated size or diameter that the
+    """Why ``candidate`` is a different food, or ``None``. A different animal than the one said or
+    meant by default (eggs are chicken eggs) is a different food. A stated size or diameter that the
     candidate states differently ("large" vs "small", 10 vs 14 inch) is a different food."""
     wanted, offered = tokens(asked), tokens(candidate)
-    wanted_species = {_SPECIES[word] for word in wanted if word in _SPECIES}
-    offered_species = {_SPECIES[word] for word in offered if word in _SPECIES}
+    wanted_species, offered_species = _animals(wanted), _animals(offered)
     if wanted_species and offered_species and not wanted_species & offered_species:
-        return "species"
+        return "species"  # "eggs" are never duck eggs, "bacon" is never turkey bacon unless said
     wanted_ratio, offered_ratio = _ratios(asked), _ratios(candidate)
     if wanted_ratio and offered_ratio and not wanted_ratio & offered_ratio:
         return "ratio"

@@ -63,6 +63,12 @@ WHEAT_SLICE = ServingUnit(
     unit="slice", plural="slices", grams=32.0, measure="slice",
     source=f"{USDA_SR}, FDC 172688 (bread, whole-wheat, commercially prepared): 1 slice = 32 g",
     synonyms=frozenset({"piece", "pieces"}), choices=("1 slice", "2 slices", "3 slices"))
+LARGE_EGG = ServingUnit(
+    unit="egg", plural="eggs", grams=50.0, measure="large",
+    source=f"{USDA_SR}, egg, whole, raw, fresh: 1 large = 50 g", choices=("1 egg", "2 eggs", "3 eggs"))
+_EGG_WORDS = frozenset({"egg", "eggs", "cooked", "boiled", "hard", "soft", "fried", "scrambled", "poached", "whole",
+                        "fresh", "raw", "large", "organic", "free", "range", "pasture", "raised", "brown", "white",
+                        "sunny", "side", "up", "over", "easy", "medium", "a", "an", "of", "chicken"})
 CUP_OF_MILK = ServingUnit(
     unit="cup", plural="cups", grams=244.0, measure="cup", volume=True, drink=True,
     source=f"{USDA_SR}, milk, whole, 3.25% milkfat: 1 cup = 244 g",
@@ -154,6 +160,8 @@ def for_food(name: str) -> ServingUnit | None:
         if not set(words) <= _BREAD_WORDS | _BREAD_HEADS:
             return None  # "avocado toast", "cheesy bread": more than bread
         return WHEAT_SLICE if "wheat" in words else SLICE
+    if words[-1] in ("egg", "eggs") and set(words) <= _EGG_WORDS:
+        return LARGE_EGG  # a count of eggs is large eggs, the default size
     if words[-1] in ("milk", "buttermilk", "kefir") and set(words) <= _MILK_WORDS | {"buttermilk", "kefir"}:
         return CUP_OF_MILK
     return None
@@ -203,7 +211,7 @@ def row_measure(measures: Iterable[Mapping[str, Any]] | None, family: ServingUni
         sized = {"medium", "regular"} & words
         if family.measure not in words and not (family.measure == "medium" and sized):
             continue
-        if words & _OFF_SIZE or ("fl" in words and family.unit == "cup"):
+        if words & (_OFF_SIZE - {family.measure}) or ("fl" in words and family.unit == "cup"):
             continue
         (regular if sized else plain).append((text, float(grams)))
     for group in (plain, regular):
@@ -253,4 +261,4 @@ def choices_for(name: str | None) -> tuple[str, ...] | None:
 
 
 __all__ = ["ServingUnit", "for_food", "applies", "row_measure", "serving_text", "amount_text",
-           "attribution", "choices_for", "SLICE", "CUP_OF_MILK"]
+           "attribution", "choices_for", "SLICE", "CUP_OF_MILK", "LARGE_EGG"]

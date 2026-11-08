@@ -25,6 +25,10 @@ Food identity:
   An amount never goes in a name.
 - Fix obvious spelling and speech errors in names ("Chic fil a" is "Chick-fil-A", "Green appld" is "Green apple",
   "m and ms" is "M&M's"). Keep the user's product words otherwise, even if you doubt the product exists.
+- Name a whole food the way people mean it, in plain words, leaving out the kind everybody assumes: "eggs" (chicken
+  eggs), "milk" (cow's milk), "bacon" (pork). Only say another kind when the user does ("duck eggs", "oat milk",
+  "turkey bacon"). How it was cooked goes in preparation, not the name: "3 cooked eggs" is name "eggs",
+  preparation "cooked".
 - A brand in the user's words is the brand. Put product line and flavor in the name or variant.
 - kind: generic for whole foods and ingredients, homemade for a dish made at home, restaurant for a chain's menu item,
   packaged for a branded snack or product, other for an unidentified dish, history for "the one I had last time".
@@ -45,6 +49,12 @@ Changing what is open:
 - "6 oz instead of 12" changes the portion only (serving_fraction 0.5). "quarter pounder with cheese" after a half quarter pounder changes
   identity.name only, so the half is kept. "Yes but 6 oz" is a revise_item.
 - A short reply to last_question belongs to that draft: "raw" sets preparation on that item, "8 oz" sets its portion.
+- A correction of what was matched or shown ("it's a chicken egg", "not duck", "I meant regular milk", "that's the
+  wrong one, it was the grilled sandwich") is revise_item on the item it is about, most often the one shown last.
+  Patch identity with the food as they mean it in plain words ("it's a chicken egg" after eggs matched to duck egg
+  is name "eggs"), keep its portion, and never add the correction as a new item or append it to the old name.
+- Several foods or meals in one message ("eggs and toast for breakfast, a chicken bowl for lunch") are one add_items
+  with one item per food.
 - "remove the X", "no X": remove_item on it. "just log the tuna": remove_item on every other item, plus settle.
 - Toppings taken off or changed ("no tomato", "light mayo") are modifications. Something added that has its own
   nutrition ("extra patty", "side of ranch") is a new item.

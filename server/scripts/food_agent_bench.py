@@ -72,6 +72,9 @@ if str(_SRC) not in sys.path:
 LATENCY_LABEL = "local code time, scripted model, mocked lookups"
 DECOY_MARKER = "B-SECRET"
 CLARIFY_ACTIONS = frozenset({"clarify", "recall_not_found_ask"})
+# A question or chat, not a food to log ("just a question, do not log anything: ..."). Nothing may be written.
+NO_LOG_ACTIONS = frozenset({"no_log"})
+_NOT_LOGGING = CLARIFY_ACTIONS | NO_LOG_ACTIONS
 
 # ---------------------------------------------------------------- loading
 
@@ -646,7 +649,7 @@ async def run_case(case: dict[str, Any], script: dict[str, Any], backend, *, par
             if script["turns"][index].get("confirm_before") and run.turns and awaiting_yes(run.turns[-1]):
                 await say("yes", None, "confirm_before")
             await say(user_turn, index, None)
-        if case.get("expected_action") not in CLARIFY_ACTIONS and run.turns and awaiting_yes(run.turns[-1]):
+        if case.get("expected_action") not in _NOT_LOGGING and run.turns and awaiting_yes(run.turns[-1]):
             await say("yes", None, "final")
         run.entries = await env.entries()
     except Exception as exc:  # a harness crash, never a score
@@ -840,7 +843,7 @@ def score_case(case: dict[str, Any], script: dict[str, Any], run: CaseRun, *, li
     """Score one run (pure). ``success`` follows AGENT.md section 8; every failure has a reason."""
     scoring = (script or {}).get("scoring") or {}
     gold_items = case.get("gold_items") or []
-    expect_log = case.get("expected_action") not in CLARIFY_ACTIONS
+    expect_log = case.get("expected_action") not in _NOT_LOGGING
     accepted = scoring.get("accept_items")
     accepted = list(range(len(gold_items))) if accepted is None else list(accepted)
     expected_entries = int(scoring.get("expected_entries", 1 if expect_log else 0))
@@ -921,7 +924,17 @@ def score_case(case: dict[str, Any], script: dict[str, Any], run: CaseRun, *, li
 
     # Independent golden consumed totals, not receipt/row self-consistency.
     expected_nutrients = case.get("expected_nutrients")
-    if expect_log:
+    # Ranges are for estimates with no single right number ("a slice of sourdough": 70-160 kcal). They are
+    # wide enough for any honest answer and narrow enough to fail a wrong food or amount (6 oz is 463 kcal).
+    expected_ranges = case.get("expected_ranges") or {}
+    for key, (low, high) in (expected_ranges.items() if expect_log else ()):
+        values = [e.get(key) for e in run.entries]
+        total = None if not values or any(v is None for v in values) else sum(float(v) for v in values)
+        if total is None or not float(low) <= total <= float(high):
+            reasons.append(f"nutrition out of range: {key} {total} not in [{low}, {high}]")
+    if expect_log and expected_ranges and not expected_nutrients:
+        pass  # the ranges are the gold for this case
+    elif expect_log:
         if not expected_nutrients:
             reasons.append("independent gold nutrition unavailable (not verified)")
         else:
@@ -975,6 +988,11 @@ def score_case(case: dict[str, Any], script: dict[str, Any], run: CaseRun, *, li
     if expect_log:
         if not run.entries:
             reasons.append("nothing was logged")
+    elif case.get("expected_action") in NO_LOG_ACTIONS:
+        if run.entries:
+            reasons.append("rows were written for a question that said not to log")
+        if any(claims_logged(t.reply) for t in run.turns):
+            reasons.append("a reply claimed something was logged")
     else:
         if not question_turns:
             reasons.append("expected a clarifying question, got none")

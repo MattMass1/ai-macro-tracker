@@ -1,0 +1,3 @@
+// A clean checkout builds against the template. Optional local overrides stay ignored.
+#include "Config.xcconfig.template"
+#include? "Config.xcconfig"

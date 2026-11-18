@@ -1,178 +1,74 @@
 import SwiftUI
 
-/// The Today home from the design package: today's workout and food cards on
-/// the studio wall, the chosen coach standing on the floor, and the Ask Coach
-/// dock. Every control here is a real action; nothing is simulated.
+/// The studio is the home, not an extra hub before a second chat screen.
+/// The conversation owns the only composer and uses AppStore's shared store.
 struct HomeView: View {
-    @EnvironmentObject private var store: AppStore
-    /// Switches to the Coach tab, optionally sending a message first.
-    let openCoach: (String?) -> Void
-
-    @AppStorage(CompanionPreferences.characterKey) private var characterRaw = CompanionCharacter.male.rawValue
-    @AppStorage(CompanionPreferences.visibleKey) private var showsCompanion = true
-    @State private var sessionSelection: WorkoutPlanPayload.PlannedDay?
-    @State private var showFoodDay = false
-    @State private var showLogMeal = false
-
-    private var character: CompanionCharacter { CompanionCharacter(rawValue: characterRaw) ?? .male }
-
-    private var todaySession: WorkoutPlanPayload.PlannedDay? {
-        guard store.isToday, let plan = store.plan, plan.hasPlan == true else { return nil }
-        return plan.upcoming.first
-    }
+    var openWorkouts: () -> Void = {}
 
     var body: some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .bottom) {
-                StudioBackground(alignment: .bottom)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        header
-                        workoutCard
-                        foodCard
-                        Spacer(minLength: 8)
-                        floor
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-                    .frame(maxWidth: .infinity)
-                    .containerRelativeFrame(.vertical, alignment: .top) { height, _ in height }
-                }
-                .scrollBounceBehavior(.basedOnSize)
-            }
-            CompanionDock(chat: store.chat) { text in openCoach(text) }
-        }
-        .background(Theme.canvas)
-        .navigationBarHidden(true)
-        .sheet(item: $sessionSelection) { session in
-            WorkoutSessionView(session: session, date: store.dateString, onAskCoach: { text in
-                sessionSelection = nil
-                openCoach(text)
-            })
-        }
-        .sheet(isPresented: $showFoodDay) {
-            // TodayView hides the navigation bar, so the sheet brings its own header.
-            NavigationStack {
-                VStack(spacing: 0) {
-                    HStack {
-                        Text("Food today").font(.headline).foregroundStyle(Theme.ink)
-                        Spacer()
-                        Button("Done") { showFoodDay = false }.font(.subheadline.weight(.bold)).foregroundStyle(Theme.accent)
-                    }
-                    .padding(.horizontal, 16).padding(.vertical, 12)
-                    .background(Theme.dock)
-                    .overlay(alignment: .bottom) { Rectangle().fill(Theme.accentEdge).frame(height: 2) }
-                    TodayView(onAskCoach: { showFoodDay = false; openCoach(nil) })
-                }
-            }
-        }
-        .sheet(isPresented: $showLogMeal) { ManualFoodView() }
+        CoachChatView(openWorkouts: openWorkouts)
     }
+}
 
-    // MARK: - Pieces
+/// Reference proportions at a 390-point phone width. The scene stays the focus
+/// through composition, not by enlarging the character or shrinking the panel.
+struct StudioLayout {
+    let width: CGFloat
+    let height: CGFloat
+    static let titleSize: CGFloat = 28
+    static let panelTitleSize: CGFloat = 16
+    static let summaryTitleSize: CGFloat = 22
+    static let dockLabelSize: CGFloat = 14
 
-    private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Your day").font(.system(size: 30, weight: .bold)).foregroundStyle(Theme.ink)
-                Text("\(store.selectedDate.formatted(.dateTime.weekday(.wide))) · your training studio")
-                    .font(.subheadline).foregroundStyle(Theme.muted)
-            }
-            Spacer()
-            Menu {
-                Picker("Coach", selection: $characterRaw) {
-                    ForEach(CompanionCharacter.allCases) { Text($0.displayName).tag($0.rawValue) }
-                }
-                Toggle("Show coach artwork", isOn: $showsCompanion)
-            } label: {
-                Image(systemName: "person.crop.square")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(Theme.accent)
-                    .frame(width: 44, height: 44)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).stroke(Theme.edge))
-            }
-            .accessibilityLabel("Companion settings")
-        }
-        .padding(.top, 6)
+    var companionSize: CGFloat { min(144, max(0, width) * 144 / 390, max(0, height) * 0.24) }
+    var floorHeight: CGFloat { companionSize + min(32, max(0, height) * 0.05) }
+}
+
+/// Layout receipts let mounted tests verify clipping without private UI APIs.
+struct StudioLayoutFrames: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
+}
 
-    @ViewBuilder
-    private var workoutCard: some View {
-        if let session = todaySession {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text(session.type).font(.title2.weight(.bold)).foregroundStyle(Theme.ink)
-                    Spacer()
-                    Button("Change focus") { openCoach("I want to change today's workout.") }
-                        .font(.subheadline.weight(.bold)).foregroundStyle(Theme.accent)
-                }
-                Text(session.exercises.isEmpty
-                     ? "No exercises assigned yet."
-                     : "\(session.exercises.count) exercises · \(session.exercises.prefix(3).map(\.name).joined(separator: ", "))")
-                    .font(.subheadline).foregroundStyle(Theme.muted).lineLimit(2)
-                Button {
-                    sessionSelection = session
-                } label: {
-                    Label("View workout", systemImage: "arrow.right").labelStyle(.titleAndIcon)
-                }
-                .buttonStyle(PixelPrimaryButtonStyle())
-                .disabled(session.exercises.isEmpty)
-            }
-            .appCard(padding: 15)
-        } else if store.isLoadingWorkouts && store.plan == nil {
-            RoundedRectangle(cornerRadius: Theme.cardRadius).fill(Theme.surface).frame(height: 132)
-                .redacted(reason: .placeholder)
-        } else {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(store.isToday ? "No session planned" : "Earlier day").font(.title3.weight(.bold)).foregroundStyle(Theme.ink)
-                Text(store.isToday ? "Ask Coach to set up a routine, or log a workout from the Workouts tab."
-                                   : "Today's session is only shown for the current day.")
-                    .font(.subheadline).foregroundStyle(Theme.muted)
-                if store.isToday {
-                    Button("Plan with Coach") { openCoach("Help me set up a workout routine.") }
-                        .buttonStyle(PixelSecondaryButtonStyle())
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .appCard(padding: 15)
-        }
+extension View {
+    func studioFrame(_ name: String) -> some View {
+        background(GeometryReader { geometry in
+            Color.clear.preference(key: StudioLayoutFrames.self, value: [name: geometry.frame(in: .global)])
+        })
     }
+}
 
-    private var foodCard: some View {
+/// Same three destinations, with the compact flat tab row from the reference.
+struct StudioTabBar: View {
+    @Binding var selection: Int
+    private let tabs = [(0, "Today", "house"), (2, "Workouts", "dumbbell"), (3, "Progress", "chart.line.uptrend.xyaxis")]
+
+    var body: some View {
         HStack(spacing: 12) {
-            Button { showFoodDay = true } label: {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Food today").font(.headline).foregroundStyle(Theme.ink)
-                    Text(foodSummary).font(.subheadline).foregroundStyle(Theme.muted).lineLimit(2)
+            ForEach(tabs, id: \.0) { tab in
+                Button { selection = tab.0 } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: tab.2).font(.system(size: 17, weight: .semibold))
+                        Text(tab.1).font(Theme.pixelFont(17, relativeTo: .caption))
+                    }
+                    .foregroundStyle(Theme.sectionInk)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(selection == tab.0 ? Theme.accentTint : Color.clear)
+                    .contentShape(Rectangle())
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .accessibilityLabel(tab.1)
+                .accessibilityIdentifier("studio.tab.\(tab.0)")
+                .studioFrame("tab.\(tab.0)")
+                .accessibilityAddTraits(selection == tab.0 ? .isSelected : [])
             }
-            .buttonStyle(.plain)
-            .accessibilityHint("Opens today's meals and macros")
-            Button("Log meal") { showLogMeal = true }
-                .buttonStyle(PixelSecondaryButtonStyle())
         }
-        .appCard(padding: 15)
-    }
-
-    private var foodSummary: String {
-        guard let day = store.day else { return "Log your next meal." }
-        if day.meals.isEmpty { return "Nothing logged yet. Log your next meal." }
-        let left = Int(day.remaining.calories.rounded())
-        return left > 0 ? "\(day.meals.count) logged · \(left) kcal left" : "\(day.meals.count) logged · target reached"
-    }
-
-    @ViewBuilder
-    private var floor: some View {
-        if showsCompanion {
-            CompanionStage(chat: store.chat, character: character)
-                .frame(maxWidth: .infinity)
-                .padding(.bottom, 4)
-        } else {
-            Color.clear.frame(height: 24)
-        }
+        .padding(.horizontal, 16).padding(.vertical, 4)
+        .background(Theme.dock, ignoresSafeAreaEdges: [])
+        .clipped()
+        .studioFrame("tabs")
     }
 }
 
@@ -181,61 +77,10 @@ struct HomeView: View {
 struct CompanionStage: View {
     @ObservedObject var chat: CoachChatStore
     let character: CompanionCharacter
-    var size: CGFloat = 224
+    var size: CGFloat = 144
 
     var body: some View {
         CompanionView(character: character, state: chat.isResponding ? .writing : .rest)
             .frame(width: size, height: size)
-    }
-}
-
-/// "YOUR COMPANION" dock: the Ask Coach composer on the cream base.
-struct CompanionDock: View {
-    @ObservedObject var chat: CoachChatStore
-    let onSend: (String) -> Void
-    @State private var draft = ""
-    @FocusState private var focused: Bool
-
-    private var trimmed: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
-
-    var body: some View {
-        VStack(spacing: 8) {
-            HStack {
-                SectionLabel(text: "Your companion")
-                Spacer()
-                SectionLabel(text: chat.isResponding ? "Writing" : "Ready")
-            }
-            HStack(spacing: 6) {
-                Text("Ask Coach").font(.subheadline.weight(.bold)).foregroundStyle(Theme.sectionInk).padding(.leading, 8)
-                TextField("Ask, log, or adjust", text: $draft)
-                    .font(.subheadline)
-                    .focused($focused)
-                    .submitLabel(.send)
-                    .onSubmit(send)
-                Button(action: send) {
-                    Image(systemName: "arrow.up").fontWeight(.bold)
-                        .frame(width: 42, height: 42)
-                        .background(trimmed.isEmpty ? Theme.edge : Theme.accent, in: RoundedRectangle(cornerRadius: Theme.controlRadius))
-                        .foregroundStyle(.white)
-                }
-                .disabled(trimmed.isEmpty)
-                .accessibilityLabel("Send to Coach")
-            }
-            .padding(3)
-            .background(Theme.paper, in: RoundedRectangle(cornerRadius: Theme.controlRadius))
-            .overlay(RoundedRectangle(cornerRadius: Theme.controlRadius).stroke(Theme.edgeStrong, lineWidth: 2))
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(Theme.dock)
-        .overlay(alignment: .top) { Rectangle().fill(Theme.accentEdge).frame(height: 3) }
-    }
-
-    private func send() {
-        guard !trimmed.isEmpty else { return }
-        let text = trimmed
-        draft = ""
-        focused = false
-        onSend(text)
     }
 }

@@ -149,6 +149,7 @@ struct BarcodeScannerView: View {
 }
 
 struct ScanFoodSheet: View {
+    let accountSession: AppStore.AccountSession
     var onLogged: (String, Double) -> Void
 
     @EnvironmentObject private var store: AppStore
@@ -399,6 +400,7 @@ struct ScanFoodSheet: View {
     }
 
     private func logProduct(_ product: BarcodeFoodPayload, grams: Double?) async {
+        guard store.isCurrent(accountSession), !isLogging else { return }
         gramsFocused = false
         let calories: Double
         let protein: Double
@@ -445,7 +447,7 @@ struct ScanFoodSheet: View {
         )
         isLogging = true
         defer { isLogging = false }
-        if await store.logMeal(body) {
+        if await store.logMeal(body, session: accountSession), store.isCurrent(accountSession) {
             onLogged(name, calories)
             dismiss()
         }

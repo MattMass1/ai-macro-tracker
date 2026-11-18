@@ -19,8 +19,11 @@ final class AuthService: ObservableObject {
     init(api: APIClient = .shared) {
         self.api = api
         isAuthenticated = KeychainStore.deviceToken != nil
-        tokenRejectedObserver = NotificationCenter.default.addObserver(forName: .deviceTokenRejected, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.handleTokenRejected() }
+        tokenRejectedObserver = NotificationCenter.default.addObserver(forName: .deviceTokenRejected, object: nil, queue: .main) { [weak self] notification in
+            Task { @MainActor [weak self] in
+                guard let self, self.api.isCurrentAuthenticationRejection(notification) else { return }
+                self.handleTokenRejected()
+            }
         }
     }
 

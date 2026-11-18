@@ -22,7 +22,7 @@ final class AppStore: ObservableObject {
     @Published var isLoadingWorkouts = false
     @Published var errorMessage: String?
     @Published var toast: String?
-    /// Text typed into the home Ask Coach dock; the Coach tab sends it once.
+    /// A contextual starter delivered to the one shared Coach conversation.
     @Published var pendingCoachMessage: String?
     private let api: APIClient
     /// Bumped by reset() so requests still in flight from a previous session
@@ -30,6 +30,9 @@ final class AppStore: ObservableObject {
     /// The same-day guards alone don't cover this: reset() lands on the same
     /// calendar day, so only the generation check distinguishes sessions.
     private var sessionGeneration = 0
+    struct AccountSession: Equatable { fileprivate let generation: Int }
+    var accountSession: AccountSession { AccountSession(generation: sessionGeneration) }
+    func isCurrent(_ session: AccountSession) -> Bool { session.generation == sessionGeneration }
     private enum ErrorSource { case action, day, workouts, presets, brief }
     private var errorSource = ErrorSource.action
 
@@ -178,7 +181,9 @@ final class AppStore: ObservableObject {
             let payload = try await api.workoutHistory(exercise: exercise, limit: limit)
             guard !Task.isCancelled, session == sessionGeneration else { return }
             workoutHistoryEntries = payload.workouts
-        } catch { present(error, session: session) }
+        } catch {
+            if !Task.isCancelled { present(error, session: session) }
+        }
     }
 
     func trends(days: Int) async {
@@ -187,7 +192,9 @@ final class AppStore: ObservableObject {
             let payload = try await api.trends(days: days)
             guard !Task.isCancelled, session == sessionGeneration else { return }
             trendsPayload = payload
-        } catch { present(error, session: session) }
+        } catch {
+            if !Task.isCancelled { present(error, session: session) }
+        }
     }
 
     func moveDay(by value: Int) async {
@@ -199,27 +206,31 @@ final class AppStore: ObservableObject {
 
     func logPreset(_ preset: Preset) async {
         let session = sessionGeneration
+        guard let authentication = captureAuthentication(for: session) else { return }
         do {
-            let updated = try await api.logPreset(LogPresetBody(presetName: preset.name, servings: 1, meal: preset.meal, day: isToday ? nil : dateString))
+            let updated = try await api.logPreset(LogPresetBody(presetName: preset.name, servings: 1, meal: preset.meal, day: isToday ? nil : dateString), authentication: authentication)
             guard session == sessionGeneration else { return }
             day = updated
             showToast("Logged \(preset.name)")
         } catch { present(error, session: session) }
     }
 
-    func logMeal(_ body: LogMealBody) async -> Bool {
+    func logMeal(_ body: LogMealBody, session expectedSession: AccountSession? = nil) async -> Bool {
+        guard expectedSession.map(isCurrent) ?? true else { return false }
         let session = sessionGeneration
+        guard let authentication = captureAuthentication(for: session) else { return false }
         do {
-            let updated = try await api.logMeal(body)
-            guard session == sessionGeneration else { return true }
+            let updated = try await api.logMeal(body, authentication: authentication)
+            guard session == sessionGeneration else { return false }
             day = updated; showToast("Meal logged"); return true
         } catch { present(error, session: session); return false }
     }
 
     func deleteMeal(_ id: String) async {
         let session = sessionGeneration
+        guard let authentication = captureAuthentication(for: session) else { return }
         do {
-            _ = try await api.deleteMeal(id)
+            _ = try await api.deleteMeal(id, authentication: authentication)
             guard session == sessionGeneration else { return }
             showToast("Entry deleted")
             await loadDay()
@@ -228,10 +239,11 @@ final class AppStore: ObservableObject {
 
     func saveBrief(_ text: String) async {
         let session = sessionGeneration
+        guard let authentication = captureAuthentication(for: session) else { return }
         let requestedDate = selectedDate
         let requestedDateString = dateFormatter.string(from: requestedDate)
         do {
-            let saved = try await api.saveBrief(text, date: requestedDateString)
+            let saved = try await api.saveBrief(text, date: requestedDateString, authentication: authentication)
             guard session == sessionGeneration, dayCalendar.isDate(selectedDate, inSameDayAs: requestedDate) else { return }
             brief = saved; showToast("Note saved")
         } catch {
@@ -240,24 +252,32 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func logWorkout(exercise: String, sets: [WorkoutSet], type: String, onLogged: ((WorkoutEntry) -> Void)? = nil) async -> Bool {
+    func logWorkout(exercise: String, sets: [WorkoutSet], type: String, date: String? = nil, session expectedSession: AccountSession? = nil, onLogged: ((WorkoutEntry) -> Void)? = nil) async -> Bool {
+        guard expectedSession.map(isCurrent) ?? true else { return false }
         let session = sessionGeneration
+        guard let authentication = captureAuthentication(for: session) else { return false }
+        let requestedDate = date ?? dateString
+        let bodyDate = date ?? (isToday ? nil : dateString)
         do {
-            let logged = try await api.logWorkout(LogWorkoutBody(exercise: exercise, sets: sets, workoutType: type, date: isToday ? nil : dateString))
-            guard session == sessionGeneration else { return true }
-            workouts.insert(logged, at: 0)
+            let logged = try await api.logWorkout(LogWorkoutBody(exercise: exercise, sets: sets, workoutType: type, date: bodyDate), authentication: authentication)
+            guard session == sessionGeneration else { return false }
+            if dateString == requestedDate { workouts.insert(logged, at: 0) }
             onLogged?(logged)
+            guard session == sessionGeneration else { return false }
             showToast("Workout logged")
-            if let updatedStats = try? await api.workoutStats(), session == sessionGeneration { stats = updatedStats }
+            let updatedStats = try? await api.workoutStats()
+            guard session == sessionGeneration else { return false }
+            if let updatedStats { stats = updatedStats }
             await workoutHistory()
-            return true
+            return session == sessionGeneration
         } catch { present(error, session: session); return false }
     }
 
     func deleteWorkout(_ id: String) async {
         let session = sessionGeneration
+        guard let authentication = captureAuthentication(for: session) else { return }
         do {
-            _ = try await api.deleteWorkout(id)
+            _ = try await api.deleteWorkout(id, authentication: authentication)
             guard session == sessionGeneration else { return }
             workouts.removeAll { $0.id == id }
             workoutHistoryEntries.removeAll { $0.id == id }
@@ -267,20 +287,30 @@ final class AppStore: ObservableObject {
         } catch { present(error, session: session) }
     }
 
-    func lastWorkout(_ exercise: String) async -> LastWorkoutPayload? { try? await api.lastWorkout(exercise) }
+    func lastWorkout(_ exercise: String, session expectedSession: AccountSession? = nil) async -> LastWorkoutPayload? {
+        guard expectedSession.map(isCurrent) ?? true else { return nil }
+        let session = sessionGeneration
+        let result = try? await api.lastWorkout(exercise)
+        return session == sessionGeneration ? result : nil
+    }
     func savePlan(_ plan: WorkoutPlanWrite, reportError: Bool = true) async -> Bool {
         let session = sessionGeneration
+        guard let authentication = captureAuthentication(for: session) else { return false }
         do {
-            _ = try await api.savePlan(plan)
-            guard session == sessionGeneration else { return true }
+            _ = try await api.savePlan(plan, authentication: authentication)
+            guard session == sessionGeneration else { return false }
             await loadWorkoutData()
-            return true
+            return session == sessionGeneration
         } catch {
             if reportError { present(error, session: session) }
             return false
         }
     }
-    func barcodeFood(code: String) async throws -> BarcodeFoodPayload { try await api.barcodeFood(code: code) }
+    func barcodeFood(code: String) async throws -> BarcodeFoodPayload {
+        let session = sessionGeneration
+        guard let authentication = captureAuthentication(for: session) else { throw CancellationError() }
+        return try await api.barcodeFood(code: code, authentication: authentication)
+    }
 
     /// Called on sign-out so the next user never sees the previous user's data.
     func reset() {
@@ -294,6 +324,13 @@ final class AppStore: ObservableObject {
         isLoadingDay = true; isLoadingWorkouts = false
         errorMessage = nil; toast = nil; pendingCoachMessage = nil
         WorkoutSessionCompletions.removeAll()
+    }
+
+    /// This synchronous actor-isolated capture precedes every mutation's await.
+    private func captureAuthentication(for session: Int) -> APIClient.AuthenticationContext? {
+        guard session == sessionGeneration else { return nil }
+        let authentication = api.authenticationContext()
+        return session == sessionGeneration ? authentication : nil
     }
 
     private func clearLoadError(source: ErrorSource) {

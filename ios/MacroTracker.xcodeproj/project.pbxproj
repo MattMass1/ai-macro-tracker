@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B00600000000000000000003 /* StudioRenderProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00600000000000000000003 /* StudioRenderProtocol.swift */; };
+		B00600000000000000000001 /* Jersey15-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = F00600000000000000000001 /* Jersey15-Regular.ttf */; };
+		B00600000000000000000002 /* Jersey15-OFL.txt in Resources */ = {isa = PBXBuildFile; fileRef = F00600000000000000000002 /* Jersey15-OFL.txt */; };
 		B00500000000000000000006 /* WorkoutSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00500000000000000000006 /* WorkoutSessionTests.swift */; };
 		B00500000000000000000005 /* CompanionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00500000000000000000005 /* CompanionTests.swift */; };
 		B00500000000000000000004 /* WorkoutSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00500000000000000000004 /* WorkoutSessionView.swift */; };
@@ -48,6 +51,9 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		F00600000000000000000003 /* StudioRenderProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioRenderProtocol.swift; sourceTree = "<group>"; };
+		F00600000000000000000001 /* Jersey15-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Jersey15-Regular.ttf"; sourceTree = "<group>"; };
+		F00600000000000000000002 /* Jersey15-OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Jersey15-OFL.txt"; sourceTree = "<group>"; };
 		F00500000000000000000006 /* WorkoutSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutSessionTests.swift; sourceTree = "<group>"; };
 		F00500000000000000000005 /* CompanionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionTests.swift; sourceTree = "<group>"; };
 		F00500000000000000000004 /* WorkoutSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutSessionView.swift; sourceTree = "<group>"; };
@@ -179,6 +185,8 @@
 			isa = PBXGroup;
 			children = (
 				F0010000000000000000000E /* Assets.xcassets */,
+				F00600000000000000000001 /* Jersey15-Regular.ttf */,
+				F00600000000000000000002 /* Jersey15-OFL.txt */,
 				F00100000000000000000010 /* Info.plist */,
 			);
 			path = Resources;
@@ -188,6 +196,7 @@
 			isa = PBXGroup;
 			children = (
 				F00500000000000000000006 /* WorkoutSessionTests.swift */,
+				F00600000000000000000003 /* StudioRenderProtocol.swift */,
 				F00500000000000000000005 /* CompanionTests.swift */,
 				F0010000000000000000000F /* ModelDecodingTests.swift */,
 			);
@@ -292,6 +301,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				B00100000000000000000014 /* Assets.xcassets in Resources */,
+				B00600000000000000000001 /* Jersey15-Regular.ttf in Resources */,
+				B00600000000000000000002 /* Jersey15-OFL.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -341,6 +352,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B00500000000000000000006 /* WorkoutSessionTests.swift in Sources */,
+				B00600000000000000000003 /* StudioRenderProtocol.swift in Sources */,
 				B00500000000000000000005 /* CompanionTests.swift in Sources */,
 				B0010000000000000000000F /* ModelDecodingTests.swift in Sources */,
 			);

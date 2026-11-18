@@ -1,5 +1,25 @@
 import Foundation
 
+/// Every workout entry point captures its date and opens the same logger.
+struct WorkoutSessionSelection: Identifiable {
+    let id = UUID()
+    let date: String
+    let session: WorkoutPlanPayload.PlannedDay
+    let allowsTypeEditing: Bool
+
+    static func planned(_ session: WorkoutPlanPayload.PlannedDay, date: String) -> Self {
+        Self(date: date, session: session, allowsTypeEditing: false)
+    }
+
+    static func manual(date: String, exercise: WorkoutLoggerSelection? = nil) -> Self {
+        let type = WorkoutLoggerType.value(for: exercise?.type ?? "Push")
+        let name = exercise?.exercise.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return Self(date: date,
+                    session: .init(type: type, exercises: name.isEmpty || type == "Rest" ? [] : [.init(name: name)]),
+                    allowsTypeEditing: true)
+    }
+}
+
 /// One planned set the user fills in during a session. Nothing here is saved
 /// until Finish workout confirms it.
 struct SessionSet: Identifiable, Equatable {
@@ -63,6 +83,7 @@ struct WorkoutSessionDraft: Equatable {
         }
     }
 
+    var canStart: Bool { WorkoutLoggerType.isValid(type) && !exercises.isEmpty }
     var plannedSetCount: Int { exercises.reduce(0) { $0 + $1.sets.count } }
     var completedSetCount: Int { exercises.reduce(0) { $0 + $1.doneCount } }
 
@@ -131,8 +152,18 @@ struct WorkoutSessionDraft: Equatable {
     /// Replaces an exercise for today only; its rows start over.
     mutating func swap(exercise oldName: String, with newName: String) {
         guard let e = exercises.firstIndex(where: { $0.name == oldName }),
+              !exercises[e].logged,
               !exercises.contains(where: { $0.name == newName }) else { return }
         exercises[e] = SessionExercise(name: newName, sets: (0..<Self.defaultSetCount).map { _ in SessionSet() })
+    }
+
+    @discardableResult
+    mutating func addExercise(_ rawName: String) -> Bool {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              !exercises.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else { return false }
+        exercises.append(SessionExercise(name: name, sets: (0..<Self.defaultSetCount).map { _ in SessionSet() }))
+        return true
     }
 
     mutating func markLogged(_ exerciseName: String) {

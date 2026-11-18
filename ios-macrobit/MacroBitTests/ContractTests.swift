@@ -73,6 +73,41 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(Set(calls.map { $0.1 }), ["/api/today","/api/day/2026-11-16","/api/presets","/api/log","/api/log-preset","/api/meal/fixture-meal","/api/trends", calls.last!.1])
     }
 
+    func testTurnSerializesCanonicalUUIDsWithoutChangingValuesOrMessage() async throws {
+        let sessionID = try XCTUnwrap(UUID(uuidString: "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF"))
+        let turnID = try XCTUnwrap(UUID(uuidString: "FEDCBAFE-DCBA-4FED-9CBA-FEDCBAFEDCBA"))
+        let message = "Log ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF exactly AS IS"
+        var calls = 0
+        FixtureProtocol.handler = { request in
+            calls += 1
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/api/agent-canvas/abcdefab-cdef-4abc-8def-abcdefabcdef/turn")
+            let json = try self.body(request)
+            XCTAssertEqual(Set(json.keys), ["turn_id", "message"])
+            XCTAssertEqual(json["turn_id"] as? String, "fedcbafe-dcba-4fed-9cba-fedcbafedcba")
+            XCTAssertEqual(json["message"] as? String, message)
+            XCTAssertEqual(request.url?.pathComponents.dropLast().last.flatMap(UUID.init(uuidString:)), sessionID)
+            XCTAssertEqual((json["turn_id"] as? String).flatMap(UUID.init(uuidString:)), turnID)
+            return (200, Data(#"{"reply":"OK","quickReplies":[]}"#.utf8))
+        }
+        _ = try await client().turn(sessionID: sessionID, turnID: turnID, message: message)
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(sessionID.uuidString, "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF")
+        XCTAssertEqual(turnID.uuidString, "FEDCBAFE-DCBA-4FED-9CBA-FEDCBAFEDCBA")
+    }
+
+    func testStringRouteIdentifierPreservesCase() async throws {
+        var calls = 0
+        FixtureProtocol.handler = { request in
+            calls += 1
+            XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertEqual(request.url?.path, "/api/meal/ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF")
+            return (200, self.dayJSON)
+        }
+        _ = try await client().deleteMeal("ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF")
+        XCTAssertEqual(calls, 1)
+    }
+
     func testNullsAndAuthoritativeEffectiveDate() async throws {
         FixtureProtocol.handler = { _ in (200, self.dayJSON) }
         let store = AppStore(api: client(), vault: MemoryVault())
@@ -142,8 +177,10 @@ final class ContractTests: XCTestCase {
 
     func testTimeoutRetryReusesExactTurnAndMessage() async {
         var bodies = [[String: Any]]()
+        var paths = [String]()
         FixtureProtocol.handler = { request in
             if request.url!.path == "/api/today" { return (200, self.dayJSON) }
+            paths.append(request.url!.path)
             bodies.append(try self.body(request))
             if bodies.count == 1 { throw URLError(.timedOut) }
             return (200, Data(#"{"reply":"Saved once","quickReplies":[]}"#.utf8))
@@ -151,8 +188,11 @@ final class ContractTests: XCTestCase {
         let store = AppStore(api: client(), vault: MemoryVault())
         await store.send("Log it")
         XCTAssertNotNil(store.retryTurn)
+        let pendingID = store.retryTurn?.id
         await store.retryLastTurn()
         XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual(paths, Array(repeating: "/api/agent-canvas/\(store.sessionID.uuidString.lowercased())/turn", count: 2))
+        XCTAssertEqual(bodies[0]["turn_id"] as? String, pendingID?.uuidString.lowercased())
         XCTAssertEqual(bodies[0]["turn_id"] as? String, bodies[1]["turn_id"] as? String)
         XCTAssertEqual(bodies[0]["message"] as? String, bodies[1]["message"] as? String)
         XCTAssertNil(store.retryTurn)

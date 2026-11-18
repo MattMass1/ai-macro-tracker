@@ -33,7 +33,7 @@ final class APIClient {
     func logPreset(_ body: LogPresetBody) async throws -> DayPayload { try await request("api/log-preset", method: "POST", body: encode(body)) }
     func deleteMeal(_ id: String) async throws -> DayPayload { try await request("api/meal/\(encoded(id))", method: "DELETE") }
     func turn(sessionID: UUID, turnID: UUID, message: String) async throws -> CoachTurn {
-        try await request("api/agent-canvas/\(sessionID.uuidString)/turn", method: "POST", body: JSONEncoder().encode(["turn_id": turnID.uuidString, "message": message]), chat: true)
+        try await request("api/agent-canvas/\(sessionID.uuidString.lowercased())/turn", method: "POST", body: JSONEncoder().encode(["turn_id": turnID.uuidString.lowercased(), "message": message]), chat: true)
     }
 
     private func encode<T: Encodable>(_ body: T) throws -> Data {

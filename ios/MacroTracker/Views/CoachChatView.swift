@@ -15,19 +15,35 @@ struct CoachMessage: Identifiable {
     enum Role { case user, assistant }
 }
 
-/// The classic Coach tab: a plain message feed on top of the agent. The agent
-/// keeps every ability it has (log food by text with at most one question,
-/// swap today's or tomorrow's workout, answer macro questions); the phone only
-/// shows bubbles, one confirm row for workout changes, and the measurements
-/// form when asked.
+/// One conversation in the pixel studio, shared by meal and workout actions.
 struct CoachChatView: View {
     @EnvironmentObject private var store: AppStore
+    var openWorkouts: () -> Void = {}
+    var body: some View { CoachConversationView(chat: store.chat, openWorkouts: openWorkouts) }
+}
+
+private struct CoachConversationView: View {
+    @EnvironmentObject private var store: AppStore
     @EnvironmentObject private var auth: AuthService
-    @State private var messages: [CoachMessage] = []
-    @State private var input = ""
-    @State private var isSending = false
+    @ObservedObject var chat: CoachChatStore
+    let openWorkouts: () -> Void
+    @State private var showFoodDay = false
+    private var messages: [CoachMessage] { chat.messages }
+    private var showsSummary: Bool {
+        messages.isEmpty || (messages.count == 1 && messages.first?.text == CoachChatStore.welcomeText)
+    }
+    private var input: String {
+        get { chat.input }
+        nonmutating set { chat.input = newValue }
+    }
+    private var isSending: Bool { chat.isSending }
     @State private var showSignOutConfirm = false
-    @State private var showScanSheet = false
+    private struct ScanPresentation: Identifiable {
+        let id = UUID()
+        let accountSession: AppStore.AccountSession
+        let conversation: CoachChatStore.Context
+    }
+    @State private var scanPresentation: ScanPresentation?
     @State private var showManual = false
     @FocusState private var inputFocused: Bool
 
@@ -39,56 +55,93 @@ struct CoachChatView: View {
     ]
 
     var body: some View {
-        ZStack {
-            Theme.canvas.ignoresSafeArea()
-            VStack(spacing: 0) {
-                coachHeader
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 10) {
-                            ForEach(messages) { message in
-                                VStack(alignment: .leading, spacing: 10) {
-                                    if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                        CoachBubble(message: message)
-                                    }
-                                    if message.role == .assistant, let approval = message.approval, approval.status != "resolved" {
-                                        ApprovalRow(approval: approval, isBusy: isSending,
-                                                    onConfirm: { Task { await respond(to: approval, confirm: true, in: message.id) } },
-                                                    onCancel: { Task { await respond(to: approval, confirm: false, in: message.id) } })
-                                    }
-                                    if message.role == .assistant, !message.quickReplies.isEmpty {
-                                        QuickReplyRow(labels: message.quickReplies, isBusy: isSending) { label in
-                                            Task { await sendChat(label) }
-                                        }
-                                    }
-                                    if message.role == .assistant, message.showsMetricsForm {
-                                        MetricsFormCard(
-                                            fields: MetricsField.standard,
-                                            isSaving: isSending,
-                                            onSave: { values in
-                                                Task {
-                                                    dismissMetricsForm(message.id)
-                                                    await sendChat(Self.metricsSummary(fields: MetricsField.standard, values: values))
-                                                }
-                                            },
-                                            onDismiss: { dismissMetricsForm(message.id) }
-                                        )
-                                    }
+        VStack(spacing: 0) {
+            GeometryReader { geometry in
+                let layout = StudioLayout(width: geometry.size.width, height: geometry.size.height)
+                ZStack(alignment: .bottom) {
+                    StudioBackground(alignment: .bottom)
+                    VStack(spacing: 12) {
+                        coachHeader
+                        VStack(spacing: 0) {
+                            HStack {
+                                Text("Coach / meals + workouts")
+                                    .font(Theme.pixelFont(StudioLayout.panelTitleSize)).textCase(.uppercase)
+                                Spacer()
+                                Button { showFoodDay = true } label: {
+                                    Image(systemName: "fork.knife").frame(width: 44, height: 44)
                                 }
-                                .id(message.id)
+                                .accessibilityLabel("Meals and macros")
+                                .accessibilityIdentifier("studio.meals")
                             }
-                            if isSending { TypingBubble() }
-                            Color.clear.frame(height: 1).id("end")
-                        }.padding(16)
+                            .foregroundStyle(Theme.ink)
+                            .padding(.horizontal, 14)
+                            .background(Theme.accentTint)
+                            ScrollViewReader { proxy in
+                                ScrollView {
+                                    LazyVStack(spacing: 10) {
+                                        if showsSummary { studioSummary }
+                                        ForEach(showsSummary ? [] : messages) { message in
+                                            VStack(alignment: .leading, spacing: 10) {
+                                                if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                                    CoachBubble(message: message)
+                                                }
+                                                if message.role == .assistant, let approval = message.approval, approval.status != "resolved" {
+                                                    ApprovalRow(approval: approval, isBusy: isSending,
+                                                                onConfirm: { Task { await respond(to: approval, confirm: true, in: message.id) } },
+                                                                onCancel: { Task { await respond(to: approval, confirm: false, in: message.id) } })
+                                                }
+                                                if message.role == .assistant, !message.quickReplies.isEmpty {
+                                                    QuickReplyRow(labels: message.quickReplies, isBusy: isSending) { label in
+                                                        Task { await sendChat(label) }
+                                                    }
+                                                }
+                                                if message.role == .assistant, message.showsMetricsForm {
+                                                    MetricsFormCard(
+                                                        fields: MetricsField.standard,
+                                                        isSaving: isSending,
+                                                        onSave: { values in
+                                                            Task {
+                                                                chat.dismissMetricsForm(message.id)
+                                                                await sendChat(Self.metricsSummary(fields: MetricsField.standard, values: values))
+                                                            }
+                                                        },
+                                                        onDismiss: { chat.dismissMetricsForm(message.id) }
+                                                    )
+                                                }
+                                            }
+                                            .id(message.id)
+                                        }
+                                        if isSending { TypingBubble() }
+                                        quickActionChips
+                                        Color.clear.frame(height: 1).id("end")
+                                    }.padding(16)
+                                }
+                                .scrollDismissesKeyboard(.interactively)
+                                .onChange(of: messages.count) { _, _ in
+                                    if !showsSummary { withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
+                                }
+                            }
+                            FatSecretAttribution().padding(.vertical, 4)
+                        }
+                        .background(Theme.surface, in: PixelPanelShape())
+                        .overlay(PixelPanelShape().stroke(Theme.accentEdge, lineWidth: 2))
+                        .padding(.horizontal, 20)
+                        .accessibilityIdentifier("studio.conversation")
+                        if showsCompanion {
+                            CompanionStage(chat: chat, character: character, size: layout.companionSize)
+                                .frame(maxWidth: .infinity)
+                                .padding(.bottom, 8)
+                                .frame(height: layout.floorHeight, alignment: .bottom)
+                                .accessibilityIdentifier("studio.companion")
+                        }
                     }
-                    .scrollDismissesKeyboard(.interactively)
-                    .onChange(of: messages.count) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
+                    .padding(.top, 8)
                 }
-                quickActionChips
-                FatSecretAttribution().padding(.vertical, 6)
-                composer
             }
+            composer
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .background(Theme.dock)
         .navigationBarHidden(true)
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
@@ -97,13 +150,26 @@ struct CoachChatView: View {
             }
         }
         .sheet(isPresented: $showManual) { ManualFoodView() }
-        .sheet(isPresented: $showScanSheet) {
-            ScanFoodSheet(onLogged: { name, calories in
-                messages.append(CoachMessage(role: .assistant, text: "Logged \(name), \(Int(calories)) kcal."))
+        .sheet(isPresented: $showFoodDay) {
+            NavigationStack {
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Meals and macros").font(Theme.pixelFont(26))
+                        Spacer()
+                        Button("Done") { showFoodDay = false }
+                    }
+                    .padding().background(Theme.dock)
+                    TodayView(onAskCoach: { showFoodDay = false })
+                }
+            }
+        }
+        .sheet(item: $scanPresentation) { presentation in
+            ScanFoodSheet(accountSession: presentation.accountSession, onLogged: { name, calories in
+                chat.recordLoggedMeal(name: name, calories: calories, context: presentation.conversation)
             })
         }
         .task {
-            await loadChatHistory()
+            await chat.loadHistory()
             await sendPendingFromHome()
         }
         .onChange(of: store.pendingCoachMessage) { _, _ in Task { await sendPendingFromHome() } }
@@ -117,23 +183,61 @@ struct CoachChatView: View {
     // MARK: - Pieces
 
     private var coachHeader: some View {
-        HStack(spacing: 11) {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Your day").font(Theme.pixelFont(StudioLayout.titleSize, relativeTo: .title))
+                    .foregroundStyle(Theme.sectionInk)
+                Text(store.selectedDate.formatted(.dateTime.weekday(.wide).month(.abbreviated).day()))
+                    .font(.caption).foregroundStyle(Theme.muted)
+            }
+            Spacer()
             Menu {
+                Picker("Coach artwork", selection: $characterRaw) {
+                    ForEach(CompanionCharacter.allCases) { Text($0.displayName).tag($0.rawValue) }
+                }
+                Toggle("Show coach artwork", isOn: $showsCompanion)
+                Button("Manual food entry", systemImage: "plus") { showManual = true }
+                Button("Meals and macros", systemImage: "fork.knife") { showFoodDay = true }
                 Button("Sign out", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { showSignOutConfirm = true }
             } label: {
-                CompanionStage(chat: store.chat, character: character, size: 64)
-                    .background(Theme.accentTint, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).stroke(Theme.edge))
+                Image(systemName: "slider.horizontal.3")
+                    .frame(width: 44, height: 44)
+                    .background(Theme.dock, in: PixelPanelShape())
+                    .overlay(PixelPanelShape().stroke(Theme.edgeStrong))
             }
             .accessibilityLabel("Coach menu")
-            CoachStatus(chat: store.chat)
-            Spacer()
-            Button("Manual", systemImage: "slider.horizontal.3") { showManual = true }
-                .font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
-        .background(Theme.surface)
-        .overlay(alignment: .bottom) { Divider().overlay(Theme.divider) }
+        .padding(.leading, 64).padding(.trailing, 24)
+    }
+
+    private var studioSummary: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("What are we working on?").font(Theme.pixelFont(StudioLayout.summaryTitleSize, relativeTo: .title2))
+            Text("Tell me what you ate, review your day, or plan your next workout.")
+                .font(.footnote).foregroundStyle(Theme.muted)
+            if let day = store.day {
+                Button { showFoodDay = true } label: {
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(store.isToday ? "Food today" : "Food log").font(Theme.pixelFont(20))
+                            Text("\(day.meals.count) meals logged").font(.caption)
+                        }
+                        Spacer()
+                        Text("\(Int(day.totals.calories.rounded())) kcal").font(Theme.pixelFont(20))
+                        Image(systemName: "chevron.right")
+                    }
+                    .padding(12).background(Theme.accentTint, in: PixelPanelShape())
+                }
+                .buttonStyle(.plain)
+            }
+            Button(action: openWorkouts) {
+                Label("View workout", systemImage: "dumbbell.fill")
+            }
+            .buttonStyle(PixelSecondaryButtonStyle(fullWidth: true))
+            .accessibilityIdentifier("studio.workout")
+        }
+        .foregroundStyle(Theme.ink)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// One-tap starters for the things the coach does most; each is just a
@@ -145,59 +249,74 @@ struct CoachChatView: View {
                     Button(action.label) { Task { await sendChat(action.message) } }
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Theme.accent)
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(Theme.accentTint, in: Capsule())
+                        .padding(.horizontal, 10)
+                        .frame(minHeight: 44)
+                        .background(Theme.accentTint, in: PixelPanelShape())
                         .disabled(isSending)
                 }
             }
-            .padding(.horizontal, 16)
         }
         .padding(.top, 4)
     }
 
     private var composer: some View {
-        VStack(spacing: 0) {
-            Divider()
-            HStack(spacing: 9) {
+        VStack(spacing: 6) {
+            HStack {
+                Text("Your companion").textCase(.uppercase).font(Theme.pixelFont(StudioLayout.dockLabelSize))
+                Spacer()
+                Text(chat.isResponding ? "Writing" : "Meals + workouts").font(.caption2)
+            }
+            .foregroundStyle(Theme.sectionInk)
+            HStack(spacing: 4) {
                 Menu {
                     Button("Scan Barcode", systemImage: "barcode.viewfinder") {
                         dismissKeyboard()
-                        showScanSheet = true
+                        scanPresentation = ScanPresentation(accountSession: store.accountSession, conversation: chat.context)
                     }
+                    Button("Manual food entry", systemImage: "plus") { dismissKeyboard(); showManual = true }
                 } label: {
-                    Image(systemName: "barcode.viewfinder").font(.body).foregroundStyle(Theme.accent)
-                        .frame(width: 42, height: 42).background(Theme.accentTint, in: Circle())
+                    Text("Ask Coach").font(Theme.pixelFont(19))
+                        .foregroundStyle(Theme.accent).frame(minHeight: 44)
                 }
-                TextField("Message Coach", text: $input, axis: .vertical)
+                .accessibilityLabel("Meal entry options")
+                TextField("Ask, log or adjust", text: $chat.input, axis: .vertical)
+                    .font(.footnote)
+                    .accessibilityIdentifier("studio.composer")
                     .lineLimit(1...4)
                     .focused($inputFocused)
-                    .padding(.horizontal, 14).padding(.vertical, 11)
-                    .background(Theme.input, in: RoundedRectangle(cornerRadius: 18))
+                    .padding(.vertical, 8)
                     .submitLabel(.send)
                     .onSubmit { if !trimmedInput.isEmpty { Task { await send() } } }
                 Button { Task { await send() } } label: {
-                    Image(systemName: "arrow.up").fontWeight(.bold)
+                    Image(systemName: "arrow.up").font(.subheadline.bold())
                         .frame(width: 44, height: 44)
-                        .background(trimmedInput.isEmpty ? Color.secondary.opacity(0.14) : Theme.accent, in: Circle())
-                        .foregroundStyle(trimmedInput.isEmpty ? Color.secondary : .white)
+                        .foregroundStyle(trimmedInput.isEmpty ? Theme.inactive : Theme.accent)
                 }
                 .disabled(trimmedInput.isEmpty || isSending)
+                .accessibilityLabel("Send to Coach")
             }
-            .padding(12)
-            .background(Theme.surface)
+            .padding(.leading, 10)
+            .background(Theme.paper, in: PixelPanelShape())
+            .overlay(PixelPanelShape().stroke(Theme.edgeStrong, lineWidth: 1))
+            .studioFrame("composer.row")
         }
+        .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 4)
+        .background(Theme.dock)
+        .overlay(alignment: .top) { Rectangle().fill(Theme.accentEdge).frame(height: 2) }
+        .studioFrame("composer")
     }
 
     private var trimmedInput: String { input.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     @AppStorage(CompanionPreferences.characterKey) private var characterRaw = CompanionCharacter.male.rawValue
+    @AppStorage(CompanionPreferences.visibleKey) private var showsCompanion = true
     private var character: CompanionCharacter { CompanionCharacter(rawValue: characterRaw) ?? .male }
 
     // MARK: - Actions
 
     /// A message typed into the home dock is sent exactly once, here.
     private func sendPendingFromHome() async {
-        guard let message = store.pendingCoachMessage, !isSending else { return }
+        guard let message = store.pendingCoachMessage else { return }
         store.pendingCoachMessage = nil
         await sendChat(message)
     }
@@ -216,92 +335,13 @@ struct CoachChatView: View {
     }
 
     private func sendChat(_ message: String) async {
-        guard !isSending else { return }
-        clearQuickReplies()  // an answered question's buttons must not be tapped again
-        messages.append(CoachMessage(role: .user, text: message))
-        isSending = true
-        defer { isSending = false }
-        // A Render cold start can take 30-60 s; retry the server-waking case.
-        for attempt in 0...2 {
-            do {
-                let turn = try await store.chat.send(message)
-                append(turn)
-                await store.loadDay()  // the coach can log food on any turn
-                return
-            } catch let error as APIError where error.status == 429 {
-                messages.append(CoachMessage(role: .assistant, text: "You're at today's coach limit."))
-                return
-            } catch {
-                let text = error.localizedDescription
-                let waking = text.lowercased().contains("waking") || text.lowercased().contains("try again")
-                    || text.lowercased().contains("timeout")
-                if waking && attempt < 2 {
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    continue
-                }
-                messages.append(CoachMessage(role: .assistant, text: text))
-                return
-            }
-        }
+        if await chat.sendMessage(message) { await store.loadDay() }
     }
 
-    private func respond(to approval: CoachApproval, confirm: Bool, in messageId: UUID) async {
-        guard !isSending else { return }
-        isSending = true
-        defer { isSending = false }
-        do {
-            let turn = try await store.chat.respond(approval: approval.id, confirm: confirm)
-            if let index = messages.firstIndex(where: { $0.id == messageId }) {
-                messages[index].approval = CoachApproval(id: approval.id, title: approval.title,
-                                                         detail: approval.detail, status: "resolved")
-            }
-            let fallback = confirm ? "Done. Your workout is updated." : "Cancelled. Nothing was changed."
-            append(turn, fallback: fallback)
+    private func respond(to approval: CoachApproval, confirm: Bool, in messageID: UUID) async {
+        if await chat.respondToApproval(approval, confirm: confirm, in: messageID) {
             await store.loadWorkoutData()
-        } catch {
-            messages.append(CoachMessage(role: .assistant, text: error.localizedDescription))
-        }
-    }
-
-    private func append(_ turn: CoachTurn, fallback: String = "") {
-        let text = turn.reply?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        messages.append(CoachMessage(role: .assistant,
-                                     text: text.isEmpty ? fallback : text,
-                                     approval: turn.approval?.status == "pending" || turn.approval?.status == nil ? turn.approval : nil,
-                                     showsMetricsForm: turn.wantsMetricsForm,
-                                     quickReplies: turn.quickReplies))
-    }
-
-    private func clearQuickReplies() {
-        for index in messages.indices where !messages[index].quickReplies.isEmpty {
-            messages[index].quickReplies = []
-        }
-    }
-
-    private func dismissMetricsForm(_ id: UUID) {
-        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
-        messages[index].showsMetricsForm = false
-    }
-
-    private func seedGreeting() {
-        guard messages.isEmpty else { return }
-        messages.append(CoachMessage(role: .assistant, text: "Tell me what you ate and I'll log it, or ask about today's workout."))
-    }
-
-    private func loadChatHistory() async {
-        do {
-            let history = try await store.chat.history(limit: 100)
-            guard messages.isEmpty else { return }
-            let restored = history.compactMap { item -> CoachMessage? in
-                switch item.role {
-                case "user": return CoachMessage(role: .user, text: item.content)
-                case "assistant": return CoachMessage(role: .assistant, text: item.content)
-                default: return nil
-                }
-            }
-            if restored.isEmpty { seedGreeting() } else { messages = restored }
-        } catch {
-            seedGreeting()
+            await store.loadDay()
         }
     }
 
@@ -341,20 +381,6 @@ struct CoachChatView: View {
     }
 }
 
-/// "Writing" while a request is pending, "Ready" otherwise; same source as the pen.
-private struct CoachStatus: View {
-    @ObservedObject var chat: CoachChatStore
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Coach").font(.headline).foregroundStyle(Theme.ink)
-            HStack(spacing: 5) {
-                Circle().fill(Theme.accent).frame(width: 7, height: 7)
-                Text(chat.isResponding ? "Writing" : "Ready").font(.caption).foregroundStyle(Theme.muted)
-            }
-        }
-    }
-}
-
 private struct CoachBubble: View {
     let message: CoachMessage
     var body: some View {
@@ -364,9 +390,9 @@ private struct CoachBubble: View {
                 .font(.subheadline)
                 .padding(.horizontal, 14).padding(.vertical, 11)
                 .background(message.role == .user ? Theme.accentTint : Theme.surface,
-                            in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
                 .foregroundStyle(Theme.ink)
-                .shadow(color: message.role == .assistant ? .black.opacity(0.04) : .clear, radius: 4, y: 1)
+                .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).stroke(message.role == .user ? Theme.edgeStrong : Theme.edge))
             if message.role == .assistant { Spacer(minLength: 52) }
         }
     }

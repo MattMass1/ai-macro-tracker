@@ -2,46 +2,66 @@ import SwiftUI
 import UIKit
 import Charts
 
-/// Four tabs: Today (the studio home, default), Coach, Workouts, Progress.
+/// Three destinations: the art-first studio and shared chat, workouts, progress.
 struct ContentView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab = 0  // Today home
+    @State private var keyboardPresented = false
+    @State private var visitedTabs: Set<Int> = [0]
 
     init(initialTab: Int = 0) {
-        _selectedTab = State(initialValue: initialTab)
+        let tab = [0, 2, 3].contains(initialTab) ? initialTab : 0
+        _selectedTab = State(initialValue: tab)
+        _visitedTabs = State(initialValue: [tab])
     }
 
     var body: some View {
-        ZStack(alignment: .top) {
-            TabView(selection: $selectedTab) {
-                NavigationStack { HomeView(openCoach: openCoach) }
-                    .tabItem { Label("Today", systemImage: "house.fill") }
-                    .tag(0)
-                NavigationStack { CoachChatView() }
-                    .tabItem { Label("Coach", systemImage: "bubble.left.and.bubble.right.fill") }
-                    .tag(1)
-                NavigationStack { WorkoutsView() }
-                    .tabItem { Label("Workouts", systemImage: "dumbbell.fill") }
-                    .tag(2)
-                NavigationStack { ProgressDashboardView() }
-                    .tabItem { Label("Progress", systemImage: "chart.line.uptrend.xyaxis") }
-                    .tag(3)
-            }
+        VStack(spacing: 0) {
+            ZStack(alignment: .top) {
+                // Retain visited destinations without an invisible native tab
+                // container clipping the custom dock at its safe-area boundary.
+                if visitedTabs.contains(0) {
+                    NavigationStack { HomeView(openWorkouts: { selectedTab = 2 }) }
+                        .opacity(selectedTab == 0 ? 1 : 0)
+                        .allowsHitTesting(selectedTab == 0)
+                        .accessibilityHidden(selectedTab != 0)
+                }
+                if visitedTabs.contains(2) {
+                    NavigationStack { WorkoutsView(openCoach: openCoach, isActive: selectedTab == 2) }
+                        .opacity(selectedTab == 2 ? 1 : 0)
+                        .allowsHitTesting(selectedTab == 2)
+                        .accessibilityHidden(selectedTab != 2)
+                }
+                if visitedTabs.contains(3) {
+                    NavigationStack { ProgressDashboardView(isActive: selectedTab == 3) }
+                        .opacity(selectedTab == 3 ? 1 : 0)
+                        .allowsHitTesting(selectedTab == 3)
+                        .accessibilityHidden(selectedTab != 3)
+                }
 
-            if let toast = store.toast {
-                Label(toast, systemImage: "checkmark.circle.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.ink)
-                    .padding(.horizontal, 16).padding(.vertical, 10)
-                    .background(Theme.surface, in: Capsule())
-                    .shadow(color: Theme.ink.opacity(0.12), radius: 16, y: 6)
-                    .padding(.top, 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                if let toast = store.toast {
+                    Label(toast, systemImage: "checkmark.circle.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.ink)
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .background(Theme.surface, in: Capsule())
+                        .shadow(color: Theme.ink.opacity(0.12), radius: 16, y: 6)
+                        .padding(.top, 8)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
             }
+            // The tab row occupies real height outside the destination stack.
+            if !keyboardPresented { StudioTabBar(selection: $selectedTab) }
         }
+        .background(Theme.dock)
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in keyboardPresented = true }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardPresented = false }
         .animation(.spring(response: 0.35, dampingFraction: 0.78), value: store.toast)
-        .onChange(of: selectedTab) { _, _ in dismissKeyboard() }
+        .onChange(of: selectedTab) { _, tab in
+            visitedTabs.insert(tab)
+            dismissKeyboard()
+        }
         .task { await store.loadAll() }
         .onChange(of: scenePhase) { _, phase in
             // Reload when the app returns to the foreground so the day rolls
@@ -58,10 +78,10 @@ struct ContentView: View {
         }
     }
 
-    /// Home dock and session sheet hand off here; the Coach tab sends the text.
+    /// Every contextual shortcut returns to the same studio conversation.
     private func openCoach(_ message: String?) {
         if let message, !message.isEmpty { store.pendingCoachMessage = message }
-        selectedTab = 1
+        selectedTab = 0
     }
 
     private func dismissKeyboard() {
@@ -71,7 +91,17 @@ struct ContentView: View {
 
 struct ProgressDashboardView: View {
     @EnvironmentObject private var store: AppStore
+    var isActive = true
     @State private var selectedWindow = 7
+    private struct RefreshIdentity: Hashable {
+        let active: Bool
+        let window: Int
+    }
+
+    init(isActive: Bool = true, initialWindow: Int = 7) {
+        self.isActive = isActive
+        _selectedWindow = State(initialValue: initialWindow)
+    }
 
     var body: some View {
         ZStack {
@@ -102,7 +132,9 @@ struct ProgressDashboardView: View {
             }
         }
         .navigationBarHidden(true)
-        .task(id: selectedWindow) { await store.trends(days: selectedWindow) }
+        .task(id: RefreshIdentity(active: isActive, window: selectedWindow)) {
+            if isActive { await store.trends(days: selectedWindow) }
+        }
         .refreshable { await store.trends(days: selectedWindow) }
     }
 }

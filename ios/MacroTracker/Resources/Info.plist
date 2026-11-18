@@ -33,6 +33,10 @@
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<false/>
 	</dict>
+	<key>UIAppFonts</key>
+	<array>
+		<string>Jersey15-Regular.ttf</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIRequiredDeviceCapabilities</key>

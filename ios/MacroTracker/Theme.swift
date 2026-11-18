@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// One pixel language, from the room to the controls (design package v12):
-/// sage and cream surfaces, forest-green edging, square-ish corners. Text and
-/// inputs stay system-font native controls so nothing gets harder to read.
+/// sage and cream surfaces, stepped borders and Jersey 15 display lettering.
+/// Paragraphs and editable inputs stay native for readability and accessibility.
 enum Theme {
     static let accent = Color(red: 22 / 255, green: 86 / 255, blue: 57 / 255)        // #165639 forest
     static let accentDark = Color(red: 16 / 255, green: 61 / 255, blue: 40 / 255)    // #103d28
@@ -27,8 +27,36 @@ enum Theme {
     static let fiber = Color(red: 124 / 255, green: 58 / 255, blue: 237 / 255)
     static let danger = Color(red: 190 / 255, green: 45 / 255, blue: 45 / 255)
 
+    static func pixelFont(_ size: CGFloat, relativeTo style: Font.TextStyle = .headline) -> Font {
+        .custom("Jersey15-Regular", size: size, relativeTo: style)
+    }
+
     static let cardRadius: CGFloat = 10
     static let controlRadius: CGFloat = 3
+}
+
+/// A stepped silhouette, not a rounded modern card. Insets stay pixel aligned.
+struct PixelPanelShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let step = min(4, min(rect.width, rect.height) / 4)
+        let x = rect.minX, y = rect.minY, r = rect.maxX, b = rect.maxY
+        let points = [
+            CGPoint(x: x + step * 2, y: y), CGPoint(x: r - step * 2, y: y),
+            CGPoint(x: r - step * 2, y: y + step), CGPoint(x: r - step, y: y + step),
+            CGPoint(x: r - step, y: y + step * 2), CGPoint(x: r, y: y + step * 2),
+            CGPoint(x: r, y: b - step * 2), CGPoint(x: r - step, y: b - step * 2),
+            CGPoint(x: r - step, y: b - step), CGPoint(x: r - step * 2, y: b - step),
+            CGPoint(x: r - step * 2, y: b), CGPoint(x: x + step * 2, y: b),
+            CGPoint(x: x + step * 2, y: b - step), CGPoint(x: x + step, y: b - step),
+            CGPoint(x: x + step, y: b - step * 2), CGPoint(x: x, y: b - step * 2),
+            CGPoint(x: x, y: y + step * 2), CGPoint(x: x + step, y: y + step * 2),
+            CGPoint(x: x + step, y: y + step), CGPoint(x: x + step * 2, y: y + step)
+        ]
+        return Path { path in
+            path.addLines(points)
+            path.closeSubpath()
+        }
+    }
 }
 
 extension View {
@@ -36,9 +64,9 @@ extension View {
     func appCard(padding: CGFloat = 16) -> some View {
         self
             .padding(padding)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous).stroke(Theme.edge, lineWidth: 1))
-            .shadow(color: Color(red: 35 / 255, green: 55 / 255, blue: 29 / 255).opacity(0.04), radius: 3, y: 2)
+            .background(Theme.surface, in: PixelPanelShape())
+            .overlay(PixelPanelShape().stroke(Theme.edgeStrong, lineWidth: 1))
+            .shadow(color: Theme.accentEdge.opacity(0.3), radius: 0, y: 3)
     }
 }
 
@@ -47,13 +75,13 @@ struct PixelPrimaryButtonStyle: ButtonStyle {
     var fullWidth = true
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.subheadline.weight(.bold))
+            .font(Theme.pixelFont(20))
             .foregroundStyle(.white)
             .padding(.horizontal, 16)
             .frame(maxWidth: fullWidth ? .infinity : nil, minHeight: 46)
-            .background(Theme.accent, in: RoundedRectangle(cornerRadius: Theme.controlRadius))
+            .background(Theme.accent, in: PixelPanelShape())
             .overlay(alignment: .bottom) { Rectangle().fill(Theme.accentDark).frame(height: 3) }
-            .overlay(RoundedRectangle(cornerRadius: Theme.controlRadius).stroke(Theme.accentDark, lineWidth: 2))
+            .overlay(PixelPanelShape().stroke(Theme.accentDark, lineWidth: 2))
             .opacity(configuration.isPressed ? 0.8 : 1)
     }
 }
@@ -63,12 +91,12 @@ struct PixelSecondaryButtonStyle: ButtonStyle {
     var fullWidth = false
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.subheadline.weight(.bold))
+            .font(Theme.pixelFont(20))
             .foregroundStyle(Theme.accent)
             .padding(.horizontal, 14)
             .frame(maxWidth: fullWidth ? .infinity : nil, minHeight: 44)
-            .background(Theme.accentTint, in: RoundedRectangle(cornerRadius: Theme.controlRadius))
-            .overlay(RoundedRectangle(cornerRadius: Theme.controlRadius).stroke(Theme.edgeStrong, lineWidth: 1))
+            .background(Theme.accentTint, in: PixelPanelShape())
+            .overlay(PixelPanelShape().stroke(Theme.edgeStrong, lineWidth: 1))
             .opacity(configuration.isPressed ? 0.8 : 1)
     }
 }

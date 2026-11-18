@@ -2,34 +2,58 @@ import SwiftUI
 
 struct WorkoutsView: View {
     @EnvironmentObject private var store: AppStore
-    @State private var loggerSelection: WorkoutLoggerSelection?
+    let openCoach: (String?) -> Void
+    var isActive = true
+    @State private var sessionSelection: WorkoutSessionSelection?
     @State private var librarySelection: WorkoutLoggerSelection?
+    @State private var libraryDate: String?
     @State private var showLibrary = false
     @State private var historyScope = 0
+    @AppStorage(CompanionPreferences.characterKey) private var characterRaw = CompanionCharacter.male.rawValue
+    @AppStorage(CompanionPreferences.visibleKey) private var showsCompanion = true
+
     var body: some View {
-        ZStack { Theme.canvas.ignoresSafeArea()
+        ZStack {
+            StudioBackground(alignment: .bottom)
+            VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
-                    DayPicker(date: store.selectedDate, canGoForward: !store.isToday) { delta in Task { await store.moveDay(by: delta) } }
+                    HStack {
+                        Text("Workouts").font(Theme.pixelFont(StudioLayout.titleSize, relativeTo: .title)).foregroundStyle(Theme.ink)
+                        Spacer()
+                        Button("Plan with Coach") { openCoach("Help me with my workout plan.") }
+                            .font(.caption.weight(.bold)).foregroundStyle(Theme.accent)
+                    }
+                    DayPicker(date: store.selectedDate, canGoForward: !store.isToday) { delta in
+                        Task { await store.moveDay(by: delta) }
+                    }
                     if store.isToday, let plan = store.plan, plan.hasPlan == true, let session = plan.upcoming.first {
-                        TodaysSessionCard(
-                            session: session,
-                            date: store.dateString,
-                            onLog: { loggerSelection = $0 },
-                            onAddMore: { showLibrary = true }
-                        )
-                        .id(session.type)
+                        PlannedWorkoutCard(session: session) {
+                            sessionSelection = .planned(session, date: store.dateString)
+                        }
                     }
-                    if store.isToday, let tomorrow = store.plan?.tomorrow {
-                        TomorrowWorkoutCard(day: tomorrow)
+                    HStack {
+                        Button("New workout", systemImage: "plus") {
+                            sessionSelection = .manual(date: store.dateString)
+                        }
+                        .buttonStyle(PixelPrimaryButtonStyle())
+                        Menu {
+                            Button("Choose an exercise", systemImage: "list.bullet") { libraryDate = store.dateString; showLibrary = true }
+                            Button("Log rest day", systemImage: "moon") {
+                                sessionSelection = .manual(date: store.dateString, exercise: .init(type: "Rest", exercise: "Rest Day"))
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis").frame(width: 46, height: 46)
+                        }
+                        .buttonStyle(PixelSecondaryButtonStyle())
+                        .accessibilityLabel("Workout options")
                     }
+                    if store.isToday, let tomorrow = store.plan?.tomorrow { TomorrowWorkoutCard(day: tomorrow) }
                     if store.isLoadingWorkouts && store.stats == nil { workoutSkeleton }
                     if let stats = store.stats { WorkoutDashboard(stats: stats) }
-                    if let plan = store.plan, (plan.hasPlan != true || !store.isToday) {
-                        WorkoutPlanCard(plan: plan)
-                    }
+                    if let plan = store.plan, (plan.hasPlan != true || !store.isToday) { WorkoutPlanCard(plan: plan) }
                     Picker("History range", selection: $historyScope) {
-                        Text("Today").tag(0)
+                        Text("Selected day").tag(0)
                         Text("All").tag(1)
                     }
                     .pickerStyle(.segmented)
@@ -38,23 +62,36 @@ struct WorkoutsView: View {
                     } else {
                         AggregateWorkoutHistory(workouts: store.workoutHistoryEntries) { id in Task { await store.deleteWorkout(id) } }
                     }
-                }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 96)
-            }.refreshable {
+                }
+                .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 24)
+            }
+            .refreshable {
                 async let selectedDay: Void = store.loadWorkoutData()
                 async let fullHistory: Void = store.workoutHistory()
                 _ = await (selectedDay, fullHistory)
             }
+            if showsCompanion {
+                CompanionStage(chat: store.chat, character: CompanionCharacter(rawValue: characterRaw) ?? .male, size: 144)
+                    .frame(maxWidth: .infinity)
+            }
+            }
         }
-        .task { await store.workoutHistory() }
+        .task(id: isActive) {
+            if isActive { await store.workoutHistory() }
+        }
         .navigationBarHidden(true)
-        .sheet(item: $loggerSelection) { selection in
-            WorkoutLoggerView(initialType: selection.type, initialExercise: selection.exercise)
+        .sheet(item: $sessionSelection) { selection in
+            WorkoutSessionView(selection: selection, onAskCoach: { text in
+                sessionSelection = nil
+                openCoach(text)
+            })
         }
         .sheet(isPresented: $showLibrary, onDismiss: {
             if let selection = librarySelection {
                 librarySelection = nil
-                loggerSelection = selection
+                sessionSelection = .manual(date: libraryDate ?? store.dateString, exercise: selection)
             }
+            libraryDate = nil
         }) {
             ExerciseLibraryView { selection in
                 librarySelection = selection
@@ -62,7 +99,34 @@ struct WorkoutsView: View {
             }
         }
     }
-    private var workoutSkeleton: some View { VStack(spacing: 10) { HStack { RoundedRectangle(cornerRadius: 20).frame(height: 130); RoundedRectangle(cornerRadius: 20).frame(height: 130) }; RoundedRectangle(cornerRadius: 20).frame(height: 160) }.foregroundStyle(Theme.surface).redacted(reason: .placeholder).shimmering() }
+
+    private var workoutSkeleton: some View {
+        RoundedRectangle(cornerRadius: Theme.cardRadius).fill(Theme.surface).frame(height: 130)
+            .redacted(reason: .placeholder).shimmering()
+    }
+}
+
+/// A summary, not a second checklist or set-entry interface.
+struct PlannedWorkoutCard: View {
+    let session: WorkoutPlanPayload.PlannedDay
+    let onStart: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionLabel(text: "Today's workout")
+            Text(session.type).font(.title2.bold()).foregroundStyle(Theme.ink)
+            if session.exercises.isEmpty {
+                Text("No exercises assigned yet. Add an exercise when you open the workout.")
+                    .font(.subheadline).foregroundStyle(Theme.muted)
+            } else {
+                Text(session.exercises.map(\.name).joined(separator: " · "))
+                    .font(.subheadline).foregroundStyle(Theme.muted)
+            }
+            Button("Open workout", action: onStart).buttonStyle(PixelPrimaryButtonStyle())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .appCard()
+    }
 }
 
 struct TomorrowWorkoutCard: View {
@@ -157,168 +221,6 @@ enum CanonicalWorkoutType {
             ["Quads", "Hams", "Legs"].contains { $0.caseInsensitiveCompare(muscleGroup) == .orderedSame }
         }) { return "Legs" }
         return "Push"
-    }
-}
-
-/// Session-local rows and checkmarks. Saved-plan refreshes are separate from
-/// local swaps; unchanged server input must not undo a user's local selection.
-final class WorkoutSessionCardState: ObservableObject {
-    @Published var exercises: [String]
-    @Published var completed: Set<String>
-
-    init(session: WorkoutPlanPayload.PlannedDay, date: String) {
-        exercises = session.exercises.map(\.name)
-        completed = WorkoutSessionCompletions.saved(date: date, type: session.type)
-    }
-}
-
-struct TodaysSessionCard: View {
-    let session: WorkoutPlanPayload.PlannedDay
-    let date: String
-    let onLog: (WorkoutLoggerSelection) -> Void
-    let onAddMore: () -> Void
-    @StateObject private var state: WorkoutSessionCardState
-    private var exercises: [String] { state.exercises }
-    private var completed: Set<String> { state.completed }
-    @State private var swapTarget: (index: Int, name: String)?
-
-    init(
-        session: WorkoutPlanPayload.PlannedDay,
-        date: String,
-        onLog: @escaping (WorkoutLoggerSelection) -> Void,
-        onAddMore: @escaping () -> Void,
-        state: WorkoutSessionCardState? = nil
-    ) {
-        self.session = session
-        self.date = date
-        self.onLog = onLog
-        self.onAddMore = onAddMore
-        _state = StateObject(wrappedValue: state ?? WorkoutSessionCardState(session: session, date: date))
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    SectionLabel(text: "Today's session")
-                    Text(session.type).font(.title3.weight(.bold)).foregroundStyle(Theme.ink)
-                }
-                Spacer()
-                Image(systemName: "figure.strengthtraining.traditional")
-                    .foregroundStyle(Theme.accent)
-                    .padding(10)
-                    .background(Theme.accentTint, in: Circle())
-            }
-            if exercises.isEmpty {
-                Text("No exercises assigned for this session.")
-                    .font(.subheadline).foregroundStyle(Theme.muted)
-            } else {
-                ForEach(Array(exercises.enumerated()), id: \.offset) { index, name in
-                    WorkoutExerciseRow(
-                        name: name,
-                        isCompleted: completed.contains(name),
-                        onToggle: { toggle(name) },
-                        onLog: { onLog(.init(type: session.type, exercise: name)) },
-                        onSwap: { onSwap(name, index) }
-                    )
-                    if index < exercises.count - 1 { Divider() }
-                }
-            }
-            Button(action: onAddMore) {
-                Label("Add more", systemImage: "plus")
-                    .font(.subheadline.weight(.bold)).frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered).tint(Theme.accent)
-        }
-        .appCard()
-        .task {
-            WorkoutSessionCompletions.pruneOld()
-        }
-        .onChange(of: session.exercises.map(\.name)) { _, names in
-            // @StateObject survives a same-type reload. Only a changed saved
-            // list replaces local swaps; completed checkmarks are kept.
-            state.exercises = names
-            swapTarget = nil
-        }
-        .onChange(of: date) { _, newDate in
-            state.exercises = session.exercises.map(\.name)
-            state.completed = WorkoutSessionCompletions.saved(date: newDate, type: session.type)
-            swapTarget = nil
-        }
-        .sheet(item: Binding(
-            get: { swapTarget.map { SwapTarget(index: $0.index, name: $0.name) } },
-            set: { swapTarget = $0.map { (index: $0.index, name: $0.name) } }
-        )) { target in
-            ExerciseLibraryView { selection in
-                swapExercise(at: target.index, from: target.name, to: selection.exercise)
-                swapTarget = nil
-            }
-        }
-    }
-
-    private struct SwapTarget: Identifiable {
-        let index: Int
-        let name: String
-        var id: String { "\(index)|\(name)" }
-    }
-
-    private func onSwap(_ name: String, _ index: Int) {
-        swapTarget = (index: index, name: name)
-    }
-
-    private func toggle(_ name: String) {
-        if completed.contains(name) { state.completed.remove(name) } else { state.completed.insert(name) }
-        saveCompletions()
-    }
-
-    private func swapExercise(at index: Int, from oldName: String, to newName: String) {
-        // A library callback may arrive after the saved plan was shortened.
-        guard exercises.indices.contains(index), exercises[index] == oldName else { return }
-        state.exercises[index] = newName
-        if state.completed.remove(oldName) != nil {
-            state.completed.insert(newName)
-        }
-        saveCompletions()
-    }
-
-    private func saveCompletions() {
-        WorkoutSessionCompletions.save(completed, date: date, type: session.type)
-    }
-}
-
-private struct WorkoutExerciseRow: View {
-    let name: String
-    let isCompleted: Bool
-    let onToggle: () -> Void
-    let onLog: () -> Void
-    let onSwap: () -> Void
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Button(action: onToggle) {
-                Image(systemName: isCompleted ? "checkmark.circle.fill" : "circle")
-                    .font(.title3)
-                    .foregroundStyle(isCompleted ? Theme.accent : Theme.muted)
-            }
-            .buttonStyle(.plain)
-
-            Button(action: onLog) {
-                Text(name)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(isCompleted ? Theme.muted : Theme.ink)
-                    .strikethrough(isCompleted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            Button(action: onSwap) {
-                Text("SWAP")
-                    .font(.caption2.weight(.bold))
-                    .tracking(0.8)
-                    .foregroundStyle(Theme.accent)
-            }
-        }
     }
 }
 
@@ -553,17 +455,23 @@ private struct MetricBlock: View {
 
 private struct WorkoutPlanCard: View {
     let plan: WorkoutPlanPayload
-    @State private var completed: Set<String> = []
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack { SectionLabel(text: "Next in rotation"); Spacer(); if let next = plan.upcoming.first { Text(next.type).font(.caption.weight(.bold)).padding(.horizontal, 9).padding(.vertical, 5).background(Theme.accent.opacity(0.12), in: Capsule()).foregroundStyle(Theme.accent) } }
+        VStack(alignment: .leading, spacing: 10) {
+            SectionLabel(text: "Your program")
             if let next = plan.upcoming.first {
-                ForEach(next.exercises) { exercise in Button { toggle(exercise.name) } label: { HStack { Image(systemName: completed.contains(exercise.name) ? "checkmark.circle.fill" : "circle").foregroundStyle(completed.contains(exercise.name) ? Theme.accent : .secondary); Text(exercise.name).strikethrough(completed.contains(exercise.name)).foregroundStyle(completed.contains(exercise.name) ? .secondary : .primary); Spacer() }.contentShape(Rectangle()) }.buttonStyle(.plain).padding(.vertical, 2) }
-            } else { Text("No exercises tagged for the next rotation.").font(.subheadline).foregroundStyle(.secondary) }
-            if !plan.core.isEmpty { Divider(); Text("CORE, ANY DAY").font(.caption2.weight(.bold)).tracking(1.2).foregroundStyle(.secondary); Text(plan.core.map(\.name).joined(separator: "  ·  ")).font(.caption).foregroundStyle(.secondary) }
+                Text("Next: \(next.type)").font(.headline).foregroundStyle(Theme.ink)
+                Text(next.exercises.map(\.name).joined(separator: " · "))
+                    .font(.subheadline).foregroundStyle(Theme.muted)
+            } else {
+                Text("No workout planned. Use New workout, or plan with Coach.")
+                    .font(.subheadline).foregroundStyle(Theme.muted)
+            }
+            if !plan.core.isEmpty {
+                SectionLabel(text: "Core, any day")
+                Text(plan.core.map(\.name).joined(separator: " · ")).font(.caption).foregroundStyle(Theme.muted)
+            }
         }.appCard()
     }
-    private func toggle(_ name: String) { withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { if completed.contains(name) { completed.remove(name) } else { completed.insert(name) } } }
 }
 
 private struct WorkoutHistory: View {
@@ -658,67 +566,4 @@ enum WorkoutLoggerType {
         let selected = value(for: label)
         return CanonicalWorkoutType.all + (selected.isEmpty || CanonicalWorkoutType.all.contains(selected) ? [] : [selected])
     }
-}
-
-struct WorkoutLoggerView: View {
-    @EnvironmentObject private var store: AppStore
-    @Environment(\.dismiss) private var dismiss
-    @State private var exercise: String; @State private var type: String; @State private var sets = [WorkoutSet(weight: 0, reps: 0)]; @State private var last: LastWorkoutPayload?; @State private var isSaving = false
-    @FocusState private var inputFocused: Bool
-    private let types: [String]
-    private var suggestions: [KnownExercise] { store.exercises.filter { $0.workoutType.contains(type) } }
-    private var onLogged: ((WorkoutEntry) -> Void)?
-    init(initialType: String = "Push", initialExercise: String = "", onLogged: ((WorkoutEntry) -> Void)? = nil) {
-        _type = State(initialValue: WorkoutLoggerType.value(for: initialType))
-        types = WorkoutLoggerType.choices(for: initialType)
-        _exercise = State(initialValue: initialExercise)
-        self.onLogged = onLogged
-    }
-    var body: some View {
-        NavigationStack {
-            ScrollView { VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 9) { SectionLabel(text: "Training type"); ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(types, id: \.self) { item in Button(item) { inputFocused = false; type = item; exercise = item == "Rest" ? "Rest Day" : ""; sets = [WorkoutSet(weight: 0, reps: 0)] }.buttonStyle(.borderedProminent).tint(type == item ? Theme.accent : Theme.input).foregroundStyle(type == item ? .white : Theme.sectionInk) } } } }
-                if type != "Rest" {
-                    VStack(alignment: .leading, spacing: 9) {
-                        HStack { SectionLabel(text: "Exercise"); Spacer(); if let last, !last.sets.isEmpty { Button("Fill last time") { sets = Array(last.sets.prefix(4)) }.font(.caption.weight(.bold)) } }
-                        TextField("Barbell bench press", text: $exercise).textInputAutocapitalization(.words).focused($inputFocused).padding(14).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14)).onChange(of: exercise) { _, value in lookupLastWorkout(value) }.onDisappear { lastWorkoutTask?.cancel() }
-                        if !suggestions.isEmpty { ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(suggestions) { item in Button(item.name) { inputFocused = false; exercise = item.name }.font(.caption).buttonStyle(.bordered) } } } }
-                    }
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack { SectionLabel(text: "Sets"); Spacer(); Button("Add set", systemImage: "plus") { if sets.count < 4 { sets.append(WorkoutSet(weight: 0, reps: 0)) } }.font(.caption.weight(.bold)).disabled(sets.count == 4) }
-                        HStack { Text("SET").frame(width: 30); Text("WEIGHT").frame(maxWidth: .infinity); Text("REPS").frame(maxWidth: .infinity); Color.clear.frame(width: 28) }.font(.caption2.weight(.bold)).foregroundStyle(.secondary)
-                        ForEach(sets.indices, id: \.self) { index in HStack { Text("\(index + 1)").font(.caption.monospacedDigit()).frame(width: 30); TextField("lb", value: $sets[index].weight, format: .number).keyboardType(.decimalPad).focused($inputFocused).multilineTextAlignment(.center).padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12)); TextField("reps", value: $sets[index].reps, format: .number).keyboardType(.numberPad).focused($inputFocused).multilineTextAlignment(.center).padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12)); Button(role: .destructive) { inputFocused = false; if sets.count > 1 { sets.remove(at: index) } } label: { Image(systemName: "minus.circle").frame(width: 44, height: 44) }.disabled(sets.count == 1) } }
-                    }
-                }
-                Button { submit() } label: { if isSaving { ProgressView().tint(.white) } else { Text(type == "Rest" ? "Log rest day" : "Log exercise").fontWeight(.bold) } }.frame(maxWidth: .infinity).frame(height: 52).background(Theme.accent, in: RoundedRectangle(cornerRadius: 16)).foregroundStyle(.white).disabled(isSaving || !WorkoutLoggerType.isValid(type) || (type != "Rest" && (exercise.trimmingCharacters(in: .whitespaces).isEmpty || !sets.contains { $0.weight > 0 || $0.reps > 0 }))).opacity(isSaving ? 0.6 : 1)
-            }.padding(16) }
-            .scrollDismissesKeyboard(.interactively)
-            .background(Theme.canvas)
-            .navigationTitle("Log workout")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("Done") { inputFocused = false }.fontWeight(.semibold)
-                }
-            }
-        }
-        .presentationDetents([.large])
-        .task {
-            if !exercise.isEmpty { lookupLastWorkout(exercise) }
-        }
-    }
-    @State private var lastWorkoutTask: Task<Void, Never>?
-    private func lookupLastWorkout(_ value: String) {
-        lastWorkoutTask?.cancel()
-        guard value.count > 2 else { last = nil; return }
-        let query = value
-        lastWorkoutTask = Task { @MainActor in
-            let result = await store.lastWorkout(query)
-            guard !Task.isCancelled, exercise == query else { return }
-            last = result
-        }
-    }
-    private func submit() { guard WorkoutLoggerType.isValid(type) else { return }; inputFocused = false; Task { isSaving = true; let valid = type == "Rest" ? [] : sets.filter { $0.weight > 0 || $0.reps > 0 }; if await store.logWorkout(exercise: type == "Rest" ? "Rest Day" : exercise, sets: valid, type: type, onLogged: onLogged) { dismiss() }; isSaving = false } }
 }

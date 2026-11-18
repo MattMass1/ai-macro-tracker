@@ -26,6 +26,22 @@ final class APIClient {
     private let tokenProvider: () -> String?
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
+    /// Captured synchronously by the account-owning store before any await.
+    /// A missing token stays missing; it must never fall back to a later login.
+    struct AuthenticationContext {
+        fileprivate let token: String?
+        fileprivate let identityScope: String?
+    }
+
+    func authenticationContext() -> AuthenticationContext {
+        let token = tokenProvider()
+        return AuthenticationContext(token: token, identityScope: identityScope(token: token))
+    }
+
+    func isCurrentAuthenticationRejection(_ notification: Notification) -> Bool {
+        guard let rejectedScope = notification.userInfo?["identityScope"] as? String else { return false }
+        return rejectedScope == (canvasIdentityScope ?? "anonymous")
+    }
 
     init(baseURL: URL? = Config.apiURL,
          tokenProvider: @escaping () -> String? = { KeychainStore.deviceToken },
@@ -46,59 +62,61 @@ final class APIClient {
     func today() async throws -> DayPayload { try await get("api/today") }
     func day(_ date: String) async throws -> DayPayload { try await get("api/day/\(encoded(date))") }
     func presets() async throws -> PresetsPayload { try await get("api/presets") }
-    func logMeal(_ body: LogMealBody) async throws -> DayPayload { try await send("api/log", body: body) }
-    func logPreset(_ body: LogPresetBody) async throws -> DayPayload { try await send("api/log-preset", body: body) }
-    func barcodeFood(code: String) async throws -> BarcodeFoodPayload {
-        try await send("api/food/barcode", body: BarcodeFoodRequest(code: code))
+    func logMeal(_ body: LogMealBody, authentication: AuthenticationContext) async throws -> DayPayload { try await send("api/log", body: body, authentication: authentication) }
+    func logPreset(_ body: LogPresetBody, authentication: AuthenticationContext) async throws -> DayPayload { try await send("api/log-preset", body: body, authentication: authentication) }
+    func barcodeFood(code: String, authentication: AuthenticationContext) async throws -> BarcodeFoodPayload {
+        try await send("api/food/barcode", body: BarcodeFoodRequest(code: code), authentication: authentication)
     }
-    func deleteMeal(_ id: String) async throws -> DayPayload { try await delete("api/meal/\(encoded(id))") }
+    func deleteMeal(_ id: String, authentication: AuthenticationContext) async throws -> DayPayload { try await delete("api/meal/\(encoded(id))", authentication: authentication) }
     func exercises() async throws -> ExercisesPayload { try await get("api/exercises") }
     func library(query: String? = nil) async throws -> LibraryPayload {
         let path = query.map { "api/library?q=\(encoded($0))" } ?? "api/library"
         return try await get(path)
     }
     func plan() async throws -> WorkoutPlanPayload { try await get("api/plan") }
-    func savePlan(_ body: WorkoutPlanWrite) async throws -> SavePlanPayload { try await send("api/plan", body: body) }
+    func savePlan(_ body: WorkoutPlanWrite, authentication: AuthenticationContext) async throws -> SavePlanPayload { try await send("api/plan", body: body, authentication: authentication) }
     func workoutStats() async throws -> WorkoutStatsPayload { try await get("api/workout-stats") }
     func workouts(_ date: String) async throws -> WorkoutsPayload { try await get("api/workouts/\(encoded(date))") }
     func workoutHistory(exercise: String? = nil, limit: Int = 200) async throws -> WorkoutHistoryPayload {
         try await get("api/workouts/history?exercise=\(encoded(exercise ?? ""))&limit=\(limit)")
     }
     func lastWorkout(_ exercise: String) async throws -> LastWorkoutPayload { try await get("api/workouts/last?exercise=\(encoded(exercise))") }
-    func logWorkout(_ body: LogWorkoutBody) async throws -> WorkoutEntry { try await send("api/workout", body: body) }
-    func deleteWorkout(_ id: String) async throws -> DeletedPayload { try await delete("api/workout/\(encoded(id))") }
+    func logWorkout(_ body: LogWorkoutBody, authentication: AuthenticationContext) async throws -> WorkoutEntry { try await send("api/workout", body: body, authentication: authentication) }
+    func deleteWorkout(_ id: String, authentication: AuthenticationContext) async throws -> DeletedPayload { try await delete("api/workout/\(encoded(id))", authentication: authentication) }
     func brief(_ date: String? = nil) async throws -> BriefPayload { try await get("api/brief\(date.map { "?date=\(encoded($0))" } ?? "")") }
-    func saveBrief(_ text: String, date: String? = nil) async throws -> BriefPayload { try await send("api/brief", body: BriefRequest(text: text, date: date)) }
+    func saveBrief(_ text: String, date: String? = nil, authentication: AuthenticationContext) async throws -> BriefPayload { try await send("api/brief", body: BriefRequest(text: text, date: date), authentication: authentication) }
     func trends(days: Int) async throws -> TrendsPayload { try await get("api/trends?days=\(days)") }
 
     /// Opaque high-entropy credential fingerprint, never the token itself.
     /// Include the API origin/path so test and production cannot share UI state.
-    var canvasIdentityScope: String? {
-        guard let baseURL, let token = tokenProvider(), !token.isEmpty else { return nil }
+    var canvasIdentityScope: String? { authenticationContext().identityScope }
+
+    private func identityScope(token: String?) -> String? {
+        guard let baseURL, let token, !token.isEmpty else { return nil }
         return SHA256.hash(data: Data((baseURL.absoluteString + "\n" + token).utf8))
             .map { String(format: "%02x", $0) }.joined()
     }
 
     /// One coach turn: the agent reads the message, uses its tools, replies.
-    func canvasTurn(sessionId: String, turnId: String, message: String) async throws -> CoachTurn {
+    func canvasTurn(sessionId: String, turnId: String, message: String, authentication: AuthenticationContext) async throws -> CoachTurn {
         let body = try JSONEncoder().encode(["turn_id": turnId, "message": message])
-        return try await request("api/agent-canvas/\(encoded(sessionId))/turn", method: "POST", body: body, canvas: true)
+        return try await request("api/agent-canvas/\(encoded(sessionId))/turn", method: "POST", body: body, canvas: true, authentication: authentication)
     }
     /// Confirm or cancel a pending workout change.
-    func canvasAction(sessionId: String, intent: CoachIntent) async throws -> CoachTurn {
+    func canvasAction(sessionId: String, intent: CoachIntent, authentication: AuthenticationContext) async throws -> CoachTurn {
         try await request("api/agent-canvas/\(encoded(sessionId))/action", method: "POST",
-                          body: JSONEncoder().encode(intent), canvas: true)
+                          body: JSONEncoder().encode(intent), canvas: true, authentication: authentication)
     }
-    func chatHistory(limit: Int) async throws -> [ChatHistoryMessage] {
-        let payload: ChatHistoryPayload = try await get("api/chat/history?limit=\(limit)")
+    func chatHistory(limit: Int, authentication: AuthenticationContext) async throws -> [ChatHistoryMessage] {
+        let payload: ChatHistoryPayload = try await get("api/chat/history?limit=\(limit)", authentication: authentication)
         return payload.messages
     }
 
-    private func get<T: Decodable>(_ path: String) async throws -> T { try await request(path, method: "GET", body: Optional<Data>.none) }
-    private func delete<T: Decodable>(_ path: String) async throws -> T { try await request(path, method: "DELETE", body: Optional<Data>.none) }
-    private func send<T: Decodable, Body: Encodable>(_ path: String, body: Body) async throws -> T { try await request(path, method: "POST", body: encoder.encode(body)) }
+    private func get<T: Decodable>(_ path: String, authentication: AuthenticationContext? = nil) async throws -> T { try await request(path, method: "GET", body: Optional<Data>.none, authentication: authentication) }
+    private func delete<T: Decodable>(_ path: String, authentication: AuthenticationContext) async throws -> T { try await request(path, method: "DELETE", body: Optional<Data>.none, authentication: authentication) }
+    private func send<T: Decodable, Body: Encodable>(_ path: String, body: Body, authentication: AuthenticationContext) async throws -> T { try await request(path, method: "POST", body: encoder.encode(body), authentication: authentication) }
 
-    private func request<T: Decodable>(_ path: String, method: String, body: Data?, authenticated: Bool = true, canvas: Bool = false) async throws -> T {
+    private func request<T: Decodable>(_ path: String, method: String, body: Data?, authenticated: Bool = true, canvas: Bool = false, authentication: AuthenticationContext? = nil) async throws -> T {
         func debugPreview(_ data: Data, limit: Int = 400) -> String {
             let text = String(data: data, encoding: .utf8) ?? "<non-utf8 data, \(data.count) bytes>"
             if text.count > limit {
@@ -108,6 +126,11 @@ final class APIClient {
             return text
         }
 
+        if Task.isCancelled { throw CancellationError() }
+        guard !authenticated || method == "GET" || authentication != nil else {
+            throw APIError(status: 401, message: "Reopen this action in your current session.")
+        }
+        let requestAuthentication = authenticated ? (authentication ?? authenticationContext()) : nil
         guard let baseURL else { throw APIError(status: 500, message: "MACRO_API_URL is missing from Config.xcconfig.") }
         guard let url = URL(string: path, relativeTo: baseURL.appendingPathComponent("/")) else { throw APIError(status: 500, message: "Invalid API URL.") }
         var request = URLRequest(url: url)
@@ -117,8 +140,8 @@ final class APIClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(Config.nutrientContract, forHTTPHeaderField: Config.nutrientContractHeader)
         if authenticated {
-            guard let token = tokenProvider(), !token.isEmpty else {
-                NotificationCenter.default.post(name: .deviceTokenRejected, object: nil)
+            guard let token = requestAuthentication?.token, !token.isEmpty else {
+                NotificationCenter.default.post(name: .deviceTokenRejected, object: nil, userInfo: ["identityScope": requestAuthentication?.identityScope ?? "anonymous"])
                 throw APIError(status: 401, message: "Not signed in.")
             }
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -131,7 +154,10 @@ final class APIClient {
         let data: Data
         let response: URLResponse
         do { (data, response) = try await session.data(for: request) }
-        catch { throw APIError(status: 503, message: "Could not reach the macro service.") }
+        catch {
+            if Task.isCancelled || (error as? URLError)?.code == .cancelled { throw CancellationError() }
+            throw APIError(status: 503, message: "Could not reach the macro service.")
+        }
 
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
         
@@ -139,7 +165,7 @@ final class APIClient {
 
         guard (200..<300).contains(http.statusCode) else {
             if authenticated, http.statusCode == 401 {
-                NotificationCenter.default.post(name: .deviceTokenRejected, object: nil)
+                NotificationCenter.default.post(name: .deviceTokenRejected, object: nil, userInfo: ["identityScope": requestAuthentication?.identityScope ?? "anonymous"])
             }
             let preview = canvas ? "<canvas body withheld>" : debugPreview(data)
             #if DEBUG

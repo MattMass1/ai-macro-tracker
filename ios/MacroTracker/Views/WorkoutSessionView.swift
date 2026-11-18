@@ -10,6 +10,7 @@ struct WorkoutSessionView: View {
     let session: WorkoutPlanPayload.PlannedDay
     let date: String
     let onAskCoach: (String) -> Void
+    let allowsTypeEditing: Bool
 
     @State private var draft: WorkoutSessionDraft
     @State private var isActive = false
@@ -19,14 +20,26 @@ struct WorkoutSessionView: View {
     @State private var showFinishConfirm = false
     @State private var isSaving = false
     @State private var setHint: String?
+    @State private var newExercise = ""
+    @State private var showLibrary = false
+    @State private var showCloseConfirm = false
+    @State private var closeToCoach = false
+    @State private var accountSession: AppStore.AccountSession?
     @FocusState private var inputFocused: Bool
 
     init(session: WorkoutPlanPayload.PlannedDay, date: String, onAskCoach: @escaping (String) -> Void) {
-        self.session = session
-        self.date = date
-        self.onAskCoach = onAskCoach
-        _draft = State(initialValue: WorkoutSessionDraft(type: session.type, exerciseNames: session.exercises.map(\.name)))
+        self.init(selection: .planned(session, date: date), onAskCoach: onAskCoach)
     }
+
+    init(selection: WorkoutSessionSelection, onAskCoach: @escaping (String) -> Void) {
+        session = selection.session
+        date = selection.date
+        allowsTypeEditing = selection.allowsTypeEditing
+        self.onAskCoach = onAskCoach
+        _draft = State(initialValue: WorkoutSessionDraft(type: selection.session.type, exerciseNames: selection.session.exercises.map(\.name)))
+    }
+
+    private var isRest: Bool { draft.type.caseInsensitiveCompare("Rest") == .orderedSame }
 
     private var current: SessionExercise? { draft.exercises.indices.contains(exerciseIndex) ? draft.exercises[exerciseIndex] : nil }
 
@@ -36,19 +49,29 @@ struct WorkoutSessionView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         title
-                        if isActive { activeExercise } else { review }
+                        if allowsTypeEditing && !isActive { trainingTypePicker }
+                        if isRest {
+                            Text("Record a rest day without adding exercises or sets.")
+                                .font(.subheadline).foregroundStyle(Theme.muted)
+                        } else {
+                            if isActive { activeExercise } else { review }
+                            addExerciseControls
+                        }
                     }
                     .padding(16)
                     .padding(.bottom, 24)
                 }
                 .scrollDismissesKeyboard(.interactively)
+                .disabled(isSaving)
                 footer
             }
             .background(Theme.canvas)
-            .navigationTitle("Today's workout")
+            .navigationTitle("Workout")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button(isActive ? "Close" : "Cancel") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { requestClose(toCoach: false) }.disabled(isSaving)
+                }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
                     Button("Done") { inputFocused = false }.fontWeight(.semibold)
@@ -56,8 +79,11 @@ struct WorkoutSessionView: View {
             }
         }
         .presentationDetents([.large])
-        .interactiveDismissDisabled(isActive && draft.completedSetCount > 0)
-        .task { await loadHistory() }
+        .interactiveDismissDisabled(draft.completedSetCount > 0 || isSaving)
+        .task {
+            if accountSession == nil { accountSession = store.accountSession }
+            await loadHistory()
+        }
         .sheet(item: Binding(get: { swapTarget.map(SwapRequest.init) }, set: { swapTarget = $0?.name })) { request in
             ExerciseLibraryView { selection in
                 draft.swap(exercise: request.name, with: selection.exercise)
@@ -65,8 +91,20 @@ struct WorkoutSessionView: View {
                 Task { await loadHistory(for: selection.exercise) }
             }
         }
+        .sheet(isPresented: $showLibrary) {
+            ExerciseLibraryView { selection in
+                addExercise(selection.exercise)
+                showLibrary = false
+            }
+        }
+        .confirmationDialog("Discard unsaved sets?", isPresented: $showCloseConfirm, titleVisibility: .visible) {
+            Button("Discard unsaved sets", role: .destructive) { close() }
+            Button("Keep going", role: .cancel) { closeToCoach = false }
+        } message: {
+            Text("Sets already logged stay saved. Any unfinished sets in this workout will be discarded.")
+        }
         .confirmationDialog(finishTitle, isPresented: $showFinishConfirm, titleVisibility: .visible) {
-            Button("Log \(draft.loggable.count == 1 ? "1 exercise" : "\(draft.loggable.count) exercises")") { Task { await finish() } }
+            Button(isRest ? "Log rest day" : "Log \(draft.loggable.count == 1 ? "1 exercise" : "\(draft.loggable.count) exercises")") { Task { await finish() } }
             Button("Keep going", role: .cancel) {}
         } message: {
             Text(finishMessage)
@@ -75,11 +113,81 @@ struct WorkoutSessionView: View {
 
     private struct SwapRequest: Identifiable { let name: String; var id: String { name } }
 
+    // MARK: - Shared planned and manual editor
+
+    private var trainingTypePicker: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionLabel(text: "Training type")
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack {
+                    ForEach(WorkoutLoggerType.choices(for: draft.type), id: \.self) { type in
+                        Button(type) { draft.type = type }
+                            .buttonStyle(PixelSecondaryButtonStyle())
+                            .opacity(draft.type == type ? 1 : 0.6)
+                    }
+                }
+            }
+            if !WorkoutLoggerType.isValid(draft.type) {
+                Text("Use a short training name with letters, numbers or spaces.")
+                    .font(.caption).foregroundStyle(Theme.danger)
+            }
+            TextField("Or enter a training type", text: $draft.type)
+                .textInputAutocapitalization(.words)
+                .padding(12).background(Theme.paper)
+                .overlay(Rectangle().stroke(Theme.edgeStrong))
+        }
+        .disabled(draft.completedSetCount > 0)
+    }
+
+    private var addExerciseControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                TextField("Exercise name", text: $newExercise)
+                    .textInputAutocapitalization(.words).focused($inputFocused)
+                    .submitLabel(.done).onSubmit { addExercise(newExercise) }
+                Button("Add") { addExercise(newExercise) }
+                    .font(.subheadline.bold()).foregroundStyle(Theme.accent)
+                    .disabled(newExercise.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(12).background(Theme.paper)
+            .overlay(Rectangle().stroke(Theme.edgeStrong))
+            Button("Choose from exercise library", systemImage: "list.bullet") {
+                inputFocused = false
+                showLibrary = true
+            }
+            .buttonStyle(PixelSecondaryButtonStyle(fullWidth: true))
+        }
+    }
+
+    private func startExercise(at index: Int) {
+        guard draft.canStart, draft.exercises.indices.contains(index) else { return }
+        inputFocused = false
+        exerciseIndex = index
+        isActive = true
+    }
+
+    private func addExercise(_ name: String) {
+        guard draft.addExercise(name) else { return }
+        newExercise = ""
+        inputFocused = false
+        Task { await loadHistory(for: name.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    }
+
+    private func requestClose(toCoach: Bool) {
+        closeToCoach = toCoach
+        if !draft.loggable.isEmpty { showCloseConfirm = true } else { close() }
+    }
+
+    private func close() {
+        if closeToCoach { onAskCoach("Help with my \(draft.type) workout on \(date).") }
+        else { dismiss() }
+    }
+
     // MARK: - Review
 
     private var title: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(session.type).font(.system(size: 32, weight: .bold)).foregroundStyle(Theme.ink)
+            Text(draft.type).font(Theme.pixelFont(StudioLayout.titleSize, relativeTo: .title)).foregroundStyle(Theme.ink)
             Text("\(dateLabel) · \(draft.exercises.count) exercises · \(draft.plannedSetCount) planned sets")
                 .font(.subheadline).foregroundStyle(Theme.muted)
         }
@@ -105,8 +213,7 @@ struct WorkoutSessionView: View {
             VStack(spacing: 0) {
                 ForEach(Array(draft.exercises.enumerated()), id: \.element.id) { index, exercise in
                     Button {
-                        exerciseIndex = index
-                        isActive = true
+                        startExercise(at: index)
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 4) {
@@ -123,6 +230,7 @@ struct WorkoutSessionView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .disabled(!draft.canStart)
                     if index < draft.exercises.count - 1 { Divider().overlay(Theme.divider) }
                 }
             }
@@ -142,6 +250,7 @@ struct WorkoutSessionView: View {
                     Spacer()
                     Button("Swap") { swapTarget = exercise.name }
                         .font(.subheadline.weight(.bold)).foregroundStyle(Theme.accent)
+                        .disabled(exercise.logged)
                 }
                 VStack(alignment: .leading, spacing: 3) {
                     Text("\(exercise.sets.count) working sets").font(.subheadline).foregroundStyle(Theme.sectionInk)
@@ -149,15 +258,19 @@ struct WorkoutSessionView: View {
                         Text("Last session: \(setLabel(top))").font(.subheadline).foregroundStyle(Theme.muted)
                     }
                 }
-                setTable(exercise)
+                setTable(exercise).disabled(exercise.logged)
                 if let setHint {
                     Text(setHint).font(.caption).foregroundStyle(Theme.danger)
                 }
                 HStack {
                     Button("Add set", systemImage: "plus") { draft.addSet(to: exercise.name) }
                         .font(.caption.weight(.bold)).foregroundStyle(Theme.accent)
-                        .disabled(exercise.sets.count >= WorkoutSessionDraft.maxSetCount)
+                        .disabled(exercise.logged || exercise.sets.count >= WorkoutSessionDraft.maxSetCount)
                     Spacer()
+                }
+                if exercise.logged {
+                    Label("Already logged", systemImage: "checkmark.circle.fill")
+                        .font(.subheadline).foregroundStyle(Theme.accent)
                 }
                 restRow
                 exercisePager
@@ -298,25 +411,24 @@ struct WorkoutSessionView: View {
             Text(isActive ? "\(draft.completedSetCount) of \(draft.plannedSetCount) planned sets done"
                           : "Review first. Nothing is logged until you confirm.")
                 .font(.caption).foregroundStyle(Theme.muted)
-            if isActive {
+            if isActive || isRest {
                 Button {
                     inputFocused = false
                     showFinishConfirm = true
                 } label: {
-                    if isSaving { ProgressView().tint(.white) } else { Text("Finish workout") }
+                    if isSaving { ProgressView().tint(.white) } else { Text(isRest ? "Log rest day" : "Finish workout") }
                 }
                 .buttonStyle(PixelPrimaryButtonStyle())
-                .disabled(isSaving)
+                .disabled(isSaving || (!isRest && draft.loggable.isEmpty) || !WorkoutLoggerType.isValid(draft.type))
             } else {
                 Button("Start workout") {
-                    exerciseIndex = 0
-                    isActive = true
+                    startExercise(at: 0)
                 }
                 .buttonStyle(PixelPrimaryButtonStyle())
-                .disabled(draft.exercises.isEmpty)
+                .disabled(!draft.canStart)
             }
             Button {
-                onAskCoach("Help with today's \(session.type) workout.")
+                requestClose(toCoach: true)
             } label: {
                 HStack(spacing: 8) {
                     Text("Ask Coach").font(.subheadline.weight(.bold)).foregroundStyle(Theme.sectionInk)
@@ -331,6 +443,7 @@ struct WorkoutSessionView: View {
                 .overlay(RoundedRectangle(cornerRadius: Theme.controlRadius).stroke(Theme.edgeStrong, lineWidth: 2))
             }
             .buttonStyle(.plain)
+            .disabled(isSaving)
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
         .background(Theme.dock)
@@ -338,10 +451,11 @@ struct WorkoutSessionView: View {
     }
 
     private var finishTitle: String {
-        draft.loggable.isEmpty ? "No sets to log yet" : "Finish and log this workout?"
+        isRest ? "Log a rest day?" : (draft.loggable.isEmpty ? "No sets to log yet" : "Finish and log this workout?")
     }
 
     private var finishMessage: String {
+        if isRest { return "Record a rest day for \(dateLabel)." }
         guard !draft.loggable.isEmpty else { return "Mark at least one set done with a load or reps, then finish." }
         return draft.loggable.map { "\($0.exercise): \($0.sets.map(setLabel).joined(separator: ", "))" }.joined(separator: "\n")
     }
@@ -349,29 +463,42 @@ struct WorkoutSessionView: View {
     // MARK: - Actions
 
     private func loadHistory() async {
+        guard let accountSession, store.isCurrent(accountSession) else { return }
         await withTaskGroup(of: (String, LastWorkoutPayload?).self) { group in
-            for exercise in draft.exercises { group.addTask { await (exercise.name, store.lastWorkout(exercise.name)) } }
+            for exercise in draft.exercises { group.addTask { await (exercise.name, store.lastWorkout(exercise.name, session: accountSession)) } }
             for await (name, last) in group {
-                guard let last else { continue }
+                guard store.isCurrent(accountSession), let last else { continue }
                 draft.applyLast(exercise: name, sets: last.sets, date: last.date)
             }
         }
     }
 
     private func loadHistory(for name: String) async {
-        guard let last = await store.lastWorkout(name) else { return }
+        guard let accountSession, store.isCurrent(accountSession),
+              let last = await store.lastWorkout(name, session: accountSession), store.isCurrent(accountSession) else { return }
         draft.applyLast(exercise: name, sets: last.sets, date: last.date)
     }
 
     private func finish() async {
+        guard !isSaving, WorkoutLoggerType.isValid(draft.type),
+              let accountSession, store.isCurrent(accountSession) else { return }
+        if isRest {
+            isSaving = true
+            defer { isSaving = false }
+            if await store.logWorkout(exercise: "Rest Day", sets: [], type: "Rest", date: date, session: accountSession), store.isCurrent(accountSession) { dismiss() }
+            return
+        }
         let entries = draft.loggable
         guard !entries.isEmpty, !isSaving else { return }
         isSaving = true
         defer { isSaving = false }
         for entry in entries {
-            guard await store.logWorkout(exercise: entry.exercise, sets: entry.sets, type: draft.type) else { return }
+            guard store.isCurrent(accountSession),
+                  await store.logWorkout(exercise: entry.exercise, sets: entry.sets, type: draft.type, date: date, session: accountSession),
+                  store.isCurrent(accountSession) else { return }
             draft.markLogged(entry.exercise)
         }
+        guard store.isCurrent(accountSession) else { return }
         var completed = WorkoutSessionCompletions.saved(date: date, type: session.type)
         for exercise in draft.exercises where exercise.logged { completed.insert(exercise.name) }
         WorkoutSessionCompletions.save(completed, date: date, type: session.type)

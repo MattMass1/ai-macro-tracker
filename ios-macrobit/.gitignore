@@ -1,0 +1,5 @@
+Config.xcconfig
+xcuserdata/
+build/
+DerivedData/
+*.xcresult

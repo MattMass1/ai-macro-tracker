@@ -32,6 +32,10 @@ final class APIClient {
     func logMeal(_ body: LogMealBody) async throws -> DayPayload { try await request("api/log", method: "POST", body: encode(body)) }
     func logPreset(_ body: LogPresetBody) async throws -> DayPayload { try await request("api/log-preset", method: "POST", body: encode(body)) }
     func deleteMeal(_ id: String) async throws -> DayPayload { try await request("api/meal/\(encoded(id))", method: "DELETE") }
+    /// Logs a meal already in the log again. The server copies the stored numbers; the app never sends any.
+    func repeatMeal(_ id: String, _ body: RepeatMealBody = RepeatMealBody()) async throws -> DayPayload { try await request("api/meal/\(encoded(id))/repeat", method: "POST", body: encode(body)) }
+    /// Saves a meal already in the log as a saved-meal button, with its stored numbers.
+    func saveMealAsPreset(_ id: String, _ body: SaveMealPresetBody = SaveMealPresetBody()) async throws -> PresetsPayload { try await request("api/meal/\(encoded(id))/save-preset", method: "POST", body: encode(body)) }
     func turn(sessionID: UUID, turnID: UUID, message: String) async throws -> CoachTurn {
         try await request("api/agent-canvas/\(sessionID.uuidString.lowercased())/turn", method: "POST", body: JSONEncoder().encode(["turn_id": turnID.uuidString.lowercased(), "message": message]), chat: true)
     }

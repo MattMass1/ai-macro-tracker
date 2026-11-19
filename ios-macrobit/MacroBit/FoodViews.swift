@@ -29,15 +29,38 @@ struct TodayView: View {
                     HStack { SectionLabel(text: "Meals"); Spacer(); Button("Manual entry") { manual = true }.buttonStyle(PixelSecondaryButtonStyle()) }
                     if day.meals.isEmpty { EmptyState(icon: "fork.knife", title: "A fresh log", message: "Start in the Studio chat, tap a saved meal or enter one.") }
                     ForEach(day.meals) { entry in
-                        HStack(alignment: .top) {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(entry.name).font(.headline)
-                                Text("\(entry.meal) · \(entry.calories.formatted()) kcal").font(.subheadline)
-                                Text("P \(nutrientText(entry.protein)) · C \(nutrientText(entry.carbs)) · F \(nutrientText(entry.fat)) · Fiber \(nutrientText(entry.fiber))").font(.caption)
-                                if let source = entry.macroSource { Text(source).font(.caption2).foregroundStyle(Theme.muted) }
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(entry.name).font(.headline)
+                                    Text("\(entry.meal) · \(entry.calories.formatted()) kcal").font(.subheadline)
+                                    Text("P \(nutrientText(entry.protein)) · C \(nutrientText(entry.carbs)) · F \(nutrientText(entry.fat)) · Fiber \(nutrientText(entry.fiber))").font(.caption)
+                                    if let source = entry.macroSource { Text(source).font(.caption2).foregroundStyle(Theme.muted) }
+                                }
+                                Spacer()
+                                Button { deleting = entry } label: { Image(systemName: "trash").frame(width: 44, height: 44) }.accessibilityLabel("Delete \(entry.name)").disabled(store.isMutating)
                             }
-                            Spacer()
-                            Button { deleting = entry } label: { Image(systemName: "trash").frame(width: 44, height: 44) }.accessibilityLabel("Delete \(entry.name)").disabled(store.isMutating)
+                            if entry.nutrientsComplete {
+                                // The server copies this entry's stored numbers for both actions; the app sends none.
+                                HStack(spacing: 8) {
+                                    Button("+1 Again") { Task { if await store.repeatMeal(entry) { logged = entry.name } } }
+                                        .buttonStyle(PixelSecondaryButtonStyle())
+                                        .accessibilityIdentifier("repeat-\(entry.name)")
+                                        .accessibilityLabel("Log \(entry.name) again")
+                                    if store.isSavedMeal(entry) {
+                                        Text("★ SAVED").font(Theme.pixelFont(16)).foregroundStyle(Theme.muted).accessibilityIdentifier("saved-\(entry.name)")
+                                    } else {
+                                        Button("★ Make button") { Task { _ = await store.saveMealAsPreset(entry) } }
+                                            .buttonStyle(PixelSecondaryButtonStyle())
+                                            .accessibilityIdentifier("save-\(entry.name)")
+                                            .accessibilityLabel("Save \(entry.name) as a saved meal")
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                                .disabled(store.isMutating)
+                            } else {
+                                Text("Unknown macros: log it again in chat.").font(.caption2).foregroundStyle(Theme.muted)
+                            }
                         }.appCard()
                     }
                 } else { Button("Load today") { Task { await store.refreshToday() } }.buttonStyle(PixelPrimaryButtonStyle()) }
@@ -155,6 +178,8 @@ struct ProgressViewScreen: View {
 /// Whole blocks filled for value against target. Code-owned, so it is unit tested; a zero or missing target fills nothing.
 enum PixelMeter {
     static let blocks = 16
+    /// Time between blocks lighting up when a bar climbs (16 blocks ≈ 0.6 s).
+    static let stepMilliseconds = 35
     static func filled(value: Double, target: Double) -> Int {
         guard target > 0, value.isFinite, value > 0 else { return 0 }
         return min(blocks, Int((value / target * Double(blocks)).rounded()))
@@ -166,19 +191,41 @@ struct PixelBar: View {
     let value: Double
     let target: Double
     let color: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Blocks currently lit. Climbs one block at a time toward the real value, like an 8-bit power meter.
+    @State private var shown = 0
+    @State private var climb: Task<Void, Never>?
     var body: some View {
         let filled = PixelMeter.filled(value: value, target: target)
         let over = PixelMeter.isOver(value: value, target: target)
         HStack(spacing: 2) {
             ForEach(0..<PixelMeter.blocks, id: \.self) { index in
                 Rectangle()
-                    .fill(index < filled ? (over && index == PixelMeter.blocks - 1 ? Theme.danger : color) : Theme.divider)
+                    .fill(index < shown ? (over && index == PixelMeter.blocks - 1 ? Theme.danger : color) : Theme.divider)
                     .frame(height: 10)
+                    .scaleEffect(y: index == shown - 1 && climb != nil ? 1.35 : 1, anchor: .bottom)
             }
         }
         .padding(2)
         .overlay(Rectangle().stroke(Theme.edgeStrong, lineWidth: 1))
         .accessibilityHidden(true)
+        .onAppear { animate(to: filled, from: 0) }
+        .onChange(of: filled) { old, new in animate(to: new, from: shown) }
+        .onDisappear { climb?.cancel(); climb = nil }
+    }
+    private func animate(to target: Int, from start: Int) {
+        climb?.cancel()
+        guard !reduceMotion, target != start else { shown = target; climb = nil; return }
+        shown = start
+        climb = Task { @MainActor in
+            let step = target > start ? 1 : -1
+            for value in stride(from: start + step, through: target, by: step) {
+                try? await Task.sleep(for: .milliseconds(PixelMeter.stepMilliseconds))
+                if Task.isCancelled { return }
+                withAnimation(.linear(duration: 0.04)) { shown = value }
+            }
+            climb = nil
+        }
     }
 }
 

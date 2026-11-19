@@ -327,3 +327,16 @@ struct BarcodeFoodPayload: Codable, Equatable {
 }
 struct BriefPayload: Codable { var text: String?; var date: String }
 struct BriefRequest: Codable { var text: String; var date: String? }
+
+/// Body for POST /api/meal/{id}/repeat. Numbers always come from the stored entry.
+struct RepeatMealBody: Codable, Equatable {
+    var meal: String? = nil
+    var day: String? = nil
+    enum CodingKeys: String, CodingKey { case meal; case day = "date" }
+}
+
+/// Body for POST /api/meal/{id}/save-preset.
+struct SaveMealPresetBody: Codable, Equatable {
+    var name: String? = nil
+    var emoji: String? = nil
+}

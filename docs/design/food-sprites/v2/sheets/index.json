@@ -1,0 +1,258 @@
+[
+  {
+    "category": "fruit",
+    "page": 1,
+    "ids": [
+      "ingredient.banana",
+      "ingredient.apple",
+      "ingredient.avocado",
+      "ingredient.orange",
+      "ingredient.lemon",
+      "ingredient.strawberry",
+      "ingredient.blueberries",
+      "ingredient.grapes"
+    ],
+    "html": "sheets/fruit-01.html",
+    "png": "sheets/fruit-01.png",
+    "width": 1232,
+    "height": 710
+  },
+  {
+    "category": "fruit",
+    "page": 2,
+    "ids": [
+      "ingredient.pear",
+      "ingredient.peach",
+      "ingredient.pineapple",
+      "ingredient.watermelon",
+      "ingredient.mango",
+      "ingredient.kiwi",
+      "ingredient.cherries"
+    ],
+    "html": "sheets/fruit-02.html",
+    "png": "sheets/fruit-02.png",
+    "width": 1232,
+    "height": 710
+  },
+  {
+    "category": "dairy-eggs",
+    "page": 1,
+    "ids": [
+      "ingredient.egg",
+      "ingredient.milk",
+      "ingredient.yogurt",
+      "ingredient.cheese",
+      "ingredient.butter",
+      "ingredient.cottage-cheese"
+    ],
+    "html": "sheets/dairy-eggs-01.html",
+    "png": "sheets/dairy-eggs-01.png",
+    "width": 1232,
+    "height": 710
+  },
+  {
+    "category": "meat-seafood",
+    "page": 1,
+    "ids": [
+      "ingredient.chicken-breast",
+      "ingredient.salmon",
+      "ingredient.beef-steak",
+      "ingredient.pork-chop",
+      "ingredient.turkey",
+      "ingredient.fish",
+      "ingredient.shrimp",
+      "ingredient.tuna"
+    ],
+    "html": "sheets/meat-seafood-01.html",
+    "png": "sheets/meat-seafood-01.png",
+    "width": 1232,
+    "height": 710
+  },
+  {
+    "category": "meat-seafood",
+    "page": 2,
+    "ids": [
+      "ingredient.bacon",
+      "ingredient.sausage"
+    ],
+    "html": "sheets/meat-seafood-02.html",
+    "png": "sheets/meat-seafood-02.png",
+    "width": 1232,
+    "height": 440
+  },
+  {
+    "category": "grains-bread-pasta",
+    "page": 1,
+    "ids": [
+      "ingredient.rice",
+      "ingredient.bread",
+      "ingredient.bagel",
+      "ingredient.tortilla",
+      "ingredient.croissant",
+      "ingredient.oats",
+      "ingredient.pasta",
+      "ingredient.quinoa"
+    ],
+    "html": "sheets/grains-bread-pasta-01.html",
+    "png": "sheets/grains-bread-pasta-01.png",
+    "width": 1232,
+    "height": 710
+  },
+  {
+    "category": "grains-bread-pasta",
+    "page": 2,
+    "ids": [
+      "ingredient.cereal",
+      "ingredient.crackers"
+    ],
+    "html": "sheets/grains-bread-pasta-02.html",
+    "png": "sheets/grains-bread-pasta-02.png",
+    "width": 1232,
+    "height": 440
+  },
+  {
+    "category": "vegetables",
+    "page": 1,
+    "ids": [
+      "ingredient.broccoli",
+      "ingredient.carrot",
+      "ingredient.tomato",
+      "ingredient.cucumber",
+      "ingredient.bell-pepper",
+      "ingredient.spinach",
+      "ingredient.lettuce",
+      "ingredient.potato"
+    ],
+    "html": "sheets/vegetables-01.html",
+    "png": "sheets/vegetables-01.png",
+    "width": 1232,
+    "height": 710
+  },
+  {
+    "category": "vegetables",
+    "page": 2,
+    "ids": [
+      "ingredient.sweet-potato",
+      "ingredient.onion",
+      "ingredient.garlic",
+      "ingredient.mushroom",
+      "ingredient.corn",
+      "ingredient.peas",
+      "ingredient.cauliflower"
+    ],
+    "html": "sheets/vegetables-02.html",
+    "png": "sheets/vegetables-02.png",
+    "width": 1232,
+    "height": 710
+  },
+  {
+    "category": "legumes-nuts-seeds",
+    "page": 1,
+    "ids": [
+      "ingredient.tofu",
+      "ingredient.beans",
+      "ingredient.lentils",
+      "ingredient.chickpeas",
+      "ingredient.peanuts",
+      "ingredient.almonds",
+      "ingredient.walnuts",
+      "ingredient.chia"
+    ],
+    "html": "sheets/legumes-nuts-seeds-01.html",
+    "png": "sheets/legumes-nuts-seeds-01.png",
+    "width": 1232,
+    "height": 710
+  },
+  {
+    "category": "sauces-fats",
+    "page": 1,
+    "ids": [
+      "ingredient.olive-oil",
+      "ingredient.peanut-butter",
+      "ingredient.hummus",
+      "ingredient.ketchup",
+      "ingredient.mayonnaise",
+      "ingredient.soy-sauce",
+      "ingredient.honey",
+      "ingredient.jam"
+    ],
+    "html": "sheets/sauces-fats-01.html",
+    "png": "sheets/sauces-fats-01.png",
+    "width": 1232,
+    "height": 710
+  },
+  {
+    "category": "prepared-meals-snacks",
+    "page": 1,
+    "ids": [
+      "prepared.pizza",
+      "prepared.burger",
+      "prepared.sandwich",
+      "prepared.taco",
+      "prepared.burrito",
+      "prepared.sushi",
+      "prepared.salad",
+      "prepared.soup"
+    ],
+    "html": "sheets/prepared-meals-snacks-01.html",
+    "png": "sheets/prepared-meals-snacks-01.png",
+    "width": 1232,
+    "height": 710
+  },
+  {
+    "category": "prepared-meals-snacks",
+    "page": 2,
+    "ids": [
+      "prepared.stew",
+      "prepared.stir-fry",
+      "prepared.pancakes",
+      "prepared.muffin",
+      "prepared.cookie",
+      "prepared.chocolate",
+      "prepared.popcorn",
+      "prepared.fries"
+    ],
+    "html": "sheets/prepared-meals-snacks-02.html",
+    "png": "sheets/prepared-meals-snacks-02.png",
+    "width": 1232,
+    "height": 710
+  },
+  {
+    "category": "prepared-meals-snacks",
+    "page": 3,
+    "ids": [
+      "prepared.ice-cream"
+    ],
+    "html": "sheets/prepared-meals-snacks-03.html",
+    "png": "sheets/prepared-meals-snacks-03.png",
+    "width": 1232,
+    "height": 440
+  },
+  {
+    "category": "drinks",
+    "page": 1,
+    "ids": [
+      "drink.water",
+      "drink.coffee",
+      "drink.tea",
+      "drink.juice",
+      "drink.smoothie"
+    ],
+    "html": "sheets/drinks-01.html",
+    "png": "sheets/drinks-01.png",
+    "width": 1232,
+    "height": 710
+  },
+  {
+    "category": "fallbacks",
+    "page": 1,
+    "ids": [
+      "fallback.food",
+      "fallback.meal"
+    ],
+    "html": "sheets/fallbacks-01.html",
+    "png": "sheets/fallbacks-01.png",
+    "width": 1232,
+    "height": 440
+  }
+]

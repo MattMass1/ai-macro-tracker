@@ -1,0 +1,488 @@
+{
+  "method": "Chrome headless SVG images at intrinsic256; eight columns, row-major catalog order; compare decoded RGBA against delivered256 PNGs.",
+  "proof": "proofs/chrome-svg-matrix.png",
+  "order": [
+    "ingredient.banana",
+    "ingredient.apple",
+    "ingredient.avocado",
+    "ingredient.egg",
+    "ingredient.chicken-breast",
+    "ingredient.salmon",
+    "ingredient.rice",
+    "ingredient.broccoli",
+    "ingredient.orange",
+    "ingredient.lemon",
+    "ingredient.strawberry",
+    "ingredient.blueberries",
+    "ingredient.grapes",
+    "ingredient.pear",
+    "ingredient.peach",
+    "ingredient.pineapple",
+    "ingredient.watermelon",
+    "ingredient.mango",
+    "ingredient.kiwi",
+    "ingredient.cherries",
+    "ingredient.carrot",
+    "ingredient.tomato",
+    "ingredient.cucumber",
+    "ingredient.bell-pepper",
+    "ingredient.spinach",
+    "ingredient.lettuce",
+    "ingredient.potato",
+    "ingredient.sweet-potato",
+    "ingredient.onion",
+    "ingredient.garlic",
+    "ingredient.mushroom",
+    "ingredient.corn",
+    "ingredient.peas",
+    "ingredient.cauliflower",
+    "ingredient.beef-steak",
+    "ingredient.pork-chop",
+    "ingredient.turkey",
+    "ingredient.fish",
+    "ingredient.shrimp",
+    "ingredient.tuna",
+    "ingredient.bacon",
+    "ingredient.sausage",
+    "ingredient.milk",
+    "ingredient.yogurt",
+    "ingredient.cheese",
+    "ingredient.butter",
+    "ingredient.cottage-cheese",
+    "ingredient.bread",
+    "ingredient.bagel",
+    "ingredient.tortilla",
+    "ingredient.croissant",
+    "ingredient.oats",
+    "ingredient.pasta",
+    "ingredient.quinoa",
+    "ingredient.cereal",
+    "ingredient.crackers",
+    "ingredient.tofu",
+    "ingredient.beans",
+    "ingredient.lentils",
+    "ingredient.chickpeas",
+    "ingredient.peanuts",
+    "ingredient.almonds",
+    "ingredient.walnuts",
+    "ingredient.chia",
+    "ingredient.olive-oil",
+    "ingredient.peanut-butter",
+    "ingredient.hummus",
+    "ingredient.ketchup",
+    "ingredient.mayonnaise",
+    "ingredient.soy-sauce",
+    "ingredient.honey",
+    "ingredient.jam",
+    "prepared.pizza",
+    "prepared.burger",
+    "prepared.sandwich",
+    "prepared.taco",
+    "prepared.burrito",
+    "prepared.sushi",
+    "prepared.salad",
+    "prepared.soup",
+    "prepared.stew",
+    "prepared.stir-fry",
+    "prepared.pancakes",
+    "prepared.muffin",
+    "prepared.cookie",
+    "prepared.chocolate",
+    "prepared.popcorn",
+    "prepared.fries",
+    "prepared.ice-cream",
+    "drink.water",
+    "drink.coffee",
+    "drink.tea",
+    "drink.juice",
+    "drink.smoothie",
+    "fallback.food",
+    "fallback.meal"
+  ],
+  "comparisons": [
+    {
+      "id": "ingredient.banana",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.apple",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.avocado",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.egg",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.chicken-breast",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.salmon",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.rice",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.broccoli",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.orange",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.lemon",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.strawberry",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.blueberries",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.grapes",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.pear",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.peach",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.pineapple",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.watermelon",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.mango",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.kiwi",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.cherries",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.carrot",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.tomato",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.cucumber",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.bell-pepper",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.spinach",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.lettuce",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.potato",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.sweet-potato",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.onion",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.garlic",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.mushroom",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.corn",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.peas",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.cauliflower",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.beef-steak",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.pork-chop",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.turkey",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.fish",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.shrimp",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.tuna",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.bacon",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.sausage",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.milk",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.yogurt",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.cheese",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.butter",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.cottage-cheese",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.bread",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.bagel",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.tortilla",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.croissant",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.oats",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.pasta",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.quinoa",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.cereal",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.crackers",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.tofu",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.beans",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.lentils",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.chickpeas",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.peanuts",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.almonds",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.walnuts",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.chia",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.olive-oil",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.peanut-butter",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.hummus",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.ketchup",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.mayonnaise",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.soy-sauce",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.honey",
+      "differing_pixels": 0
+    },
+    {
+      "id": "ingredient.jam",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.pizza",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.burger",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.sandwich",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.taco",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.burrito",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.sushi",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.salad",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.soup",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.stew",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.stir-fry",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.pancakes",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.muffin",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.cookie",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.chocolate",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.popcorn",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.fries",
+      "differing_pixels": 0
+    },
+    {
+      "id": "prepared.ice-cream",
+      "differing_pixels": 0
+    },
+    {
+      "id": "drink.water",
+      "differing_pixels": 0
+    },
+    {
+      "id": "drink.coffee",
+      "differing_pixels": 0
+    },
+    {
+      "id": "drink.tea",
+      "differing_pixels": 0
+    },
+    {
+      "id": "drink.juice",
+      "differing_pixels": 0
+    },
+    {
+      "id": "drink.smoothie",
+      "differing_pixels": 0
+    },
+    {
+      "id": "fallback.food",
+      "differing_pixels": 0
+    },
+    {
+      "id": "fallback.meal",
+      "differing_pixels": 0
+    }
+  ]
+}

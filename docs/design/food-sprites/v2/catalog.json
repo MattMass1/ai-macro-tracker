@@ -1,0 +1,2031 @@
+{
+  "version": 2,
+  "status": "candidate-not-integrated",
+  "logical_grid": [
+    32,
+    32
+  ],
+  "export_sizes": [
+    32,
+    64,
+    128,
+    256
+  ],
+  "coverage_basis": "Curated everyday coverage, not empirical coverage of user logs.",
+  "matching": "Catalog only. Proposed exact aliases are not an implemented semantic matcher; no arbitrary-name detection.",
+  "safety": "Artwork never establishes nutrition, portion, cooking state or allergens. Missing artwork must never block logging. Unknown foods and dishes use explicit neutral fallbacks.",
+  "icons": [
+    {
+      "number": 1,
+      "id": "ingredient.banana",
+      "slug": "banana",
+      "category": "fruit",
+      "display_name": "Banana",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "banana"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": true,
+      "svg": "svg/01-banana.svg",
+      "png": {
+        "32": "png/32/01-banana.png",
+        "64": "png/64/01-banana.png",
+        "128": "png/128/01-banana.png",
+        "256": "png/256/01-banana.png"
+      }
+    },
+    {
+      "number": 2,
+      "id": "ingredient.apple",
+      "slug": "apple",
+      "category": "fruit",
+      "display_name": "Apple",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "apple"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": true,
+      "svg": "svg/02-apple.svg",
+      "png": {
+        "32": "png/32/02-apple.png",
+        "64": "png/64/02-apple.png",
+        "128": "png/128/02-apple.png",
+        "256": "png/256/02-apple.png"
+      }
+    },
+    {
+      "number": 3,
+      "id": "ingredient.avocado",
+      "slug": "avocado",
+      "category": "fruit",
+      "display_name": "Avocado",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "avocado"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": true,
+      "svg": "svg/03-avocado.svg",
+      "png": {
+        "32": "png/32/03-avocado.png",
+        "64": "png/64/03-avocado.png",
+        "128": "png/128/03-avocado.png",
+        "256": "png/256/03-avocado.png"
+      }
+    },
+    {
+      "number": 4,
+      "id": "ingredient.egg",
+      "slug": "egg",
+      "category": "dairy-eggs",
+      "display_name": "Egg",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "egg"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": true,
+      "svg": "svg/04-egg.svg",
+      "png": {
+        "32": "png/32/04-egg.png",
+        "64": "png/64/04-egg.png",
+        "128": "png/128/04-egg.png",
+        "256": "png/256/04-egg.png"
+      }
+    },
+    {
+      "number": 5,
+      "id": "ingredient.chicken-breast",
+      "slug": "chicken-breast",
+      "category": "meat-seafood",
+      "display_name": "Chicken breast",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "chicken breast"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": true,
+      "svg": "svg/05-chicken-breast.svg",
+      "png": {
+        "32": "png/32/05-chicken-breast.png",
+        "64": "png/64/05-chicken-breast.png",
+        "128": "png/128/05-chicken-breast.png",
+        "256": "png/256/05-chicken-breast.png"
+      }
+    },
+    {
+      "number": 6,
+      "id": "ingredient.salmon",
+      "slug": "salmon",
+      "category": "meat-seafood",
+      "display_name": "Salmon",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "salmon"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": true,
+      "svg": "svg/06-salmon.svg",
+      "png": {
+        "32": "png/32/06-salmon.png",
+        "64": "png/64/06-salmon.png",
+        "128": "png/128/06-salmon.png",
+        "256": "png/256/06-salmon.png"
+      }
+    },
+    {
+      "number": 7,
+      "id": "ingredient.rice",
+      "slug": "rice",
+      "category": "grains-bread-pasta",
+      "display_name": "Rice",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "rice"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": true,
+      "svg": "svg/07-rice.svg",
+      "png": {
+        "32": "png/32/07-rice.png",
+        "64": "png/64/07-rice.png",
+        "128": "png/128/07-rice.png",
+        "256": "png/256/07-rice.png"
+      }
+    },
+    {
+      "number": 8,
+      "id": "ingredient.broccoli",
+      "slug": "broccoli",
+      "category": "vegetables",
+      "display_name": "Broccoli",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "broccoli"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": true,
+      "svg": "svg/08-broccoli.svg",
+      "png": {
+        "32": "png/32/08-broccoli.png",
+        "64": "png/64/08-broccoli.png",
+        "128": "png/128/08-broccoli.png",
+        "256": "png/256/08-broccoli.png"
+      }
+    },
+    {
+      "number": 9,
+      "id": "ingredient.orange",
+      "slug": "orange",
+      "category": "fruit",
+      "display_name": "Orange",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "orange"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/orange.svg",
+      "png": {
+        "32": "png/32/orange.png",
+        "64": "png/64/orange.png",
+        "128": "png/128/orange.png",
+        "256": "png/256/orange.png"
+      }
+    },
+    {
+      "number": 10,
+      "id": "ingredient.lemon",
+      "slug": "lemon",
+      "category": "fruit",
+      "display_name": "Lemon",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "lemon"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/lemon.svg",
+      "png": {
+        "32": "png/32/lemon.png",
+        "64": "png/64/lemon.png",
+        "128": "png/128/lemon.png",
+        "256": "png/256/lemon.png"
+      }
+    },
+    {
+      "number": 11,
+      "id": "ingredient.strawberry",
+      "slug": "strawberry",
+      "category": "fruit",
+      "display_name": "Strawberry",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "strawberry"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/strawberry.svg",
+      "png": {
+        "32": "png/32/strawberry.png",
+        "64": "png/64/strawberry.png",
+        "128": "png/128/strawberry.png",
+        "256": "png/256/strawberry.png"
+      }
+    },
+    {
+      "number": 12,
+      "id": "ingredient.blueberries",
+      "slug": "blueberries",
+      "category": "fruit",
+      "display_name": "Blueberries",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "blueberries"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/blueberries.svg",
+      "png": {
+        "32": "png/32/blueberries.png",
+        "64": "png/64/blueberries.png",
+        "128": "png/128/blueberries.png",
+        "256": "png/256/blueberries.png"
+      }
+    },
+    {
+      "number": 13,
+      "id": "ingredient.grapes",
+      "slug": "grapes",
+      "category": "fruit",
+      "display_name": "Grapes",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "grapes"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/grapes.svg",
+      "png": {
+        "32": "png/32/grapes.png",
+        "64": "png/64/grapes.png",
+        "128": "png/128/grapes.png",
+        "256": "png/256/grapes.png"
+      }
+    },
+    {
+      "number": 14,
+      "id": "ingredient.pear",
+      "slug": "pear",
+      "category": "fruit",
+      "display_name": "Pear",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "pear"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/pear.svg",
+      "png": {
+        "32": "png/32/pear.png",
+        "64": "png/64/pear.png",
+        "128": "png/128/pear.png",
+        "256": "png/256/pear.png"
+      }
+    },
+    {
+      "number": 15,
+      "id": "ingredient.peach",
+      "slug": "peach",
+      "category": "fruit",
+      "display_name": "Peach",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "peach"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/peach.svg",
+      "png": {
+        "32": "png/32/peach.png",
+        "64": "png/64/peach.png",
+        "128": "png/128/peach.png",
+        "256": "png/256/peach.png"
+      }
+    },
+    {
+      "number": 16,
+      "id": "ingredient.pineapple",
+      "slug": "pineapple",
+      "category": "fruit",
+      "display_name": "Pineapple",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "pineapple"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/pineapple.svg",
+      "png": {
+        "32": "png/32/pineapple.png",
+        "64": "png/64/pineapple.png",
+        "128": "png/128/pineapple.png",
+        "256": "png/256/pineapple.png"
+      }
+    },
+    {
+      "number": 17,
+      "id": "ingredient.watermelon",
+      "slug": "watermelon",
+      "category": "fruit",
+      "display_name": "Watermelon",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "watermelon"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/watermelon.svg",
+      "png": {
+        "32": "png/32/watermelon.png",
+        "64": "png/64/watermelon.png",
+        "128": "png/128/watermelon.png",
+        "256": "png/256/watermelon.png"
+      }
+    },
+    {
+      "number": 18,
+      "id": "ingredient.mango",
+      "slug": "mango",
+      "category": "fruit",
+      "display_name": "Mango",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "mango"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/mango.svg",
+      "png": {
+        "32": "png/32/mango.png",
+        "64": "png/64/mango.png",
+        "128": "png/128/mango.png",
+        "256": "png/256/mango.png"
+      }
+    },
+    {
+      "number": 19,
+      "id": "ingredient.kiwi",
+      "slug": "kiwi",
+      "category": "fruit",
+      "display_name": "Kiwi",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "kiwi"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/kiwi.svg",
+      "png": {
+        "32": "png/32/kiwi.png",
+        "64": "png/64/kiwi.png",
+        "128": "png/128/kiwi.png",
+        "256": "png/256/kiwi.png"
+      }
+    },
+    {
+      "number": 20,
+      "id": "ingredient.cherries",
+      "slug": "cherries",
+      "category": "fruit",
+      "display_name": "Cherries",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "cherries"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/cherries.svg",
+      "png": {
+        "32": "png/32/cherries.png",
+        "64": "png/64/cherries.png",
+        "128": "png/128/cherries.png",
+        "256": "png/256/cherries.png"
+      }
+    },
+    {
+      "number": 21,
+      "id": "ingredient.carrot",
+      "slug": "carrot",
+      "category": "vegetables",
+      "display_name": "Carrot",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "carrot"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/carrot.svg",
+      "png": {
+        "32": "png/32/carrot.png",
+        "64": "png/64/carrot.png",
+        "128": "png/128/carrot.png",
+        "256": "png/256/carrot.png"
+      }
+    },
+    {
+      "number": 22,
+      "id": "ingredient.tomato",
+      "slug": "tomato",
+      "category": "vegetables",
+      "display_name": "Tomato",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "tomato"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/tomato.svg",
+      "png": {
+        "32": "png/32/tomato.png",
+        "64": "png/64/tomato.png",
+        "128": "png/128/tomato.png",
+        "256": "png/256/tomato.png"
+      }
+    },
+    {
+      "number": 23,
+      "id": "ingredient.cucumber",
+      "slug": "cucumber",
+      "category": "vegetables",
+      "display_name": "Cucumber",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "cucumber"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/cucumber.svg",
+      "png": {
+        "32": "png/32/cucumber.png",
+        "64": "png/64/cucumber.png",
+        "128": "png/128/cucumber.png",
+        "256": "png/256/cucumber.png"
+      }
+    },
+    {
+      "number": 24,
+      "id": "ingredient.bell-pepper",
+      "slug": "bell-pepper",
+      "category": "vegetables",
+      "display_name": "Bell pepper",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "bell pepper"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/bell-pepper.svg",
+      "png": {
+        "32": "png/32/bell-pepper.png",
+        "64": "png/64/bell-pepper.png",
+        "128": "png/128/bell-pepper.png",
+        "256": "png/256/bell-pepper.png"
+      }
+    },
+    {
+      "number": 25,
+      "id": "ingredient.spinach",
+      "slug": "spinach",
+      "category": "vegetables",
+      "display_name": "Spinach",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "spinach"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/spinach.svg",
+      "png": {
+        "32": "png/32/spinach.png",
+        "64": "png/64/spinach.png",
+        "128": "png/128/spinach.png",
+        "256": "png/256/spinach.png"
+      }
+    },
+    {
+      "number": 26,
+      "id": "ingredient.lettuce",
+      "slug": "lettuce",
+      "category": "vegetables",
+      "display_name": "Lettuce",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "lettuce"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/lettuce.svg",
+      "png": {
+        "32": "png/32/lettuce.png",
+        "64": "png/64/lettuce.png",
+        "128": "png/128/lettuce.png",
+        "256": "png/256/lettuce.png"
+      }
+    },
+    {
+      "number": 27,
+      "id": "ingredient.potato",
+      "slug": "potato",
+      "category": "vegetables",
+      "display_name": "Potato",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "potato"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/potato.svg",
+      "png": {
+        "32": "png/32/potato.png",
+        "64": "png/64/potato.png",
+        "128": "png/128/potato.png",
+        "256": "png/256/potato.png"
+      }
+    },
+    {
+      "number": 28,
+      "id": "ingredient.sweet-potato",
+      "slug": "sweet-potato",
+      "category": "vegetables",
+      "display_name": "Sweet potato",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "sweet potato"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/sweet-potato.svg",
+      "png": {
+        "32": "png/32/sweet-potato.png",
+        "64": "png/64/sweet-potato.png",
+        "128": "png/128/sweet-potato.png",
+        "256": "png/256/sweet-potato.png"
+      }
+    },
+    {
+      "number": 29,
+      "id": "ingredient.onion",
+      "slug": "onion",
+      "category": "vegetables",
+      "display_name": "Onion",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "onion"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/onion.svg",
+      "png": {
+        "32": "png/32/onion.png",
+        "64": "png/64/onion.png",
+        "128": "png/128/onion.png",
+        "256": "png/256/onion.png"
+      }
+    },
+    {
+      "number": 30,
+      "id": "ingredient.garlic",
+      "slug": "garlic",
+      "category": "vegetables",
+      "display_name": "Garlic",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "garlic"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/garlic.svg",
+      "png": {
+        "32": "png/32/garlic.png",
+        "64": "png/64/garlic.png",
+        "128": "png/128/garlic.png",
+        "256": "png/256/garlic.png"
+      }
+    },
+    {
+      "number": 31,
+      "id": "ingredient.mushroom",
+      "slug": "mushroom",
+      "category": "vegetables",
+      "display_name": "Mushroom",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "mushroom"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/mushroom.svg",
+      "png": {
+        "32": "png/32/mushroom.png",
+        "64": "png/64/mushroom.png",
+        "128": "png/128/mushroom.png",
+        "256": "png/256/mushroom.png"
+      }
+    },
+    {
+      "number": 32,
+      "id": "ingredient.corn",
+      "slug": "corn",
+      "category": "vegetables",
+      "display_name": "Corn",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "corn"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/corn.svg",
+      "png": {
+        "32": "png/32/corn.png",
+        "64": "png/64/corn.png",
+        "128": "png/128/corn.png",
+        "256": "png/256/corn.png"
+      }
+    },
+    {
+      "number": 33,
+      "id": "ingredient.peas",
+      "slug": "peas",
+      "category": "vegetables",
+      "display_name": "Peas",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "peas"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/peas.svg",
+      "png": {
+        "32": "png/32/peas.png",
+        "64": "png/64/peas.png",
+        "128": "png/128/peas.png",
+        "256": "png/256/peas.png"
+      }
+    },
+    {
+      "number": 34,
+      "id": "ingredient.cauliflower",
+      "slug": "cauliflower",
+      "category": "vegetables",
+      "display_name": "Cauliflower",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "cauliflower"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/cauliflower.svg",
+      "png": {
+        "32": "png/32/cauliflower.png",
+        "64": "png/64/cauliflower.png",
+        "128": "png/128/cauliflower.png",
+        "256": "png/256/cauliflower.png"
+      }
+    },
+    {
+      "number": 35,
+      "id": "ingredient.beef-steak",
+      "slug": "beef-steak",
+      "category": "meat-seafood",
+      "display_name": "Beef steak",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "beef steak"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/beef-steak.svg",
+      "png": {
+        "32": "png/32/beef-steak.png",
+        "64": "png/64/beef-steak.png",
+        "128": "png/128/beef-steak.png",
+        "256": "png/256/beef-steak.png"
+      }
+    },
+    {
+      "number": 36,
+      "id": "ingredient.pork-chop",
+      "slug": "pork-chop",
+      "category": "meat-seafood",
+      "display_name": "Pork chop",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "pork chop"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/pork-chop.svg",
+      "png": {
+        "32": "png/32/pork-chop.png",
+        "64": "png/64/pork-chop.png",
+        "128": "png/128/pork-chop.png",
+        "256": "png/256/pork-chop.png"
+      }
+    },
+    {
+      "number": 37,
+      "id": "ingredient.turkey",
+      "slug": "turkey",
+      "category": "meat-seafood",
+      "display_name": "Turkey",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "turkey"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/turkey.svg",
+      "png": {
+        "32": "png/32/turkey.png",
+        "64": "png/64/turkey.png",
+        "128": "png/128/turkey.png",
+        "256": "png/256/turkey.png"
+      }
+    },
+    {
+      "number": 38,
+      "id": "ingredient.fish",
+      "slug": "fish",
+      "category": "meat-seafood",
+      "display_name": "Fish",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "fish"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/fish.svg",
+      "png": {
+        "32": "png/32/fish.png",
+        "64": "png/64/fish.png",
+        "128": "png/128/fish.png",
+        "256": "png/256/fish.png"
+      }
+    },
+    {
+      "number": 39,
+      "id": "ingredient.shrimp",
+      "slug": "shrimp",
+      "category": "meat-seafood",
+      "display_name": "Shrimp",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "shrimp"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/shrimp.svg",
+      "png": {
+        "32": "png/32/shrimp.png",
+        "64": "png/64/shrimp.png",
+        "128": "png/128/shrimp.png",
+        "256": "png/256/shrimp.png"
+      }
+    },
+    {
+      "number": 40,
+      "id": "ingredient.tuna",
+      "slug": "tuna",
+      "category": "meat-seafood",
+      "display_name": "Tuna",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "tuna"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/tuna.svg",
+      "png": {
+        "32": "png/32/tuna.png",
+        "64": "png/64/tuna.png",
+        "128": "png/128/tuna.png",
+        "256": "png/256/tuna.png"
+      }
+    },
+    {
+      "number": 41,
+      "id": "ingredient.bacon",
+      "slug": "bacon",
+      "category": "meat-seafood",
+      "display_name": "Bacon",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "bacon"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/bacon.svg",
+      "png": {
+        "32": "png/32/bacon.png",
+        "64": "png/64/bacon.png",
+        "128": "png/128/bacon.png",
+        "256": "png/256/bacon.png"
+      }
+    },
+    {
+      "number": 42,
+      "id": "ingredient.sausage",
+      "slug": "sausage",
+      "category": "meat-seafood",
+      "display_name": "Sausage",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "sausage"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/sausage.svg",
+      "png": {
+        "32": "png/32/sausage.png",
+        "64": "png/64/sausage.png",
+        "128": "png/128/sausage.png",
+        "256": "png/256/sausage.png"
+      }
+    },
+    {
+      "number": 43,
+      "id": "ingredient.milk",
+      "slug": "milk",
+      "category": "dairy-eggs",
+      "display_name": "Milk",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "milk"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/milk.svg",
+      "png": {
+        "32": "png/32/milk.png",
+        "64": "png/64/milk.png",
+        "128": "png/128/milk.png",
+        "256": "png/256/milk.png"
+      }
+    },
+    {
+      "number": 44,
+      "id": "ingredient.yogurt",
+      "slug": "yogurt",
+      "category": "dairy-eggs",
+      "display_name": "Yogurt",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "yogurt"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/yogurt.svg",
+      "png": {
+        "32": "png/32/yogurt.png",
+        "64": "png/64/yogurt.png",
+        "128": "png/128/yogurt.png",
+        "256": "png/256/yogurt.png"
+      }
+    },
+    {
+      "number": 45,
+      "id": "ingredient.cheese",
+      "slug": "cheese",
+      "category": "dairy-eggs",
+      "display_name": "Cheese",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "cheese"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/cheese.svg",
+      "png": {
+        "32": "png/32/cheese.png",
+        "64": "png/64/cheese.png",
+        "128": "png/128/cheese.png",
+        "256": "png/256/cheese.png"
+      }
+    },
+    {
+      "number": 46,
+      "id": "ingredient.butter",
+      "slug": "butter",
+      "category": "dairy-eggs",
+      "display_name": "Butter",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "butter"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/butter.svg",
+      "png": {
+        "32": "png/32/butter.png",
+        "64": "png/64/butter.png",
+        "128": "png/128/butter.png",
+        "256": "png/256/butter.png"
+      }
+    },
+    {
+      "number": 47,
+      "id": "ingredient.cottage-cheese",
+      "slug": "cottage-cheese",
+      "category": "dairy-eggs",
+      "display_name": "Cottage cheese",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "cottage cheese"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/cottage-cheese.svg",
+      "png": {
+        "32": "png/32/cottage-cheese.png",
+        "64": "png/64/cottage-cheese.png",
+        "128": "png/128/cottage-cheese.png",
+        "256": "png/256/cottage-cheese.png"
+      }
+    },
+    {
+      "number": 48,
+      "id": "ingredient.bread",
+      "slug": "bread",
+      "category": "grains-bread-pasta",
+      "display_name": "Bread",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "bread"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/bread.svg",
+      "png": {
+        "32": "png/32/bread.png",
+        "64": "png/64/bread.png",
+        "128": "png/128/bread.png",
+        "256": "png/256/bread.png"
+      }
+    },
+    {
+      "number": 49,
+      "id": "ingredient.bagel",
+      "slug": "bagel",
+      "category": "grains-bread-pasta",
+      "display_name": "Bagel",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "bagel"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/bagel.svg",
+      "png": {
+        "32": "png/32/bagel.png",
+        "64": "png/64/bagel.png",
+        "128": "png/128/bagel.png",
+        "256": "png/256/bagel.png"
+      }
+    },
+    {
+      "number": 50,
+      "id": "ingredient.tortilla",
+      "slug": "tortilla",
+      "category": "grains-bread-pasta",
+      "display_name": "Tortilla",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "tortilla"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/tortilla.svg",
+      "png": {
+        "32": "png/32/tortilla.png",
+        "64": "png/64/tortilla.png",
+        "128": "png/128/tortilla.png",
+        "256": "png/256/tortilla.png"
+      }
+    },
+    {
+      "number": 51,
+      "id": "ingredient.croissant",
+      "slug": "croissant",
+      "category": "grains-bread-pasta",
+      "display_name": "Croissant",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "croissant"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/croissant.svg",
+      "png": {
+        "32": "png/32/croissant.png",
+        "64": "png/64/croissant.png",
+        "128": "png/128/croissant.png",
+        "256": "png/256/croissant.png"
+      }
+    },
+    {
+      "number": 52,
+      "id": "ingredient.oats",
+      "slug": "oats",
+      "category": "grains-bread-pasta",
+      "display_name": "Oats",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "oats"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/oats.svg",
+      "png": {
+        "32": "png/32/oats.png",
+        "64": "png/64/oats.png",
+        "128": "png/128/oats.png",
+        "256": "png/256/oats.png"
+      }
+    },
+    {
+      "number": 53,
+      "id": "ingredient.pasta",
+      "slug": "pasta",
+      "category": "grains-bread-pasta",
+      "display_name": "Pasta",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "pasta"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/pasta.svg",
+      "png": {
+        "32": "png/32/pasta.png",
+        "64": "png/64/pasta.png",
+        "128": "png/128/pasta.png",
+        "256": "png/256/pasta.png"
+      }
+    },
+    {
+      "number": 54,
+      "id": "ingredient.quinoa",
+      "slug": "quinoa",
+      "category": "grains-bread-pasta",
+      "display_name": "Quinoa",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "quinoa"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/quinoa.svg",
+      "png": {
+        "32": "png/32/quinoa.png",
+        "64": "png/64/quinoa.png",
+        "128": "png/128/quinoa.png",
+        "256": "png/256/quinoa.png"
+      }
+    },
+    {
+      "number": 55,
+      "id": "ingredient.cereal",
+      "slug": "cereal",
+      "category": "grains-bread-pasta",
+      "display_name": "Cereal",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "cereal"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/cereal.svg",
+      "png": {
+        "32": "png/32/cereal.png",
+        "64": "png/64/cereal.png",
+        "128": "png/128/cereal.png",
+        "256": "png/256/cereal.png"
+      }
+    },
+    {
+      "number": 56,
+      "id": "ingredient.crackers",
+      "slug": "crackers",
+      "category": "grains-bread-pasta",
+      "display_name": "Crackers",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "crackers"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/crackers.svg",
+      "png": {
+        "32": "png/32/crackers.png",
+        "64": "png/64/crackers.png",
+        "128": "png/128/crackers.png",
+        "256": "png/256/crackers.png"
+      }
+    },
+    {
+      "number": 57,
+      "id": "ingredient.tofu",
+      "slug": "tofu",
+      "category": "legumes-nuts-seeds",
+      "display_name": "Tofu",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "tofu"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/tofu.svg",
+      "png": {
+        "32": "png/32/tofu.png",
+        "64": "png/64/tofu.png",
+        "128": "png/128/tofu.png",
+        "256": "png/256/tofu.png"
+      }
+    },
+    {
+      "number": 58,
+      "id": "ingredient.beans",
+      "slug": "beans",
+      "category": "legumes-nuts-seeds",
+      "display_name": "Beans",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "beans"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/beans.svg",
+      "png": {
+        "32": "png/32/beans.png",
+        "64": "png/64/beans.png",
+        "128": "png/128/beans.png",
+        "256": "png/256/beans.png"
+      }
+    },
+    {
+      "number": 59,
+      "id": "ingredient.lentils",
+      "slug": "lentils",
+      "category": "legumes-nuts-seeds",
+      "display_name": "Lentils",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "lentils"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/lentils.svg",
+      "png": {
+        "32": "png/32/lentils.png",
+        "64": "png/64/lentils.png",
+        "128": "png/128/lentils.png",
+        "256": "png/256/lentils.png"
+      }
+    },
+    {
+      "number": 60,
+      "id": "ingredient.chickpeas",
+      "slug": "chickpeas",
+      "category": "legumes-nuts-seeds",
+      "display_name": "Chickpeas",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "chickpeas"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/chickpeas.svg",
+      "png": {
+        "32": "png/32/chickpeas.png",
+        "64": "png/64/chickpeas.png",
+        "128": "png/128/chickpeas.png",
+        "256": "png/256/chickpeas.png"
+      }
+    },
+    {
+      "number": 61,
+      "id": "ingredient.peanuts",
+      "slug": "peanuts",
+      "category": "legumes-nuts-seeds",
+      "display_name": "Peanuts",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "peanuts"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/peanuts.svg",
+      "png": {
+        "32": "png/32/peanuts.png",
+        "64": "png/64/peanuts.png",
+        "128": "png/128/peanuts.png",
+        "256": "png/256/peanuts.png"
+      }
+    },
+    {
+      "number": 62,
+      "id": "ingredient.almonds",
+      "slug": "almonds",
+      "category": "legumes-nuts-seeds",
+      "display_name": "Almonds",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "almonds"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/almonds.svg",
+      "png": {
+        "32": "png/32/almonds.png",
+        "64": "png/64/almonds.png",
+        "128": "png/128/almonds.png",
+        "256": "png/256/almonds.png"
+      }
+    },
+    {
+      "number": 63,
+      "id": "ingredient.walnuts",
+      "slug": "walnuts",
+      "category": "legumes-nuts-seeds",
+      "display_name": "Walnuts",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "walnuts"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/walnuts.svg",
+      "png": {
+        "32": "png/32/walnuts.png",
+        "64": "png/64/walnuts.png",
+        "128": "png/128/walnuts.png",
+        "256": "png/256/walnuts.png"
+      }
+    },
+    {
+      "number": 64,
+      "id": "ingredient.chia",
+      "slug": "chia",
+      "category": "legumes-nuts-seeds",
+      "display_name": "Chia",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "chia"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/chia.svg",
+      "png": {
+        "32": "png/32/chia.png",
+        "64": "png/64/chia.png",
+        "128": "png/128/chia.png",
+        "256": "png/256/chia.png"
+      }
+    },
+    {
+      "number": 65,
+      "id": "ingredient.olive-oil",
+      "slug": "olive-oil",
+      "category": "sauces-fats",
+      "display_name": "Olive oil",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "olive oil"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/olive-oil.svg",
+      "png": {
+        "32": "png/32/olive-oil.png",
+        "64": "png/64/olive-oil.png",
+        "128": "png/128/olive-oil.png",
+        "256": "png/256/olive-oil.png"
+      }
+    },
+    {
+      "number": 66,
+      "id": "ingredient.peanut-butter",
+      "slug": "peanut-butter",
+      "category": "sauces-fats",
+      "display_name": "Peanut butter",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "peanut butter"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/peanut-butter.svg",
+      "png": {
+        "32": "png/32/peanut-butter.png",
+        "64": "png/64/peanut-butter.png",
+        "128": "png/128/peanut-butter.png",
+        "256": "png/256/peanut-butter.png"
+      }
+    },
+    {
+      "number": 67,
+      "id": "ingredient.hummus",
+      "slug": "hummus",
+      "category": "sauces-fats",
+      "display_name": "Hummus",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "hummus"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/hummus.svg",
+      "png": {
+        "32": "png/32/hummus.png",
+        "64": "png/64/hummus.png",
+        "128": "png/128/hummus.png",
+        "256": "png/256/hummus.png"
+      }
+    },
+    {
+      "number": 68,
+      "id": "ingredient.ketchup",
+      "slug": "ketchup",
+      "category": "sauces-fats",
+      "display_name": "Ketchup",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "ketchup"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/ketchup.svg",
+      "png": {
+        "32": "png/32/ketchup.png",
+        "64": "png/64/ketchup.png",
+        "128": "png/128/ketchup.png",
+        "256": "png/256/ketchup.png"
+      }
+    },
+    {
+      "number": 69,
+      "id": "ingredient.mayonnaise",
+      "slug": "mayonnaise",
+      "category": "sauces-fats",
+      "display_name": "Mayonnaise",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "mayonnaise"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/mayonnaise.svg",
+      "png": {
+        "32": "png/32/mayonnaise.png",
+        "64": "png/64/mayonnaise.png",
+        "128": "png/128/mayonnaise.png",
+        "256": "png/256/mayonnaise.png"
+      }
+    },
+    {
+      "number": 70,
+      "id": "ingredient.soy-sauce",
+      "slug": "soy-sauce",
+      "category": "sauces-fats",
+      "display_name": "Soy sauce",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "soy sauce"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/soy-sauce.svg",
+      "png": {
+        "32": "png/32/soy-sauce.png",
+        "64": "png/64/soy-sauce.png",
+        "128": "png/128/soy-sauce.png",
+        "256": "png/256/soy-sauce.png"
+      }
+    },
+    {
+      "number": 71,
+      "id": "ingredient.honey",
+      "slug": "honey",
+      "category": "sauces-fats",
+      "display_name": "Honey",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "honey"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/honey.svg",
+      "png": {
+        "32": "png/32/honey.png",
+        "64": "png/64/honey.png",
+        "128": "png/128/honey.png",
+        "256": "png/256/honey.png"
+      }
+    },
+    {
+      "number": 72,
+      "id": "ingredient.jam",
+      "slug": "jam",
+      "category": "sauces-fats",
+      "display_name": "Jam",
+      "kind": "ingredient",
+      "proposed_exact_aliases": [
+        "jam"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/jam.svg",
+      "png": {
+        "32": "png/32/jam.png",
+        "64": "png/64/jam.png",
+        "128": "png/128/jam.png",
+        "256": "png/256/jam.png"
+      }
+    },
+    {
+      "number": 73,
+      "id": "prepared.pizza",
+      "slug": "pizza",
+      "category": "prepared-meals-snacks",
+      "display_name": "Pizza",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "pizza"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/pizza.svg",
+      "png": {
+        "32": "png/32/pizza.png",
+        "64": "png/64/pizza.png",
+        "128": "png/128/pizza.png",
+        "256": "png/256/pizza.png"
+      }
+    },
+    {
+      "number": 74,
+      "id": "prepared.burger",
+      "slug": "burger",
+      "category": "prepared-meals-snacks",
+      "display_name": "Burger",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "burger"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/burger.svg",
+      "png": {
+        "32": "png/32/burger.png",
+        "64": "png/64/burger.png",
+        "128": "png/128/burger.png",
+        "256": "png/256/burger.png"
+      }
+    },
+    {
+      "number": 75,
+      "id": "prepared.sandwich",
+      "slug": "sandwich",
+      "category": "prepared-meals-snacks",
+      "display_name": "Sandwich",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "sandwich"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/sandwich.svg",
+      "png": {
+        "32": "png/32/sandwich.png",
+        "64": "png/64/sandwich.png",
+        "128": "png/128/sandwich.png",
+        "256": "png/256/sandwich.png"
+      }
+    },
+    {
+      "number": 76,
+      "id": "prepared.taco",
+      "slug": "taco",
+      "category": "prepared-meals-snacks",
+      "display_name": "Taco",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "taco"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/taco.svg",
+      "png": {
+        "32": "png/32/taco.png",
+        "64": "png/64/taco.png",
+        "128": "png/128/taco.png",
+        "256": "png/256/taco.png"
+      }
+    },
+    {
+      "number": 77,
+      "id": "prepared.burrito",
+      "slug": "burrito",
+      "category": "prepared-meals-snacks",
+      "display_name": "Burrito",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "burrito"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/burrito.svg",
+      "png": {
+        "32": "png/32/burrito.png",
+        "64": "png/64/burrito.png",
+        "128": "png/128/burrito.png",
+        "256": "png/256/burrito.png"
+      }
+    },
+    {
+      "number": 78,
+      "id": "prepared.sushi",
+      "slug": "sushi",
+      "category": "prepared-meals-snacks",
+      "display_name": "Sushi",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "sushi"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/sushi.svg",
+      "png": {
+        "32": "png/32/sushi.png",
+        "64": "png/64/sushi.png",
+        "128": "png/128/sushi.png",
+        "256": "png/256/sushi.png"
+      }
+    },
+    {
+      "number": 79,
+      "id": "prepared.salad",
+      "slug": "salad",
+      "category": "prepared-meals-snacks",
+      "display_name": "Salad",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "salad"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/salad.svg",
+      "png": {
+        "32": "png/32/salad.png",
+        "64": "png/64/salad.png",
+        "128": "png/128/salad.png",
+        "256": "png/256/salad.png"
+      }
+    },
+    {
+      "number": 80,
+      "id": "prepared.soup",
+      "slug": "soup",
+      "category": "prepared-meals-snacks",
+      "display_name": "Soup",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "soup"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/soup.svg",
+      "png": {
+        "32": "png/32/soup.png",
+        "64": "png/64/soup.png",
+        "128": "png/128/soup.png",
+        "256": "png/256/soup.png"
+      }
+    },
+    {
+      "number": 81,
+      "id": "prepared.stew",
+      "slug": "stew",
+      "category": "prepared-meals-snacks",
+      "display_name": "Stew",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "stew"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/stew.svg",
+      "png": {
+        "32": "png/32/stew.png",
+        "64": "png/64/stew.png",
+        "128": "png/128/stew.png",
+        "256": "png/256/stew.png"
+      }
+    },
+    {
+      "number": 82,
+      "id": "prepared.stir-fry",
+      "slug": "stir-fry",
+      "category": "prepared-meals-snacks",
+      "display_name": "Stir fry",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "stir fry"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/stir-fry.svg",
+      "png": {
+        "32": "png/32/stir-fry.png",
+        "64": "png/64/stir-fry.png",
+        "128": "png/128/stir-fry.png",
+        "256": "png/256/stir-fry.png"
+      }
+    },
+    {
+      "number": 83,
+      "id": "prepared.pancakes",
+      "slug": "pancakes",
+      "category": "prepared-meals-snacks",
+      "display_name": "Pancakes",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "pancakes"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/pancakes.svg",
+      "png": {
+        "32": "png/32/pancakes.png",
+        "64": "png/64/pancakes.png",
+        "128": "png/128/pancakes.png",
+        "256": "png/256/pancakes.png"
+      }
+    },
+    {
+      "number": 84,
+      "id": "prepared.muffin",
+      "slug": "muffin",
+      "category": "prepared-meals-snacks",
+      "display_name": "Muffin",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "muffin"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/muffin.svg",
+      "png": {
+        "32": "png/32/muffin.png",
+        "64": "png/64/muffin.png",
+        "128": "png/128/muffin.png",
+        "256": "png/256/muffin.png"
+      }
+    },
+    {
+      "number": 85,
+      "id": "prepared.cookie",
+      "slug": "cookie",
+      "category": "prepared-meals-snacks",
+      "display_name": "Cookie",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "cookie"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/cookie.svg",
+      "png": {
+        "32": "png/32/cookie.png",
+        "64": "png/64/cookie.png",
+        "128": "png/128/cookie.png",
+        "256": "png/256/cookie.png"
+      }
+    },
+    {
+      "number": 86,
+      "id": "prepared.chocolate",
+      "slug": "chocolate",
+      "category": "prepared-meals-snacks",
+      "display_name": "Chocolate",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "chocolate"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/chocolate.svg",
+      "png": {
+        "32": "png/32/chocolate.png",
+        "64": "png/64/chocolate.png",
+        "128": "png/128/chocolate.png",
+        "256": "png/256/chocolate.png"
+      }
+    },
+    {
+      "number": 87,
+      "id": "prepared.popcorn",
+      "slug": "popcorn",
+      "category": "prepared-meals-snacks",
+      "display_name": "Popcorn",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "popcorn"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/popcorn.svg",
+      "png": {
+        "32": "png/32/popcorn.png",
+        "64": "png/64/popcorn.png",
+        "128": "png/128/popcorn.png",
+        "256": "png/256/popcorn.png"
+      }
+    },
+    {
+      "number": 88,
+      "id": "prepared.fries",
+      "slug": "fries",
+      "category": "prepared-meals-snacks",
+      "display_name": "Fries",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "fries"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/fries.svg",
+      "png": {
+        "32": "png/32/fries.png",
+        "64": "png/64/fries.png",
+        "128": "png/128/fries.png",
+        "256": "png/256/fries.png"
+      }
+    },
+    {
+      "number": 89,
+      "id": "prepared.ice-cream",
+      "slug": "ice-cream",
+      "category": "prepared-meals-snacks",
+      "display_name": "Ice cream",
+      "kind": "prepared",
+      "proposed_exact_aliases": [
+        "ice cream"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/ice-cream.svg",
+      "png": {
+        "32": "png/32/ice-cream.png",
+        "64": "png/64/ice-cream.png",
+        "128": "png/128/ice-cream.png",
+        "256": "png/256/ice-cream.png"
+      }
+    },
+    {
+      "number": 90,
+      "id": "drink.water",
+      "slug": "water",
+      "category": "drinks",
+      "display_name": "Water",
+      "kind": "drink",
+      "proposed_exact_aliases": [
+        "water"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/water.svg",
+      "png": {
+        "32": "png/32/water.png",
+        "64": "png/64/water.png",
+        "128": "png/128/water.png",
+        "256": "png/256/water.png"
+      }
+    },
+    {
+      "number": 91,
+      "id": "drink.coffee",
+      "slug": "coffee",
+      "category": "drinks",
+      "display_name": "Coffee",
+      "kind": "drink",
+      "proposed_exact_aliases": [
+        "coffee"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/coffee.svg",
+      "png": {
+        "32": "png/32/coffee.png",
+        "64": "png/64/coffee.png",
+        "128": "png/128/coffee.png",
+        "256": "png/256/coffee.png"
+      }
+    },
+    {
+      "number": 92,
+      "id": "drink.tea",
+      "slug": "tea",
+      "category": "drinks",
+      "display_name": "Tea",
+      "kind": "drink",
+      "proposed_exact_aliases": [
+        "tea"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/tea.svg",
+      "png": {
+        "32": "png/32/tea.png",
+        "64": "png/64/tea.png",
+        "128": "png/128/tea.png",
+        "256": "png/256/tea.png"
+      }
+    },
+    {
+      "number": 93,
+      "id": "drink.juice",
+      "slug": "juice",
+      "category": "drinks",
+      "display_name": "Juice",
+      "kind": "drink",
+      "proposed_exact_aliases": [
+        "juice"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/juice.svg",
+      "png": {
+        "32": "png/32/juice.png",
+        "64": "png/64/juice.png",
+        "128": "png/128/juice.png",
+        "256": "png/256/juice.png"
+      }
+    },
+    {
+      "number": 94,
+      "id": "drink.smoothie",
+      "slug": "smoothie",
+      "category": "drinks",
+      "display_name": "Smoothie",
+      "kind": "drink",
+      "proposed_exact_aliases": [
+        "smoothie"
+      ],
+      "fallback_intent": null,
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/smoothie.svg",
+      "png": {
+        "32": "png/32/smoothie.png",
+        "64": "png/64/smoothie.png",
+        "128": "png/128/smoothie.png",
+        "256": "png/256/smoothie.png"
+      }
+    },
+    {
+      "number": 95,
+      "id": "fallback.food",
+      "slug": "generic-food",
+      "category": "fallbacks",
+      "display_name": "Generic food",
+      "kind": "fallback",
+      "proposed_exact_aliases": [],
+      "fallback_intent": "Neutral food plate and utensil when identity is unknown; logging must remain available.",
+      "default_fallback": "fallback.food",
+      "retained_original": false,
+      "svg": "svg/generic-food.svg",
+      "png": {
+        "32": "png/32/generic-food.png",
+        "64": "png/64/generic-food.png",
+        "128": "png/128/generic-food.png",
+        "256": "png/256/generic-food.png"
+      }
+    },
+    {
+      "number": 96,
+      "id": "fallback.meal",
+      "slug": "generic-meal",
+      "category": "fallbacks",
+      "display_name": "Generic meal",
+      "kind": "fallback",
+      "proposed_exact_aliases": [],
+      "fallback_intent": "Neutral covered serving dish for unknown or mixed meals; never infer ingredients.",
+      "default_fallback": "fallback.meal",
+      "retained_original": false,
+      "svg": "svg/generic-meal.svg",
+      "png": {
+        "32": "png/32/generic-meal.png",
+        "64": "png/64/generic-meal.png",
+        "128": "png/128/generic-meal.png",
+        "256": "png/256/generic-meal.png"
+      }
+    }
+  ]
+}

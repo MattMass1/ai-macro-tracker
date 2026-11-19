@@ -11,7 +11,8 @@ final class OfflineFixtureProtocol: URLProtocol {
         let text: String
         switch path {
         case "/api/today": text = Self.day
-        case "/api/presets": text = #"{"presets":[]}"#
+        case "/api/presets": text = #"{"presets":[{"name":"Synthetic shake","emoji":"🥛","calories":150,"protein":30,"carbs":3,"fat":2.5,"fiber":0,"meal":"Snack","sort_order":1},{"name":"Synthetic bowl","emoji":"🌯","calories":625,"protein":75,"carbs":38,"fat":22,"fiber":0,"meal":"Lunch","sort_order":2}]}"#
+        case "/api/log-preset": text = Self.day
         case "/api/trends": text = #"{"days":[{"date":"2026-11-16","day_label":"Mon","calories":100,"protein":0,"carbs":0,"fat":0,"target_calories":2000,"target_protein":150,"macros_complete":false}],"weekly":[],"weight":{"current_kg":0,"goal_kg":0}}"#
         default:
             if path.hasPrefix("/api/agent-canvas/") && path.hasSuffix("/turn") {

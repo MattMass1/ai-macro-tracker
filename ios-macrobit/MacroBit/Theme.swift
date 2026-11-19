@@ -64,9 +64,9 @@ extension View {
     func appCard(padding: CGFloat = 16) -> some View {
         self
             .padding(padding)
-            .background(Theme.surface, in: PixelPanelShape())
+            // Shadow on the panel only; on the whole view it ghosts every line of text.
+            .background(PixelPanelShape().fill(Theme.surface).shadow(color: Theme.accentEdge.opacity(0.3), radius: 0, y: 3))
             .overlay(PixelPanelShape().stroke(Theme.edgeStrong, lineWidth: 1))
-            .shadow(color: Theme.accentEdge.opacity(0.3), radius: 0, y: 3)
     }
 }
 

@@ -33,3 +33,21 @@ final class StudioResourceTests: XCTestCase {
         XCTAssertEqual(Config.apiURL?.absoluteString, "https://mmmacros-backend.onrender.com")
     }
 }
+
+final class PixelMeterTests: XCTestCase {
+    func testBlocksFillProportionallyAndCap() {
+        XCTAssertEqual(PixelMeter.filled(value: 0, target: 2000), 0)
+        XCTAssertEqual(PixelMeter.filled(value: 1000, target: 2000), 8)
+        XCTAssertEqual(PixelMeter.filled(value: 2000, target: 2000), PixelMeter.blocks)
+        XCTAssertEqual(PixelMeter.filled(value: 5000, target: 2000), PixelMeter.blocks)
+    }
+    func testMissingTargetFillsNothingAndIsNeverOver() {
+        XCTAssertEqual(PixelMeter.filled(value: 30, target: 0), 0)
+        XCTAssertFalse(PixelMeter.isOver(value: 30, target: 0))
+        XCTAssertEqual(PixelMeter.filled(value: .nan, target: 100), 0)
+    }
+    func testOver() {
+        XCTAssertTrue(PixelMeter.isOver(value: 2100, target: 2000))
+        XCTAssertFalse(PixelMeter.isOver(value: 2000, target: 2000))
+    }
+}

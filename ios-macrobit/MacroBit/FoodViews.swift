@@ -9,6 +9,7 @@ struct TodayView: View {
     @State private var preset: Preset?
     @State private var servings = "1"
     @State private var meal = "Snack"
+    @State private var logged: String?
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -18,22 +19,15 @@ struct TodayView: View {
                 }
                 if let day = store.day {
                     Text(store.effectiveDate ?? day.date).font(.headline)
-                    VStack(alignment: .leading, spacing: 12) {
-                        SectionLabel(text: "Calories today")
-                        Text("\(day.totals.calories.formatted()) kcal").font(.largeTitle.bold())
-                        Text(day.hasTargets == true ? "Target \(day.targets.calories.formatted()) kcal" : "Reference target \(day.targets.calories.formatted()) kcal, not a configured goal").font(.caption).foregroundStyle(Theme.muted)
-                        if day.nutrientsComplete {
-                            Text("Protein \(nutrientText(day.totals.protein)) · Carbs \(nutrientText(day.totals.carbs))")
-                            Text("Fat \(nutrientText(day.totals.fat)) · Fiber \(nutrientText(day.totals.fiber))")
-                            Text("Targets: P \(nutrientText(day.targets.protein)), C \(nutrientText(day.targets.carbs)), F \(nutrientText(day.targets.fat)), fiber \(nutrientText(day.targets.fiber))").font(.caption)
-                        } else {
-                            Text("Nutrients incomplete. Totals are known-only subtotals, not exact totals.").font(.subheadline.bold())
-                            if let note = day.macroNote { Text(note) }
-                        }
-                        if let warning = day.warning { Text(warning).font(.caption) }
-                    }.frame(maxWidth: .infinity, alignment: .leading).appCard()
+                    PixelMacroSummary(day: day)
+                    PixelPresetGrid(presets: store.presets, busy: store.isMutating, logged: logged,
+                        quickLog: { item in
+                            // One tap logs one serving in the preset's own meal slot, like the old Quick add grid.
+                            Task { if await store.logPreset(LogPresetBody(presetName: item.name, servings: 1, meal: item.meal, day: store.effectiveDate)) { logged = item.name } }
+                        },
+                        customize: { item in preset = item; servings = "1"; meal = item.meal })
                     HStack { SectionLabel(text: "Meals"); Spacer(); Button("Manual entry") { manual = true }.buttonStyle(PixelSecondaryButtonStyle()) }
-                    if day.meals.isEmpty { EmptyState(icon: "fork.knife", title: "A fresh log", message: "Start in the Studio chat, choose a preset or enter a meal.") }
+                    if day.meals.isEmpty { EmptyState(icon: "fork.knife", title: "A fresh log", message: "Start in the Studio chat, tap a saved meal or enter one.") }
                     ForEach(day.meals) { entry in
                         HStack(alignment: .top) {
                             VStack(alignment: .leading, spacing: 5) {
@@ -45,15 +39,6 @@ struct TodayView: View {
                             Spacer()
                             Button { deleting = entry } label: { Image(systemName: "trash").frame(width: 44, height: 44) }.accessibilityLabel("Delete \(entry.name)").disabled(store.isMutating)
                         }.appCard()
-                    }
-                    SectionLabel(text: "Presets")
-                    if store.presets.isEmpty { Text("No presets for this account.").foregroundStyle(Theme.muted) }
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())]) {
-                        ForEach(store.presets) { item in
-                            Button { preset = item; servings = "1"; meal = item.meal } label: {
-                                VStack(alignment: .leading) { Text(item.name).font(.headline); Text("\(item.calories.formatted()) kcal").font(.caption) }.frame(maxWidth: .infinity, alignment: .leading).appCard()
-                            }.buttonStyle(.plain)
-                        }
                     }
                 } else { Button("Load today") { Task { await store.refreshToday() } }.buttonStyle(PixelPrimaryButtonStyle()) }
             }.padding(16)
@@ -162,5 +147,160 @@ struct ProgressViewScreen: View {
         }.background(Theme.canvas)
             .task(id: window) { await store.loadTrends(days: window) }
             .refreshable { await store.loadTrends(days: window) }
+    }
+}
+
+// MARK: - 8-bit macro summary and saved-meal grid
+
+/// Whole blocks filled for value against target. Code-owned, so it is unit tested; a zero or missing target fills nothing.
+enum PixelMeter {
+    static let blocks = 16
+    static func filled(value: Double, target: Double) -> Int {
+        guard target > 0, value.isFinite, value > 0 else { return 0 }
+        return min(blocks, Int((value / target * Double(blocks)).rounded()))
+    }
+    static func isOver(value: Double, target: Double) -> Bool { target > 0 && value > target }
+}
+
+struct PixelBar: View {
+    let value: Double
+    let target: Double
+    let color: Color
+    var body: some View {
+        let filled = PixelMeter.filled(value: value, target: target)
+        let over = PixelMeter.isOver(value: value, target: target)
+        HStack(spacing: 2) {
+            ForEach(0..<PixelMeter.blocks, id: \.self) { index in
+                Rectangle()
+                    .fill(index < filled ? (over && index == PixelMeter.blocks - 1 ? Theme.danger : color) : Theme.divider)
+                    .frame(height: 10)
+            }
+        }
+        .padding(2)
+        .overlay(Rectangle().stroke(Theme.edgeStrong, lineWidth: 1))
+        .accessibilityHidden(true)
+    }
+}
+
+struct PixelMacroSummary: View {
+    let day: DayPayload
+    private var known: Bool { day.nutrientsComplete }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                SectionLabel(text: "Calories today")
+                Spacer()
+                Text(day.hasTargets == true ? "GOAL \(whole(day.targets.calories))" : "REF \(whole(day.targets.calories))")
+                    .font(Theme.pixelFont(16)).foregroundStyle(Theme.muted)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(whole(day.totals.calories)).font(Theme.pixelFont(44, relativeTo: .largeTitle))
+                Text("KCAL").font(Theme.pixelFont(18)).foregroundStyle(Theme.muted)
+                Spacer()
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text(whole(max(0, day.remaining.calories))).font(Theme.pixelFont(24))
+                    Text(day.totals.calories > day.targets.calories && day.targets.calories > 0 ? "OVER" : "LEFT")
+                        .font(Theme.pixelFont(14)).foregroundStyle(Theme.muted)
+                }
+            }
+            PixelBar(value: day.totals.calories, target: day.targets.calories, color: Theme.calories)
+            .accessibilityElement(children: .ignore)
+            VStack(spacing: 10) {
+                row("PROTEIN", day.totals.protein, day.targets.protein, Theme.protein)
+                row("CARBS", day.totals.carbs, day.targets.carbs, Theme.carbs)
+                row("FAT", day.totals.fat, day.targets.fat, Theme.fat)
+                row("FIBER", day.totals.fiber, day.targets.fiber, Theme.fiber)
+            }
+            if !known {
+                Text("Some foods have unknown macros. These are known-only subtotals.").font(.caption.bold())
+                if let note = day.macroNote { Text(note).font(.caption) }
+            }
+            if let warning = day.warning { Text(warning).font(.caption) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .appCard()
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("pixel-macro-summary")
+    }
+
+    private func row(_ label: String, _ value: Double, _ target: Double, _ color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(label).font(Theme.pixelFont(16)).foregroundStyle(color)
+                Spacer()
+                Text(target > 0 ? "\(grams(value))\(known ? "" : "+") / \(grams(target))" : "\(grams(value))\(known ? "" : "+")")
+                    .font(Theme.pixelFont(16))
+            }
+            PixelBar(value: value, target: target, color: color)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(target > 0 ? "\(label.capitalized) \(grams(value)) of \(grams(target))" : "\(label.capitalized) \(grams(value)), no target")
+    }
+
+    private func whole(_ value: Double) -> String { Int(value.rounded()).formatted() }
+    private func grams(_ value: Double) -> String { "\(value.formatted(.number.precision(.fractionLength(0...1))))G" }
+}
+
+struct PixelPresetGrid: View {
+    let presets: [Preset]
+    let busy: Bool
+    let logged: String?
+    let quickLog: (Preset) -> Void
+    let customize: (Preset) -> Void
+    private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                SectionLabel(text: "Saved meals")
+                Spacer()
+                if let logged { Text("+ \(logged)").font(Theme.pixelFont(14)).foregroundStyle(Theme.accent).lineLimit(1).accessibilityIdentifier("preset-logged") }
+            }
+            if presets.isEmpty {
+                EmptyState(icon: "square.grid.2x2", title: "No saved meals yet", message: "Saved meals appear here. One tap logs one serving.")
+            } else {
+                LazyVGrid(columns: columns, spacing: 10) {
+                    ForEach(presets) { item in
+                        Button { quickLog(item) } label: { tile(item) }
+                            .buttonStyle(PixelTileButtonStyle())
+                            .disabled(busy)
+                            .contextMenu { Button("Servings or meal…", systemImage: "slider.horizontal.3") { customize(item) } }
+                            .accessibilityIdentifier("preset-\(item.name)")
+                            .accessibilityLabel("Log \(item.name), \(Int(item.calories.rounded())) calories")
+                            .accessibilityHint("Logs one serving. Touch and hold to change servings or meal.")
+                    }
+                }
+                Text("Tap to log 1 serving · hold for servings or meal").font(.caption2).foregroundStyle(Theme.muted)
+            }
+        }
+    }
+
+    private func tile(_ item: Preset) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top) {
+                Text(item.emoji).font(.title2)
+                Spacer()
+                Text("+").font(Theme.pixelFont(22)).foregroundStyle(.white)
+                    .frame(width: 24, height: 24).background(Theme.accent, in: PixelPanelShape())
+            }
+            Text(item.name).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.ink)
+                .lineLimit(2).multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+            Spacer(minLength: 0)
+            Text("\(Int(item.calories.rounded())) KCAL · \(Int(item.protein.rounded()))G P").font(Theme.pixelFont(15)).foregroundStyle(Theme.muted)
+        }
+        .frame(maxWidth: .infinity, minHeight: 104, alignment: .topLeading)
+        .padding(12)
+    }
+}
+
+/// A cream pixel tile that presses down one step, like an arcade button.
+struct PixelTileButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(PixelPanelShape().fill(configuration.isPressed ? Theme.accentTint : Theme.surface)
+                .shadow(color: Theme.accentEdge.opacity(0.35), radius: 0, y: configuration.isPressed ? 1 : 3))
+            .overlay(PixelPanelShape().stroke(Theme.edgeStrong, lineWidth: 1))
+            .offset(y: configuration.isPressed ? 2 : 0)
     }
 }

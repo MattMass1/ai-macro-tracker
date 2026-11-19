@@ -37,6 +37,20 @@ final class ContractTests: XCTestCase {
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
+    /// The backend accepts only canonical lowercase UUIDs; Foundation's uuidString is uppercase.
+    func testChatSendsLowercaseSessionAndTurnIDs() async throws {
+        var path = "", turnID = ""
+        FixtureProtocol.handler = { request in
+            path = request.url!.path; turnID = try self.body(request)["turn_id"] as! String
+            return (200, Data(#"{"reply":"Preview","approval":null,"quickReplies":[]}"#.utf8))
+        }
+        let session = UUID(), turn = UUID()
+        _ = try await client().turn(sessionID: session, turnID: turn, message: "a banana")
+        XCTAssertEqual(path, "/api/agent-canvas/\(session.uuidString.lowercased())/turn")
+        XCTAssertEqual(turnID, turn.uuidString.lowercased())
+        XCTAssertEqual(turnID, turnID.lowercased())
+    }
+
     func testEveryAllowedRouteHeadersKeysAndTimeouts() async throws {
         var calls = [(String, String)]()
         FixtureProtocol.handler = { request in

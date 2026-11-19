@@ -228,6 +228,26 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(ids.count, 2); XCTAssertNotEqual(ids.first, ids.last)
     }
 
+    /// Repeat and save-preset send only the entry id (plus an empty body): the server owns the numbers.
+    func testRepeatAndSaveSendNoNumbers() async throws {
+        var calls = [(String, String, [String: Any])]()
+        FixtureProtocol.handler = { request in
+            let path = request.url!.path
+            if request.httpMethod == "POST" { calls.append((request.httpMethod!, path, try self.body(request))) }
+            if path.hasSuffix("/save-preset") { return (200, Data(#"{"presets":[{"name":"Eggs","emoji":"🍽️","calories":140,"protein":12,"carbs":1,"fat":10,"fiber":0,"meal":"Breakfast","sort_order":1}]}"#.utf8)) }
+            return (200, self.dayJSON)
+        }
+        let store = AppStore(api: client(), vault: MemoryVault())
+        let entry = FoodEntry(id: "c1000000-0000-4000-8000-000000000001", name: "Eggs", meal: "Breakfast", calories: 140, protein: 12, carbs: 1, fat: 10, fiber: 0)
+        let repeated = await store.repeatMeal(entry)
+        XCTAssertFalse(store.isSavedMeal(entry))
+        let saved = await store.saveMealAsPreset(entry)
+        XCTAssertTrue(repeated); XCTAssertTrue(saved)
+        XCTAssertEqual(calls.map { $0.1 }, ["/api/meal/c1000000-0000-4000-8000-000000000001/repeat", "/api/meal/c1000000-0000-4000-8000-000000000001/save-preset"])
+        for call in calls { XCTAssertTrue(call.2.isEmpty, "no numbers or fields sent: \(call.2)") }
+        XCTAssertTrue(store.isSavedMeal(entry))
+    }
+
     func testSavePresetDeleteEachRefetchToday() async {
         var reads = 0
         FixtureProtocol.handler = { request in

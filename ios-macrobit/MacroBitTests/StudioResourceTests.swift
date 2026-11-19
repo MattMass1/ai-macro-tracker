@@ -51,3 +51,10 @@ final class PixelMeterTests: XCTestCase {
         XCTAssertFalse(PixelMeter.isOver(value: 2000, target: 2000))
     }
 }
+
+final class PixelBarTimingTests: XCTestCase {
+    func testClimbIsQuickButVisible() {
+        let total = PixelMeter.stepMilliseconds * PixelMeter.blocks
+        XCTAssertGreaterThanOrEqual(total, 400); XCTAssertLessThanOrEqual(total, 900)
+    }
+}

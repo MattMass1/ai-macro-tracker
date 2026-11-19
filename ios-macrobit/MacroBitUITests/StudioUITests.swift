@@ -34,6 +34,17 @@ final class StudioUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["preset-logged"].waitForExistence(timeout: 10))
         XCTAssertEqual(app.staticTexts["preset-logged"].label, "+ Synthetic shake")
         attach("07-preset-logged-OFFLINE", app: app)
+        let again = app.buttons["repeat-Synthetic eggs"]
+        XCTAssertTrue(again.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["repeat-Synthetic calorie-only meal"].exists, "unknown-macro meals can't be copied")
+        again.tap()
+        XCTAssertTrue(app.staticTexts["preset-logged"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts["preset-logged"].label, "+ Synthetic eggs")
+        let save = app.buttons["save-Synthetic eggs"]
+        XCTAssertTrue(save.exists); save.tap()
+        XCTAssertTrue(app.staticTexts["saved-Synthetic eggs"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["preset-Synthetic eggs"].waitForExistence(timeout: 10))
+        attach("08-meal-buttons-OFFLINE", app: app)
         app.buttons["Done"].tap()
         app.buttons["studio.tab.3"].tap()
         XCTAssertTrue(app.staticTexts["Daily calories".uppercased()].waitForExistence(timeout: 10))

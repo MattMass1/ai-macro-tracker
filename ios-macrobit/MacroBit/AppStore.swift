@@ -112,6 +112,23 @@ final class AppStore: ObservableObject {
     func deleteMeal(_ id: String) async -> Bool {
         await mutate { _ = try await self.api.deleteMeal(id) }
     }
+    func repeatMeal(_ entry: FoodEntry) async -> Bool {
+        await mutate { _ = try await self.api.repeatMeal(entry.id) }
+    }
+    func saveMealAsPreset(_ entry: FoodEntry) async -> Bool {
+        guard !isMutating else { return false }
+        let generation = authGeneration
+        isMutating = true; errorMessage = nil; defer { isMutating = false }
+        do {
+            let result = try await api.saveMealAsPreset(entry.id)
+            guard generation == authGeneration else { return false }
+            presets = result.presets
+            return true
+        } catch { if generation == authGeneration { handle(error) }; return false }
+    }
+    func isSavedMeal(_ entry: FoodEntry) -> Bool {
+        presets.contains { $0.name.trimmingCharacters(in: .whitespaces).lowercased() == entry.name.trimmingCharacters(in: .whitespaces).lowercased() }
+    }
     private func mutate(_ work: () async throws -> Void) async -> Bool {
         guard !isMutating else { return false }
         let generation = authGeneration

@@ -1,0 +1,229 @@
+{
+  "version": 1,
+  "status": "style-candidates-not-integrated",
+  "count": 8,
+  "icons": [
+    {
+      "id": "banana",
+      "label": "Banana",
+      "svg": "svg/01-banana.svg",
+      "png": "png/01-banana.png",
+      "logical_size": [
+        32,
+        32
+      ],
+      "png_size": [
+        256,
+        256
+      ],
+      "rgba": true
+    },
+    {
+      "id": "apple",
+      "label": "Apple",
+      "svg": "svg/02-apple.svg",
+      "png": "png/02-apple.png",
+      "logical_size": [
+        32,
+        32
+      ],
+      "png_size": [
+        256,
+        256
+      ],
+      "rgba": true
+    },
+    {
+      "id": "avocado",
+      "label": "Avocado",
+      "svg": "svg/03-avocado.svg",
+      "png": "png/03-avocado.png",
+      "logical_size": [
+        32,
+        32
+      ],
+      "png_size": [
+        256,
+        256
+      ],
+      "rgba": true
+    },
+    {
+      "id": "egg",
+      "label": "Egg",
+      "svg": "svg/04-egg.svg",
+      "png": "png/04-egg.png",
+      "logical_size": [
+        32,
+        32
+      ],
+      "png_size": [
+        256,
+        256
+      ],
+      "rgba": true
+    },
+    {
+      "id": "chicken-breast",
+      "label": "Chicken Breast",
+      "svg": "svg/05-chicken-breast.svg",
+      "png": "png/05-chicken-breast.png",
+      "logical_size": [
+        32,
+        32
+      ],
+      "png_size": [
+        256,
+        256
+      ],
+      "rgba": true
+    },
+    {
+      "id": "salmon",
+      "label": "Salmon",
+      "svg": "svg/06-salmon.svg",
+      "png": "png/06-salmon.png",
+      "logical_size": [
+        32,
+        32
+      ],
+      "png_size": [
+        256,
+        256
+      ],
+      "rgba": true
+    },
+    {
+      "id": "rice",
+      "label": "Rice",
+      "svg": "svg/07-rice.svg",
+      "png": "png/07-rice.png",
+      "logical_size": [
+        32,
+        32
+      ],
+      "png_size": [
+        256,
+        256
+      ],
+      "rgba": true
+    },
+    {
+      "id": "broccoli",
+      "label": "Broccoli",
+      "svg": "svg/08-broccoli.svg",
+      "png": "png/08-broccoli.png",
+      "logical_size": [
+        32,
+        32
+      ],
+      "png_size": [
+        256,
+        256
+      ],
+      "rgba": true
+    }
+  ],
+  "files": [
+    {
+      "path": "Jersey15-OFL.txt",
+      "bytes": 4395,
+      "sha256": "436d5836064cec796c7ddde6fb4faeabdb6f2f17443a24a30d0c38b75d13f922"
+    },
+    {
+      "path": "Jersey15-Regular.ttf",
+      "bytes": 104236,
+      "sha256": "dbe00479d62bb3b9fcf0d28f88a021ffc4bd7b01d6ad5c6f74b5fa371bb210ed"
+    },
+    {
+      "path": "food-sprites-contact-sheet.png",
+      "bytes": 50011,
+      "sha256": "267d0840224364e1885e34714d3e69fa3b1cfc648ab77fa4a9e96a779de9fb22"
+    },
+    {
+      "path": "png/01-banana.png",
+      "bytes": 1093,
+      "sha256": "cd23c3f046b131d3e91ca0381ca9a65c48cd8fbd0eb556f0aefb21d53ceed2ac"
+    },
+    {
+      "path": "png/02-apple.png",
+      "bytes": 1177,
+      "sha256": "cce2eede5a7d8a98d3de2d046a0fd0344cec9c25832c9d47767c51c2d893b349"
+    },
+    {
+      "path": "png/03-avocado.png",
+      "bytes": 1193,
+      "sha256": "2f9dd87afaf6719983ae848cba6bb16fcec5762588871351bf9fddc0c7d8027f"
+    },
+    {
+      "path": "png/04-egg.png",
+      "bytes": 1159,
+      "sha256": "939763cd19492fa94ccc2f651890a3321f59d37a84882cd5537e06dea9f05e6e"
+    },
+    {
+      "path": "png/05-chicken-breast.png",
+      "bytes": 1158,
+      "sha256": "d8917ea1bd2b59f7ae1f3080279ab5911f29758e99b1c7a2628e57af5228767f"
+    },
+    {
+      "path": "png/06-salmon.png",
+      "bytes": 1110,
+      "sha256": "1ca3d9e5b05928d5491fae7e0326350392d57a3c644e06e5f145537a1af19647"
+    },
+    {
+      "path": "png/07-rice.png",
+      "bytes": 1153,
+      "sha256": "0a5df1981855f3740477acc4111605c65fabd7852af96d024687047cc28a4d2d"
+    },
+    {
+      "path": "png/08-broccoli.png",
+      "bytes": 1185,
+      "sha256": "3a775cf2045d4e008f8c44e34879312d506c05884c63f9bd30d629e910a593bf"
+    },
+    {
+      "path": "preview.html",
+      "bytes": 2723,
+      "sha256": "cda6b0fd0cf9000593fac0d7fdd4b108638076b73dc78268e6958d765f344279"
+    },
+    {
+      "path": "svg/01-banana.svg",
+      "bytes": 654,
+      "sha256": "bbef7d520b78dc75a0f4fb2e8fd6fc9f428337223d40ad097851a1bdb2bc92fc"
+    },
+    {
+      "path": "svg/02-apple.svg",
+      "bytes": 781,
+      "sha256": "7f9a7d2ea2849c36c50d93b714584b9bd19c80223b3e96874c512f86f93fd3bb"
+    },
+    {
+      "path": "svg/03-avocado.svg",
+      "bytes": 755,
+      "sha256": "1fc6115c72b874bdb0d95d8b2bd5a33c9a61289bd991a9900f1c173bdb78d638"
+    },
+    {
+      "path": "svg/04-egg.svg",
+      "bytes": 699,
+      "sha256": "db6eb4e674b2f2dba677b43f9073b130fd54bb29e99efa10579014cb8410ccfe"
+    },
+    {
+      "path": "svg/05-chicken-breast.svg",
+      "bytes": 762,
+      "sha256": "e9e5da3a05c75c7a12aa40c0a8e0841a77650b2ffd092febf91020afb8b504f0"
+    },
+    {
+      "path": "svg/06-salmon.svg",
+      "bytes": 674,
+      "sha256": "fb4aafa68456cf1411b27c86be28a65447dc46a6baf3736e60a530f2606e9ce9"
+    },
+    {
+      "path": "svg/07-rice.svg",
+      "bytes": 847,
+      "sha256": "12cf4b472699a7016c2adf1ff883c4bbf33afaf72f02c287f3d2b1701a41ede6"
+    },
+    {
+      "path": "svg/08-broccoli.svg",
+      "bytes": 815,
+      "sha256": "487de117f9a04054e8170ac5e381281878f87709958664da2b79083473483a90"
+    }
+  ]
+}

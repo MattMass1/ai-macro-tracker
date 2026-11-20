@@ -43,13 +43,26 @@ struct CoachChatView: View {
                             .background(Theme.accentTint)
                             ScrollViewReader { proxy in
                                 ScrollView {
-                                    LazyVStack(spacing: 10) {
+                                    VStack(spacing: 10) {
                                         if store.messages.isEmpty { studioSummary }
                                         ForEach(store.messages) { message in
                                             VStack(alignment: .leading, spacing: 10) {
-                                                CoachBubble(message: message)
+                                                if message.role == .coach, !message.surfaces.isEmpty {
+                                                    ForEach(Array(message.surfaces.enumerated()), id: \.offset) { index, surface in
+                                                        ChatSurfaceCard(surface: surface,
+                                                            canAct: message.id == store.messages.last?.id && !store.isSending && store.retryTurn == nil && !store.conflictBlocked,
+                                                            canConfirm: message.quickReplies.contains("Log it") && index == message.surfaces.firstIndex(where: { if case .mealPreview = $0 { return true }; return false }),
+                                                            confirm: { draft = ""; dismissKeyboard(); Task { await store.sendQuickReply("Log it") } },
+                                                            edit: { draft = "make it 2 servings"; inputFocused = true },
+                                                            review: { draft = "Show my daily totals"; inputFocused = true })
+                                                    }
+                                                } else {
+                                                    CoachBubble(message: message)
+                                                }
                                                 if message.role == .coach, !message.quickReplies.isEmpty {
-                                                    QuickReplyRow(labels: message.quickReplies, isBusy: store.isSending || store.retryTurn != nil) { label in
+                                                    QuickReplyRow(labels: message.quickReplies.filter { label in
+                                                        label != "Log it" || !message.surfaces.contains(where: { if case .mealPreview = $0 { return true }; return false })
+                                                    }, isBusy: store.isSending || store.retryTurn != nil || store.conflictBlocked) { label in
                                                         Task { await store.sendQuickReply(label) }
                                                     }
                                                 }
@@ -216,6 +229,148 @@ struct CoachChatView: View {
         }
         #endif
         return nil
+    }
+}
+
+private struct ChatSurfaceCard: View {
+    let surface: CoachSurface
+    let canAct: Bool
+    let canConfirm: Bool
+    let confirm: () -> Void
+    let edit: () -> Void
+    let review: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            switch surface {
+            case .mealPreview(let meal):
+                heading("Review meal", date: meal.date, meal: meal.meal)
+                Text("Not saved yet").font(.caption).foregroundStyle(Theme.muted)
+                if let notice = meal.notice { Text(notice).font(.subheadline.weight(.semibold)).fixedSize(horizontal: false, vertical: true) }
+                ForEach(Array(meal.foods.enumerated()), id: \.offset) { _, food in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(food.name).font(.subheadline.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
+                        Text("\(food.portion)\(food.assumed ? " · assumed" : "") · \(number(food.nutrition.calories)) kcal").font(.caption)
+                        if let reason = food.not_counted_reason { Text("Not counted: \(reason)").font(.caption) }
+                        if let changes = food.modifications { Text(changes).font(.caption) }
+                        if let note = food.recipe_note { Text(note).font(.caption).fixedSize(horizontal: false, vertical: true) }
+                        Text(food.source).font(.caption2).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                nutrition(meal.totals)
+                if let day = meal.day_after { ChatDayBars(title: "After this meal", totals: day.totals, targets: day.targets, targetSource: day.target_source) }
+                if canConfirm {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) { confirmationButtons }
+                        VStack(spacing: 8) { confirmationButtons }
+                    }.disabled(!canAct)
+                }
+            case .mealReceipt(let meal):
+                heading("Saved", date: meal.date, meal: meal.meal)
+                ForEach(Array(meal.entries.enumerated()), id: \.offset) { _, entry in
+                    Text(entry.name).font(.subheadline.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
+                }
+                nutrition(meal.totals)
+                if let source = meal.source { Text(source).font(.caption2).foregroundStyle(Theme.muted) }
+                if let day = meal.day_after { ChatDayBars(title: "Updated day", totals: day.totals, targets: day.targets, targetSource: day.target_source) }
+            case .saveFailed(let failure):
+                Text("Could not save").font(Theme.pixelFont(24))
+                Text(failure.reason).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                if failure.retry_safe {
+                    Button("Review & retry", action: review).buttonStyle(PixelSecondaryButtonStyle(fullWidth: true)).disabled(!canAct)
+                    Text("Review your day first. This does not save or resend a confirmation.").font(.caption).foregroundStyle(Theme.muted)
+                }
+            case .dayTotals(let day):
+                heading("Day totals", date: day.date, meal: nil)
+                ChatDayBars(title: "Logged today", totals: day.totals, targets: day.targets, targetSource: day.target_source)
+                Text("\(number(day.remaining.calories)) kcal remaining").font(.subheadline)
+                if !day.macros_complete { Text("Some macros are unknown, not zero.").font(.caption).foregroundStyle(Theme.muted) }
+            }
+        }
+        .foregroundStyle(Theme.ink)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .appCard(padding: 12)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(identifier)
+    }
+
+    @ViewBuilder private var confirmationButtons: some View {
+        Button("Confirm meal", action: confirm).buttonStyle(PixelPrimaryButtonStyle())
+            .accessibilityHint("Sends Log it once for the current preview")
+        Button("Edit portion", action: edit).buttonStyle(PixelSecondaryButtonStyle(fullWidth: true))
+            .accessibilityHint("Prepares a message without sending it")
+    }
+
+    private func heading(_ title: String, date: String, meal: String?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(Theme.pixelFont(24))
+            Text([date, meal].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(Theme.muted)
+        }
+    }
+
+    private func nutrition(_ value: SurfaceNutrition) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("\(number(value.calories)) kcal").font(Theme.pixelFont(26))
+            Text("Protein \(surfaceNutrientText(value.protein)) · Carbs \(surfaceNutrientText(value.carbs)) · Fat \(surfaceNutrientText(value.fat)) · Fiber \(surfaceNutrientText(value.fiber))")
+                .font(.caption).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func number(_ value: Double?) -> String { surfaceNumber(value) }
+    private var identifier: String {
+        switch surface {
+        case .mealPreview: return "chat.surface.meal_preview"
+        case .mealReceipt: return "chat.surface.meal_receipt"
+        case .saveFailed: return "chat.surface.save_failed"
+        case .dayTotals: return "chat.surface.day_totals"
+        }
+    }
+}
+
+private struct ChatDayBars: View {
+    let title: String
+    let totals: SurfaceNutrition
+    let targets: SurfaceNutrition
+    let targetSource: String
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(Theme.pixelFont(19))
+            bar("Calories", value: totals.calories, target: targets.calories, unit: "kcal", color: Theme.calories)
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+                if typeSize.isAccessibilitySize {
+                    bar("Protein", value: totals.protein, target: targets.protein, unit: "g", color: Theme.protein)
+                    bar("Carbs", value: totals.carbs, target: targets.carbs, unit: "g", color: Theme.carbs)
+                    bar("Fat", value: totals.fat, target: targets.fat, unit: "g", color: Theme.fat)
+                    bar("Fiber", value: totals.fiber, target: targets.fiber, unit: "g", color: Theme.fiber)
+                } else {
+                    GridRow {
+                        bar("Protein", value: totals.protein, target: targets.protein, unit: "g", color: Theme.protein)
+                        bar("Carbs", value: totals.carbs, target: targets.carbs, unit: "g", color: Theme.carbs)
+                    }
+                    GridRow {
+                        bar("Fat", value: totals.fat, target: targets.fat, unit: "g", color: Theme.fat)
+                        bar("Fiber", value: totals.fiber, target: targets.fiber, unit: "g", color: Theme.fiber)
+                    }
+                }
+            }
+            Text(targetSource == "fallback" ? "Default display targets, not configured goals" : "Configured goals").font(.caption2).foregroundStyle(Theme.muted)
+        }
+    }
+
+    private func bar(_ label: String, value: Double?, target: Double?, unit: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(Theme.pixelFont(16))
+            if let value {
+                Text("\(surfaceNumber(value)) / \(surfaceNumber(target)) \(unit)")
+                    .font(.caption).fixedSize(horizontal: false, vertical: true)
+                if let target, target > 0 { PixelBar(value: value, target: target, color: color) }
+                else { Text("No target").font(.caption2).foregroundStyle(Theme.muted) }
+            } else {
+                Text("Unknown").font(.caption).foregroundStyle(Theme.muted)
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

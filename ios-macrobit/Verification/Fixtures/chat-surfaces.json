@@ -1,0 +1,35 @@
+{
+  "reply": "Synthetic offline fixtures. No backend writes occurred.",
+  "approval": null,
+  "quickReplies": ["Log it", "Cancel"],
+  "surfaces": [
+    {
+      "kind": "meal_preview",
+      "date": "2026-11-16",
+      "meal": "Snack",
+      "foods": [{"name":"Synthetic banana","portion":"1 banana","assumed":false,"calories":100,"protein":null,"carbs":20,"fat":1,"fiber":2,"source":"Synthetic offline fixture","not_counted_reason":null}],
+      "totals": {"calories":100,"protein":null,"carbs":20,"fat":1,"fiber":2},
+      "macros_complete": false,
+      "day_after": {"totals":{"calories":400,"protein":null,"carbs":50,"fat":11,"fiber":7},"targets":{"calories":2000,"protein":150,"carbs":200,"fat":60,"fiber":25},"macros_complete":false,"target_source":"configured"}
+    },
+    {
+      "kind": "meal_receipt",
+      "date": "2026-11-16",
+      "meal": "Snack",
+      "entries": [{"id":"c1000000-0000-4000-8000-000000000001","name":"Synthetic banana","calories":100,"protein":null,"carbs":20,"fat":1,"fiber":2}],
+      "totals": {"calories":100,"protein":null,"carbs":20,"fat":1,"fiber":2},
+      "macros_complete": false,
+      "day_after": {"totals":{"calories":400,"protein":null,"carbs":50,"fat":11,"fiber":7},"targets":{"calories":2000,"protein":150,"carbs":200,"fat":60,"fiber":25},"macros_complete":false,"target_source":"configured"}
+    },
+    {"kind":"save_failed","reason":"Review the saved day before trying again.","retry_safe":false},
+    {
+      "kind":"day_totals",
+      "date":"2026-11-16",
+      "totals":{"calories":400,"protein":null,"carbs":50,"fat":11,"fiber":7},
+      "targets":{"calories":2000,"protein":150,"carbs":200,"fat":60,"fiber":25},
+      "remaining":{"calories":1600,"protein":null,"carbs":150,"fat":49,"fiber":18},
+      "macros_complete":false,
+      "target_source":"configured"
+    }
+  ]
+}

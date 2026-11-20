@@ -7,6 +7,7 @@ struct ChatMessage: Identifiable {
     let role: Role
     let text: String
     var quickReplies: [String] = []
+    var surfaces: [CoachSurface] = []
 }
 
 struct PendingTurn {
@@ -179,7 +180,7 @@ final class AppStore: ObservableObject {
         do {
             let result = try await api.turn(sessionID: sessionID, turnID: turn.id, message: turn.message)
             guard generation == authGeneration else { return }
-            messages.append(ChatMessage(role: .coach, text: result.reply ?? "", quickReplies: result.quickReplies))
+            messages.append(ChatMessage(role: .coach, text: result.reply ?? "", quickReplies: result.quickReplies, surfaces: result.surfaces))
             // The fixed envelope has no saved flag. Refresh every successful reply.
             await refreshToday()
         } catch {

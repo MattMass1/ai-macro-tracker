@@ -22,7 +22,23 @@ final class OfflineFixtureProtocol: URLProtocol {
                 if body["message"] as? String == "00016000275287" {
                     text = #"{"reply":"Synthetic barcode preview. 1 serving, 100 kcal. Log this meal?","approval":null,"quickReplies":["Log it","Cancel"]}"#
                 } else if body["message"] as? String == "a banana" {
-                    text = #"{"reply":"Synthetic banana preview. 1 banana, 100 kcal. Log this meal?","approval":null,"quickReplies":["Log it","Cancel"]}"#
+                    text = Self.cardTurn(0, labels: ["Log it", "Cancel"])
+                } else if body["message"] as? String == "Log it" {
+                    text = Self.cardTurn(1)
+                } else if ["What's left today?", "How much protein today?", "Show my daily totals"].contains(body["message"] as? String ?? "") {
+                    text = Self.cardTurn(3)
+                } else if body["message"] as? String == "simulate save failure" {
+                    text = Self.cardTurn(2)
+                } else if body["message"] as? String == "simulate safe retry" {
+                    text = Self.cardTurn(2, safe: true)
+                } else if body["message"] as? String == "simulate changed nutrition" {
+                    text = Self.cardTurn(0, labels: ["Log it", "Cancel"], notice: "Nutrition changed. Review the updated amounts and confirm again.")
+                } else if body["message"] as? String == "simulate failed edit" {
+                    text = Self.cardTurn(0, labels: ["Log it", "Cancel"], notice: "I couldn't process that change. Nothing was saved. Here is the unchanged preview.")
+                } else if body["message"] as? String == "simulate modified meal" {
+                    text = Self.cardTurn(0, labels: ["Log it", "Cancel"], modified: true)
+                } else if body["message"] as? String == "fractional totals" {
+                    text = Self.cardTurn(3, fractional: true)
                 } else {
                     text = #"{"reply":"Synthetic reply received. No backend writes occurred.","approval":null,"quickReplies":[]}"#
                 }
@@ -33,6 +49,32 @@ final class OfflineFixtureProtocol: URLProtocol {
         client?.urlProtocol(self, didLoad: Data(text.utf8))
         client?.urlProtocolDidFinishLoading(self)
     }
+    static let surfaceExamples = #"{"reply":"Synthetic offline fixtures. No backend writes occurred.","approval":null,"quickReplies":["Log it","Cancel"],"surfaces":[{"kind":"meal_preview","date":"2026-11-16","meal":"Snack","foods":[{"name":"Synthetic banana","portion":"1 banana","assumed":false,"calories":100,"protein":null,"carbs":20,"fat":1,"fiber":2,"source":"Synthetic offline fixture","not_counted_reason":null}],"totals":{"calories":100,"protein":null,"carbs":20,"fat":1,"fiber":2},"macros_complete":false,"day_after":{"totals":{"calories":400,"protein":null,"carbs":50,"fat":11,"fiber":7},"targets":{"calories":2000,"protein":150,"carbs":200,"fat":60,"fiber":25},"macros_complete":false,"target_source":"configured"}},{"kind":"meal_receipt","date":"2026-11-16","meal":"Snack","entries":[{"id":"c1000000-0000-4000-8000-000000000001","name":"Synthetic banana","calories":100,"protein":null,"carbs":20,"fat":1,"fiber":2}],"totals":{"calories":100,"protein":null,"carbs":20,"fat":1,"fiber":2},"macros_complete":false,"day_after":{"totals":{"calories":400,"protein":null,"carbs":50,"fat":11,"fiber":7},"targets":{"calories":2000,"protein":150,"carbs":200,"fat":60,"fiber":25},"macros_complete":false,"target_source":"configured"}},{"kind":"save_failed","reason":"Review the saved day before trying again.","retry_safe":false},{"kind":"day_totals","date":"2026-11-16","totals":{"calories":400,"protein":null,"carbs":50,"fat":11,"fiber":7},"targets":{"calories":2000,"protein":150,"carbs":200,"fat":60,"fiber":25},"remaining":{"calories":1600,"protein":null,"carbs":150,"fat":49,"fiber":18},"macros_complete":false,"target_source":"configured"}]}"#
+
+    static func cardTurn(_ index: Int, labels: [String] = [], safe: Bool = false, notice: String? = nil, modified: Bool = false, fractional: Bool = false) -> String {
+        guard var object = try? JSONSerialization.jsonObject(with: Data(surfaceExamples.utf8)) as? [String: Any],
+              let cards = object["surfaces"] as? [[String: Any]], cards.indices.contains(index) else { return "{}" }
+        var card = cards[index]
+        if safe { card["retry_safe"] = true }
+        if let notice { card["notice"] = notice }
+        if modified, var foods = card["foods"] as? [[String: Any]], !foods.isEmpty {
+            foods[0]["name"] = "Synthetic restaurant meal"
+            foods[0]["modifications"] = "remove tomato"
+            foods[0]["recipe_note"] = "STANDARD recipe; nutrition unchanged for minor garnish changes"
+            card["foods"] = foods
+        }
+        if fractional, var totals = card["totals"] as? [String: Any], var remaining = card["remaining"] as? [String: Any] {
+            totals["calories"] = 400.25
+            remaining["calories"] = 1599.75
+            card["totals"] = totals
+            card["remaining"] = remaining
+        }
+        object["surfaces"] = [card]
+        object["quickReplies"] = labels
+        guard let data = try? JSONSerialization.data(withJSONObject: object), let text = String(data: data, encoding: .utf8) else { return "{}" }
+        return text
+    }
+
     override func stopLoading() {}
     private static func readBody(_ request: URLRequest) -> [String: Any] {
         var data = request.httpBody ?? Data()

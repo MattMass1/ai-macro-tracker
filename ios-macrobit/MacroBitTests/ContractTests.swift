@@ -119,6 +119,81 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(store.day?.macroNote, "Protein is unknown")
     }
 
+    func testMalformedSurfaceDoesNotEraseValidMetricsForm() throws {
+        let data = Data(#"{"reply":"Legacy metrics","surfaces":[17,{"components":[{"component":"ProfileMetrics"}]}]}"#.utf8)
+        let turn = try JSONDecoder().decode(CoachTurn.self, from: data)
+        XCTAssertTrue(turn.wantsMetricsForm)
+        XCTAssertEqual(turn.reply, "Legacy metrics")
+    }
+
+    func testCanonicalFourSurfaceFixtureDecodes() throws {
+        let data = try Data(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Verification/Fixtures/chat-surfaces.json"))
+        let turn = try JSONDecoder().decode(CoachTurn.self, from: data)
+        XCTAssertEqual(turn.surfaces.count, 4)
+        XCTAssertEqual(turn.reply, "Synthetic offline fixtures. No backend writes occurred.")
+        let embedded = try JSONDecoder().decode(CoachTurn.self, from: Data(OfflineFixtureProtocol.surfaceExamples.utf8))
+        XCTAssertEqual(embedded.surfaces, turn.surfaces)
+        XCTAssertEqual(embedded.quickReplies, turn.quickReplies)
+        guard case .mealPreview(let preview) = turn.surfaces[0],
+              case .mealReceipt(let receipt) = turn.surfaces[1],
+              case .saveFailed(let failure) = turn.surfaces[2],
+              case .dayTotals(let totals) = turn.surfaces[3] else { return XCTFail("All four discriminated kinds must decode") }
+        XCTAssertEqual(preview.foods.first?.nutrition.calories, 100)
+        XCTAssertNil(preview.foods.first?.nutrition.protein)
+        XCTAssertNil(preview.totals.protein)
+        XCTAssertEqual(preview.day_after?.totals.calories, 400)
+        XCTAssertFalse(preview.macros_complete)
+        XCTAssertEqual(receipt.entries.first?.id, "c1000000-0000-4000-8000-000000000001")
+        XCTAssertEqual(receipt.totals, preview.totals)
+        XCTAssertFalse(failure.retry_safe)
+        XCTAssertEqual(totals.remaining.calories, 1600)
+        XCTAssertNil(totals.remaining.protein)
+    }
+
+    func testUnknownMalformedAndPrimitiveCardsPreserveValidPeers() throws {
+        let data = try Data(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Verification/Fixtures/chat-surfaces.json"))
+        let original = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let cards = try XCTUnwrap(original["surfaces"] as? [[String: Any]])
+        var malformed = cards[0]
+        malformed["foods"] = []
+        let mixed: [String: Any] = ["reply": "Still readable", "surfaces": [17, NSNull(), ["kind": "future"], malformed, cards[1], cards[3]], "quickReplies": ["Cancel"]]
+        let turn = try JSONDecoder().decode(CoachTurn.self, from: JSONSerialization.data(withJSONObject: mixed))
+        XCTAssertEqual(turn.surfaces.count, 2)
+        XCTAssertEqual(turn.quickReplies, ["Cancel"])
+        XCTAssertEqual(turn.reply, "Still readable")
+        guard case .mealReceipt = turn.surfaces[0], case .dayTotals = turn.surfaces[1] else { return XCTFail("Valid peers must keep their order") }
+    }
+
+    func testSurfaceFormattingPreservesFractionalNumbersAndNulls() {
+        for value in [12.25, 400.25, 1599.75, -2.75, 0.000000001] {
+            XCTAssertEqual(Double(surfaceNumber(value)), value)
+        }
+        XCTAssertEqual(surfaceNumber(nil), "Unknown")
+        XCTAssertEqual(surfaceNutrientText(nil), "Unknown")
+        XCTAssertEqual(surfaceNutrientText(12.25), "12.25g")
+    }
+
+    func testCodeOwnedPreviewNoticesAndRecipeDetailsDecode() throws {
+        let notice = "Nutrition changed. Review the updated amounts and confirm again."
+        let turn = try JSONDecoder().decode(CoachTurn.self, from: Data(OfflineFixtureProtocol.cardTurn(0, notice: notice, modified: true).utf8))
+        guard let card = turn.surfaces.first, case .mealPreview(let preview) = card else { return XCTFail("Readable preview required") }
+        XCTAssertEqual(preview.notice, notice)
+        XCTAssertEqual(preview.foods.first?.modifications, "remove tomato")
+        XCTAssertEqual(preview.foods.first?.recipe_note, "STANDARD recipe; nutrition unchanged for minor garnish changes")
+    }
+
+    func testInvalidNutrientOrMissingFieldFallsBackToOriginalText() throws {
+        let data = try Data(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Verification/Fixtures/chat-surfaces.json"))
+        let original = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let card = try XCTUnwrap((original["surfaces"] as? [[String: Any]])?.first)
+        for bad in [["calories": -1, "protein": NSNull(), "carbs": 20, "fat": 1, "fiber": 2], ["calories": 100, "carbs": 20, "fat": 1, "fiber": 2]] as [[String: Any]] {
+            var malformed = card; malformed["totals"] = bad
+            let turn = try JSONDecoder().decode(CoachTurn.self, from: JSONSerialization.data(withJSONObject: ["reply": "Original text", "surfaces": [malformed]]))
+            XCTAssertTrue(turn.surfaces.isEmpty)
+            XCTAssertEqual(turn.reply, "Original text")
+        }
+    }
+
     func test401SignsOutAndClearsConversation() async {
         let vault = MemoryVault(); vault.value = "not-a-credential"
         let store = AppStore(api: client(), vault: vault)
@@ -139,6 +214,23 @@ final class ContractTests: XCTestCase {
         let store = AppStore(api: client(), vault: MemoryVault())
         await store.send("a banana"); await store.sendQuickReply("Log it")
         XCTAssertEqual(messages, ["a banana", "Log it"]); XCTAssertEqual(todayReads, 2)
+    }
+
+    func testSurfaceConfirmationSendsLogItOnceAndRefreshesToday() async {
+        var sent = [String](); var reads = 0
+        FixtureProtocol.handler = { request in
+            if request.url!.path == "/api/today" { reads += 1; return (200, self.dayJSON) }
+            let message = try self.body(request)["message"] as! String
+            sent.append(message)
+            return (200, Data(OfflineFixtureProtocol.cardTurn(message == "Log it" ? 1 : 0, labels: message == "Log it" ? [] : ["Log it", "Cancel"]).utf8))
+        }
+        let store = AppStore(api: client(), vault: MemoryVault())
+        await store.send("a banana")
+        XCTAssertEqual(store.messages.last?.surfaces.count, 1)
+        await store.sendQuickReply("Log it"); await store.sendQuickReply("Log it")
+        XCTAssertEqual(sent, ["a banana", "Log it"])
+        XCTAssertEqual(reads, 2)
+        guard let card = store.messages.last?.surfaces.first, case .mealReceipt = card else { return XCTFail("Receipt must reach the message feed") }
     }
 
     func testScanOnceDigitsOnlyAnd404AsChat() async {

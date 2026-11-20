@@ -13,6 +13,184 @@ struct CoachApproval: Decodable, Equatable, Identifiable {
     let status: String?
 }
 
+enum CoachSurface: Decodable, Equatable {
+    case mealPreview(MealPreviewSurface)
+    case mealReceipt(MealReceiptSurface)
+    case saveFailed(SaveFailedSurface)
+    case dayTotals(DayTotalsSurface)
+
+    private enum Keys: String, CodingKey { case kind }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Keys.self)
+        switch try container.decode(String.self, forKey: .kind) {
+        case "meal_preview":
+            let value = try MealPreviewSurface(from: decoder)
+            guard value.isValid else { throw PayloadError.invalidPayload }
+            self = .mealPreview(value)
+        case "meal_receipt":
+            let value = try MealReceiptSurface(from: decoder)
+            guard value.isValid else { throw PayloadError.invalidPayload }
+            self = .mealReceipt(value)
+        case "save_failed":
+            let value = try SaveFailedSurface(from: decoder)
+            guard surfaceText(value.reason, max: 300) else { throw PayloadError.invalidPayload }
+            self = .saveFailed(value)
+        case "day_totals":
+            let value = try DayTotalsSurface(from: decoder)
+            guard value.isValid else { throw PayloadError.invalidPayload }
+            self = .dayTotals(value)
+        default: throw PayloadError.invalidPayload
+        }
+    }
+}
+
+struct SurfaceNutrition: Decodable, Equatable {
+    let calories: Double?
+    let protein: Double?
+    let carbs: Double?
+    let fat: Double?
+    let fiber: Double?
+    private enum Keys: String, CodingKey { case calories, protein, carbs, fat, fiber }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        calories = try c.decode(Double?.self, forKey: .calories)
+        protein = try c.decode(Double?.self, forKey: .protein)
+        carbs = try c.decode(Double?.self, forKey: .carbs)
+        fat = try c.decode(Double?.self, forKey: .fat)
+        fiber = try c.decode(Double?.self, forKey: .fiber)
+    }
+    var values: [Double?] { [calories, protein, carbs, fat, fiber] }
+    var isFinite: Bool { values.compactMap { $0 }.allSatisfy(\.isFinite) }
+    var isNonnegative: Bool { isFinite && values.compactMap { $0 }.allSatisfy { $0 >= 0 } }
+    var isComplete: Bool { values.allSatisfy { $0 != nil } }
+    var isTotal: Bool { calories != nil && isNonnegative }
+}
+
+struct SurfaceDay: Decodable, Equatable {
+    let totals: SurfaceNutrition
+    let targets: SurfaceNutrition
+    let macros_complete: Bool
+    let target_source: String
+    var isValid: Bool {
+        totals.isTotal && targets.isNonnegative && targets.isComplete && macros_complete == totals.isComplete
+            && ["configured", "fallback"].contains(target_source)
+    }
+}
+
+struct SurfaceFood: Decodable, Equatable {
+    let name: String
+    let portion: String
+    let assumed: Bool
+    let source: String
+    let not_counted_reason: String?
+    let modifications: String?
+    let recipe_note: String?
+    let nutrition: SurfaceNutrition
+    private enum Keys: String, CodingKey { case name, portion, assumed, source, not_counted_reason, modifications, recipe_note }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        name = try c.decode(String.self, forKey: .name)
+        portion = try c.decode(String.self, forKey: .portion)
+        assumed = try c.decode(Bool.self, forKey: .assumed)
+        source = try c.decode(String.self, forKey: .source)
+        not_counted_reason = try c.decode(String?.self, forKey: .not_counted_reason)
+        modifications = try c.decodeIfPresent(String.self, forKey: .modifications)
+        recipe_note = try c.decodeIfPresent(String.self, forKey: .recipe_note)
+        nutrition = try SurfaceNutrition(from: decoder)
+    }
+    var isValid: Bool {
+        surfaceText(name, max: 200) && surfaceText(portion, max: 300) && surfaceText(source, max: 1000)
+            && nutrition.isNonnegative && (not_counted_reason.map { surfaceText($0, max: 300) } ?? true)
+    }
+}
+
+struct SurfaceEntry: Decodable, Equatable {
+    let id: String
+    let name: String
+    let nutrition: SurfaceNutrition
+    private enum Keys: String, CodingKey { case id, name }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        nutrition = try SurfaceNutrition(from: decoder)
+    }
+    var isValid: Bool { UUID(uuidString: id) != nil && surfaceText(name, max: 200) && nutrition.isTotal }
+}
+
+struct MealPreviewSurface: Decodable, Equatable {
+    let date: String
+    let meal: String
+    let notice: String?
+    let foods: [SurfaceFood]
+    let totals: SurfaceNutrition
+    let macros_complete: Bool
+    let day_after: SurfaceDay?
+    var isValid: Bool {
+        surfaceDate(date) && surfaceMeal(meal) && (1...24).contains(foods.count) && foods.allSatisfy(\.isValid)
+            && totals.isTotal && macros_complete == totals.isComplete && (day_after?.isValid ?? true)
+    }
+}
+
+struct MealReceiptSurface: Decodable, Equatable {
+    let date: String
+    let meal: String
+    let source: String?
+    let entries: [SurfaceEntry]
+    let totals: SurfaceNutrition
+    let macros_complete: Bool
+    let day_after: SurfaceDay?
+    var isValid: Bool {
+        surfaceDate(date) && surfaceMeal(meal) && (1...24).contains(entries.count) && entries.allSatisfy(\.isValid)
+            && totals.isTotal && macros_complete == totals.isComplete && (day_after?.isValid ?? true)
+    }
+}
+
+struct SaveFailedSurface: Decodable, Equatable {
+    let reason: String
+    let retry_safe: Bool
+}
+
+struct DayTotalsSurface: Decodable, Equatable {
+    let date: String
+    let totals: SurfaceNutrition
+    let targets: SurfaceNutrition
+    let remaining: SurfaceNutrition
+    let macros_complete: Bool
+    let target_source: String
+    var isValid: Bool {
+        surfaceDate(date) && totals.isTotal && targets.isComplete && targets.isNonnegative && remaining.isFinite
+            && remaining.calories != nil && macros_complete == totals.isComplete && ["configured", "fallback"].contains(target_source)
+    }
+}
+
+private func surfaceText(_ value: String, max: Int) -> Bool {
+    !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && value.count <= max && !value.contains("\0")
+}
+
+func surfaceNumber(_ value: Double?) -> String {
+    guard let value else { return "Unknown" }
+    let text = String(value)
+    return text.hasSuffix(".0") ? String(text.dropLast(2)) : text
+}
+
+func surfaceNutrientText(_ value: Double?) -> String {
+    value == nil ? "Unknown" : "\(surfaceNumber(value))g"
+}
+
+private func surfaceMeal(_ value: String) -> Bool { ["Breakfast", "Lunch", "Dinner", "Snack"].contains(value) }
+
+private func surfaceDate(_ value: String) -> Bool {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    formatter.dateFormat = "yyyy-MM-dd"
+    formatter.isLenient = false
+    guard value.count == 10, let date = formatter.date(from: value) else { return false }
+    return formatter.string(from: date) == value
+}
+
 struct CoachTurn: Decodable {
     let reply: String?
     let approval: CoachApproval?
@@ -22,14 +200,25 @@ struct CoachTurn: Decodable {
     /// One-tap answers for this reply ("Log it", "Cancel", "6 oz"). A tap sends
     /// the label as an ordinary message, exactly as if it had been typed.
     let quickReplies: [String]
+    let surfaces: [CoachSurface]
 
     private enum Keys: String, CodingKey { case reply, approval, surfaces, quickReplies }
-    private struct Surface: Decodable { let components: [Component]? }
+    private struct Surface: Decodable {
+        let components: [Component]?
+        let card: CoachSurface?
+        private enum Keys: String, CodingKey { case components }
+        init(from decoder: Decoder) throws {
+            let container = try? decoder.container(keyedBy: Keys.self)
+            components = try? container?.decodeIfPresent([Component].self, forKey: .components)
+            card = try? CoachSurface(from: decoder)
+        }
+    }
     private struct Component: Decodable { let component: String? }
 
-    init(reply: String?, approval: CoachApproval? = nil, wantsMetricsForm: Bool = false, quickReplies: [String] = []) {
+    init(reply: String?, approval: CoachApproval? = nil, wantsMetricsForm: Bool = false, quickReplies: [String] = [], surfaces: [CoachSurface] = []) {
         self.reply = reply; self.approval = approval; self.wantsMetricsForm = wantsMetricsForm
         self.quickReplies = quickReplies
+        self.surfaces = Array(surfaces.prefix(4))
     }
 
     init(from decoder: Decoder) throws {
@@ -40,6 +229,7 @@ struct CoachTurn: Decodable {
         wantsMetricsForm = surfaces.contains { surface in
             (surface.components ?? []).contains { $0.component == "ProfileMetrics" }
         }
+        self.surfaces = Array(surfaces.compactMap(\.card).prefix(4))
         let labels = (try? container.decodeIfPresent([String].self, forKey: .quickReplies)) ?? []
         quickReplies = Self.cleanQuickReplies(labels)
     }

@@ -127,6 +127,23 @@ final class AppStore: ObservableObject {
             return true
         } catch { if generation == authGeneration { handle(error) }; return false }
     }
+    func editPreset(_ body: EditPresetBody) async -> Bool {
+        await presetChange { try await self.api.editPreset(body) }
+    }
+    func removePreset(_ preset: Preset) async -> Bool {
+        await presetChange { try await self.api.removePreset(RemovePresetBody(name: preset.name)) }
+    }
+    private func presetChange(_ work: () async throws -> PresetsPayload) async -> Bool {
+        guard !isMutating else { return false }
+        let generation = authGeneration
+        isMutating = true; errorMessage = nil; defer { isMutating = false }
+        do {
+            let result = try await work()
+            guard generation == authGeneration else { return false }
+            presets = result.presets
+            return true
+        } catch { if generation == authGeneration { handle(error) }; return false }
+    }
     func isSavedMeal(_ entry: FoodEntry) -> Bool {
         presets.contains { $0.name.trimmingCharacters(in: .whitespaces).lowercased() == entry.name.trimmingCharacters(in: .whitespaces).lowercased() }
     }

@@ -53,6 +53,25 @@ final class StudioUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["saved-Synthetic eggs"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["preset-Synthetic eggs"].waitForExistence(timeout: 10))
         attach("08-meal-buttons-OFFLINE", app: app)
+        let shake = app.buttons["preset-Synthetic shake"]
+        XCTAssertTrue(shake.waitForExistence(timeout: 10))
+        shake.press(forDuration: 1.2)
+        app.buttons["Edit name, emoji or slot…"].tap()
+        let name = app.textFields["edit-preset-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 10))
+        name.tap(); name.press(forDuration: 1.0)
+        if app.menuItems["Select All"].waitForExistence(timeout: 2) { app.menuItems["Select All"].tap() }
+        name.typeText("Synthetic morning shake")
+        attach("09-edit-saved-meal-OFFLINE", app: app)
+        app.buttons["save-preset-edit"].tap()
+        XCTAssertTrue(app.buttons["preset-Synthetic morning shake"].waitForExistence(timeout: 10))
+        let bowl = app.buttons["preset-Synthetic bowl"]
+        bowl.press(forDuration: 1.2)
+        app.buttons["Remove from saved meals"].tap()
+        let confirm = app.buttons["confirm-remove-preset"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 10)); confirm.tap()
+        XCTAssertTrue(app.buttons["preset-Synthetic shake"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["preset-Synthetic bowl"].exists)
         app.buttons["Done"].tap()
         app.buttons["studio.tab.3"].tap()
         XCTAssertTrue(app.staticTexts["Daily calories".uppercased()].waitForExistence(timeout: 10))

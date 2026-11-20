@@ -340,3 +340,14 @@ struct SaveMealPresetBody: Codable, Equatable {
     var name: String? = nil
     var emoji: String? = nil
 }
+
+struct EditPresetBody: Codable, Equatable {
+    var name: String
+    var newName: String? = nil
+    var emoji: String? = nil
+    var meal: String? = nil
+}
+
+struct RemovePresetBody: Codable, Equatable {
+    var name: String
+}

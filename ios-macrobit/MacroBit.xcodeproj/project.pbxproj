@@ -196,6 +196,7 @@
 			"buildSettings" = {
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
 				"PRODUCT_BUNDLE_IDENTIFIER" = "com.biz21.macrobit";
+				"CODE_SIGN_ENTITLEMENTS" = "MacroBit/Resources/MacroBit.entitlements";
 				"SWIFT_VERSION" = "5.0";
 				"SDKROOT" = "iphoneos";
 				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
@@ -222,6 +223,7 @@
 			"buildSettings" = {
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
 				"PRODUCT_BUNDLE_IDENTIFIER" = "com.biz21.macrobit";
+				"CODE_SIGN_ENTITLEMENTS" = "MacroBit/Resources/MacroBit.entitlements";
 				"SWIFT_VERSION" = "5.0";
 				"SDKROOT" = "iphoneos";
 				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct APIError: LocalizedError {
@@ -38,6 +39,34 @@ final class APIClient {
     func saveMealAsPreset(_ id: String, _ body: SaveMealPresetBody = SaveMealPresetBody()) async throws -> PresetsPayload { try await request("api/meal/\(encoded(id))/save-preset", method: "POST", body: encode(body)) }
     func editPreset(_ body: EditPresetBody) async throws -> PresetsPayload { try await request("api/presets/edit", method: "POST", body: encode(body)) }
     func removePreset(_ body: RemovePresetBody) async throws -> PresetsPayload { try await request("api/presets/remove", method: "POST", body: encode(body)) }
+    func signInWithApple(_ body: AppleSignInBody) async throws -> AppleSignInPayload {
+        guard let baseURL, let url = URL(string: "api/auth/apple", relativeTo: baseURL.appendingPathComponent("/")) else {
+            throw APIError(status: 0, message: "Set MACRO_API_URL in Config.xcconfig before connecting.")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"; request.timeoutInterval = 90
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encode(body)
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        guard (200..<300).contains(http.statusCode) else {
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let message = object?["error"] as? String ?? "Sign-in failed. Try again."
+            throw APIError(status: http.statusCode == 401 ? 400 : http.statusCode, message: message)
+        }
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(AppleSignInPayload.self, from: data)
+    }
+    func signOutDevice() async {
+        guard let baseURL, let token = tokenProvider(), !token.isEmpty,
+              let url = URL(string: "api/auth/sign-out", relativeTo: baseURL.appendingPathComponent("/")) else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"; request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.httpBody = Data("{}".utf8)
+        _ = try? await session.data(for: request)
+    }
     func turn(sessionID: UUID, turnID: UUID, message: String) async throws -> CoachTurn {
         try await request("api/agent-canvas/\(sessionID.uuidString.lowercased())/turn", method: "POST", body: JSONEncoder().encode(["turn_id": turnID.uuidString.lowercased(), "message": message]), chat: true)
     }
@@ -83,6 +112,30 @@ final class APIClient {
 
     private func encoded(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~"))) ?? value
+    }
+}
+
+struct AppleSignInBody: Encodable {
+    let identityToken: String
+    let nonce: String
+    let name: String?
+}
+
+struct AppleSignInPayload: Decodable, Equatable {
+    let token: String
+    let userId: String
+    let displayName: String
+    let isNew: Bool
+}
+
+enum AppleNonce {
+    static func make(length: Int = 32) -> String {
+        let charset = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._")
+        var generator = SystemRandomNumberGenerator()
+        return String((0..<length).map { _ in charset[Int(generator.next(upperBound: UInt32(charset.count)))] })
+    }
+    static func sha256(_ raw: String) -> String {
+        SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }
 

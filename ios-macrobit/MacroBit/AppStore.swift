@@ -70,6 +70,25 @@ final class AppStore: ObservableObject {
         }
     }
 
+    func signInWithApple(identityToken: String, nonce: String, name: String?) async -> Bool {
+        guard !isValidating else { return false }
+        isValidating = true; errorMessage = nil
+        defer { isValidating = false }
+        do {
+            let signedIn = try await api.signInWithApple(AppleSignInBody(identityToken: identityToken, nonce: nonce, name: name))
+            isValidating = false
+            return await signIn(signedIn.token)
+        } catch {
+            handle(error)
+            return false
+        }
+    }
+
+    func signOutEverywhere() async {
+        await api.signOutDevice()
+        signOut()
+    }
+
     func signOut() {
         authGeneration = UUID(); vault.clear()
         isSignedIn = false; day = nil; presets = []; trends = nil

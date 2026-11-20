@@ -119,7 +119,7 @@ struct CoachChatView: View {
             }, onClose: { showScanner = false }, injectedCode: injectedScanCode)
         }
         .confirmationDialog("Sign out?", isPresented: $showSignOutConfirm, titleVisibility: .visible) {
-            Button("Sign out", role: .destructive) { store.signOut() }
+            Button("Sign out", role: .destructive) { Task { await store.signOutEverywhere() } }
         } message: { Text("You'll need your device token to sign back in.") }
     }
 

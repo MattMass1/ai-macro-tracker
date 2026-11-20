@@ -73,6 +73,34 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(Set(calls.map { $0.1 }), ["/api/today","/api/day/2026-11-16","/api/presets","/api/log","/api/log-preset","/api/meal/fixture-meal","/api/trends", calls.last!.1])
     }
 
+    func testAppleSignInSendsTokenNonceAndNameWithoutBearer() async throws {
+        FixtureProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/api/auth/apple")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            let json = try self.body(request)
+            XCTAssertEqual(Set(json.keys), ["identity_token", "nonce", "name"])
+            XCTAssertEqual(json["nonce"] as? String, "raw-nonce")
+            return (200, Data(#"{"token":"mmd_fixture","user_id":"u1","display_name":"Matt","is_new":true}"#.utf8))
+        }
+        let result = try await client().signInWithApple(AppleSignInBody(identityToken: "a.b.c", nonce: "raw-nonce", name: "Matt"))
+        XCTAssertEqual(result, AppleSignInPayload(token: "mmd_fixture", userId: "u1", displayName: "Matt", isNew: true))
+    }
+
+    func testAppleSignInRefusalIsNotTreatedAsSignOut() async throws {
+        var unauthorized = 0
+        FixtureProtocol.handler = { _ in (401, Data(#"{"error":"Apple sign-in could not be verified."}"#.utf8)) }
+        do { _ = try await client(onUnauthorized: { unauthorized += 1 }).signInWithApple(AppleSignInBody(identityToken: "a.b.c", nonce: "n", name: nil)); XCTFail("expected refusal") }
+        catch let error as APIError { XCTAssertEqual(error.errorDescription, "Apple sign-in could not be verified.") }
+        XCTAssertEqual(unauthorized, 0)
+    }
+
+    func testAppleNonceIsRandomAndHashedForApple() {
+        let a = AppleNonce.make(), b = AppleNonce.make()
+        XCTAssertEqual(a.count, 32); XCTAssertNotEqual(a, b)
+        XCTAssertEqual(AppleNonce.sha256("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    }
+
     func testTurnSerializesCanonicalUUIDsWithoutChangingValuesOrMessage() async throws {
         let sessionID = try XCTUnwrap(UUID(uuidString: "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF"))
         let turnID = try XCTUnwrap(UUID(uuidString: "FEDCBAFE-DCBA-4FED-9CBA-FEDCBAFEDCBA"))

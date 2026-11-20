@@ -10,6 +10,8 @@ struct TodayView: View {
     @State private var servings = "1"
     @State private var meal = "Snack"
     @State private var logged: String?
+    @State private var editing: Preset?
+    @State private var removing: Preset?
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -25,7 +27,9 @@ struct TodayView: View {
                             // One tap logs one serving in the preset's own meal slot, like the old Quick add grid.
                             Task { if await store.logPreset(LogPresetBody(presetName: item.name, servings: 1, meal: item.meal, day: store.effectiveDate)) { logged = item.name } }
                         },
-                        customize: { item in preset = item; servings = "1"; meal = item.meal })
+                        customize: { item in preset = item; servings = "1"; meal = item.meal },
+                        edit: { item in editing = item },
+                        remove: { item in removing = item })
                     HStack { SectionLabel(text: "Meals"); Spacer(); Button("Manual entry") { manual = true }.buttonStyle(PixelSecondaryButtonStyle()) }
                     if day.meals.isEmpty { EmptyState(icon: "fork.knife", title: "A fresh log", message: "Start in the Studio chat, tap a saved meal or enter one.") }
                     ForEach(day.meals) { entry in
@@ -83,6 +87,14 @@ struct TodayView: View {
                     }.navigationTitle("Preset").toolbar { Button("Cancel") { preset = nil } }
                 }
             }
+            .sheet(item: $editing) { item in NavigationStack { SavedMealEditor(preset: item) { editing = nil } } }
+            .confirmationDialog("Remove this saved meal?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible) {
+                if let item = removing {
+                    Button("Remove \(item.name)", role: .destructive) { Task { _ = await store.removePreset(item); removing = nil } }
+                        .accessibilityIdentifier("confirm-remove-preset")
+                }
+                Button("Cancel", role: .cancel) { removing = nil }
+            } message: { Text("It leaves the Saved meals grid. Meals you already logged stay in your log.") }
             .confirmationDialog("Delete this entry?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
                 if let entry = deleting { Button("Delete \(entry.name)", role: .destructive) { Task { _ = await store.deleteMeal(entry.id); deleting = nil } } }
                 Button("Cancel", role: .cancel) { deleting = nil }
@@ -295,6 +307,8 @@ struct PixelPresetGrid: View {
     let logged: String?
     let quickLog: (Preset) -> Void
     let customize: (Preset) -> Void
+    var edit: (Preset) -> Void = { _ in }
+    var remove: (Preset) -> Void = { _ in }
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
     var body: some View {
@@ -312,13 +326,17 @@ struct PixelPresetGrid: View {
                         Button { quickLog(item) } label: { tile(item) }
                             .buttonStyle(PixelTileButtonStyle())
                             .disabled(busy)
-                            .contextMenu { Button("Servings or meal…", systemImage: "slider.horizontal.3") { customize(item) } }
+                            .contextMenu {
+                                Button("Servings or meal…", systemImage: "slider.horizontal.3") { customize(item) }
+                                Button("Edit name, emoji or slot…", systemImage: "pencil") { edit(item) }
+                                Button("Remove from saved meals", systemImage: "trash", role: .destructive) { remove(item) }
+                            }
                             .accessibilityIdentifier("preset-\(item.name)")
                             .accessibilityLabel("Log \(item.name), \(Int(item.calories.rounded())) calories")
-                            .accessibilityHint("Logs one serving. Touch and hold to change servings or meal.")
+                            .accessibilityHint("Logs one serving. Touch and hold for servings, edit or remove.")
                     }
                 }
-                Text("Tap to log 1 serving · hold for servings or meal").font(.caption2).foregroundStyle(Theme.muted)
+                Text("Tap to log 1 serving · hold to edit or remove").font(.caption2).foregroundStyle(Theme.muted)
             }
         }
     }
@@ -349,5 +367,50 @@ struct PixelTileButtonStyle: ButtonStyle {
                 .shadow(color: Theme.accentEdge.opacity(0.35), radius: 0, y: configuration.isPressed ? 1 : 3))
             .overlay(PixelPanelShape().stroke(Theme.edgeStrong, lineWidth: 1))
             .offset(y: configuration.isPressed ? 2 : 0)
+    }
+}
+
+struct SavedMealEditor: View {
+    @EnvironmentObject private var store: AppStore
+    let preset: Preset
+    let done: () -> Void
+    @State private var name = ""
+    @State private var emoji = ""
+    @State private var meal = "Snack"
+
+    private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var trimmedEmoji: String { emoji.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var emojiValid: Bool { trimmedEmoji.count == 1 }
+    private var changed: Bool { trimmedName != preset.name || trimmedEmoji != preset.emoji || meal != preset.meal }
+
+    var body: some View {
+        Form {
+            Section("Name") { TextField("Name", text: $name).accessibilityIdentifier("edit-preset-name") }
+            Section("Emoji") {
+                TextField("One emoji", text: $emoji).accessibilityIdentifier("edit-preset-emoji")
+                if !trimmedEmoji.isEmpty && !emojiValid { Text("Use a single emoji.").font(.caption).foregroundStyle(Theme.danger) }
+            }
+            Section("Default meal") {
+                Picker("Meal", selection: $meal) { ForEach(["Breakfast", "Lunch", "Dinner", "Snack"], id: \.self) { Text($0) } }
+            }
+            Section {
+                Text("\(Int(preset.calories.rounded())) kcal · \(nutrientText(preset.protein)) protein · \(nutrientText(preset.carbs)) carbs · \(nutrientText(preset.fat)) fat")
+                    .font(.caption).foregroundStyle(Theme.muted)
+                Text("Numbers come from the meal you saved and can't be edited here.").font(.caption2).foregroundStyle(Theme.muted)
+            }
+            if let error = store.errorMessage { Text(error).foregroundStyle(Theme.danger) }
+            Button("Save changes") {
+                let body = EditPresetBody(name: preset.name,
+                    newName: trimmedName != preset.name ? trimmedName : nil,
+                    emoji: trimmedEmoji != preset.emoji ? trimmedEmoji : nil,
+                    meal: meal != preset.meal ? meal : nil)
+                Task { if await store.editPreset(body) { done() } }
+            }
+            .accessibilityIdentifier("save-preset-edit")
+            .disabled(store.isMutating || !changed || trimmedName.isEmpty || !emojiValid)
+        }
+        .navigationTitle("Edit saved meal")
+        .toolbar { Button("Cancel") { done() } }
+        .onAppear { name = preset.name; emoji = preset.emoji; meal = preset.meal }
     }
 }

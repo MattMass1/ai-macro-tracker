@@ -340,6 +340,26 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(store.isSavedMeal(entry))
     }
 
+    func testEditAndRemoveSavedMealSendOnlyNamesAndChanges() async throws {
+        var bodies = [(String, [String: Any])]()
+        FixtureProtocol.handler = { request in
+            let path = request.url!.path
+            bodies.append((path, try self.body(request)))
+            let name = path.hasSuffix("/edit") ? "Morning shake" : "Bowl"
+            return (200, Data(#"{"presets":[{"name":"\#(name)","emoji":"🧋","calories":150,"protein":30,"carbs":3,"fat":2.5,"fiber":0,"meal":"Breakfast","sort_order":1}]}"#.utf8))
+        }
+        let store = AppStore(api: client(), vault: MemoryVault())
+        let edited = await store.editPreset(EditPresetBody(name: "Shake", newName: "Morning shake", emoji: "🧋", meal: nil))
+        XCTAssertTrue(edited); XCTAssertEqual(store.presets.map(\.name), ["Morning shake"])
+        let shake = Preset(name: "Morning shake", emoji: "🧋", calories: 150, protein: 30, carbs: 3, fat: 2.5, fiber: 0, meal: "Breakfast", sortOrder: 1, active: true)
+        let removed = await store.removePreset(shake)
+        XCTAssertTrue(removed); XCTAssertEqual(store.presets.map(\.name), ["Bowl"])
+        XCTAssertEqual(bodies.map(\.0), ["/api/presets/edit", "/api/presets/remove"])
+        XCTAssertEqual(Set(bodies[0].1.keys), ["name", "new_name", "emoji"])
+        XCTAssertEqual(bodies[0].1["new_name"] as? String, "Morning shake")
+        XCTAssertEqual(bodies[1].1 as NSDictionary, ["name": "Morning shake"] as NSDictionary)
+    }
+
     func testSavePresetDeleteEachRefetchToday() async {
         var reads = 0
         FixtureProtocol.handler = { request in

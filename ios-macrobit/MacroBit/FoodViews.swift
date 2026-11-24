@@ -30,6 +30,23 @@ struct TodayView: View {
                         customize: { item in preset = item; servings = "1"; meal = item.meal },
                         edit: { item in editing = item },
                         remove: { item in removing = item })
+                    if !store.suggestions.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            SectionLabel(text: "You eat these a lot")
+                            ForEach(store.suggestions) { item in
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(item.name).font(.subheadline.bold())
+                                        Text("\(item.times)× in 30 days · \(item.calories.formatted()) kcal").font(.caption).foregroundStyle(Theme.muted)
+                                    }
+                                    Spacer()
+                                    Button("★ Make button") { Task { _ = await store.saveSuggestion(item) } }
+                                        .buttonStyle(PixelSecondaryButtonStyle())
+                                        .accessibilityIdentifier("suggest-\(item.name)")
+                                }
+                            }
+                        }.appCard().disabled(store.isMutating)
+                    }
                     HStack { SectionLabel(text: "Meals"); Spacer(); Button("Manual entry") { manual = true }.buttonStyle(PixelSecondaryButtonStyle()) }
                     if day.meals.isEmpty { EmptyState(icon: "fork.knife", title: "A fresh log", message: "Start in the Studio chat, tap a saved meal or enter one.") }
                     ForEach(day.meals) { entry in
@@ -71,7 +88,7 @@ struct TodayView: View {
             }.padding(16)
         }.background(Theme.canvas).navigationTitle("Today").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-            .refreshable { await store.refreshToday(); await store.loadPresets() }
+            .refreshable { await store.refreshToday(); await store.loadPresets(); await store.loadSuggestions() }
             .sheet(isPresented: $manual) { NavigationStack { ManualEntryView() } }
             .sheet(item: $preset) { item in
                 NavigationStack {

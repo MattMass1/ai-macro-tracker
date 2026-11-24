@@ -483,6 +483,107 @@ final class ContractTests: XCTestCase {
     }
 }
 
+final class MemoryJournal: ChatJournal {
+    var stored: SavedChat?
+    func load() -> SavedChat? { stored }
+    func save(_ chat: SavedChat) { stored = chat }
+    func clear() { stored = nil }
+}
+
+@MainActor
+final class ChatMemoryTests: XCTestCase {
+    let dayJSON = Data(#"{"date":"2026-11-24","day_label":"Tuesday","day_timing":{"time_zone":"America/New_York","rollover_hour":4,"effective_date":"2026-11-24"},"has_targets":false,"macros_complete":true,"macro_note":null,"totals":{"calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0},"targets":{"calories":2000,"protein":150,"carbs":200,"fat":60,"fiber":25},"remaining":{"calories":2000,"protein":150,"carbs":200,"fat":60,"fiber":25},"meals":[]}"#.utf8)
+    let noonNY = ISO8601DateFormatter().date(from: "2026-11-24T17:00:00Z")!
+
+    func client() -> APIClient {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        return APIClient(baseURL: URL(string: "https://fixture.invalid")!, tokenProvider: { "not-a-credential" }, session: URLSession(configuration: config))
+    }
+    func store(_ journal: MemoryJournal, at date: Date) -> AppStore {
+        let store = AppStore(api: client(), vault: MemoryVault(), journal: journal)
+        store.now = { date }
+        return store
+    }
+    func serve(_ reply: String = "OK") {
+        FixtureProtocol.handler = { request in
+            if request.url!.path == "/api/today" { return (200, self.dayJSON) }
+            return (200, Data("{\"reply\":\"\(reply)\",\"quickReplies\":[]}".utf8))
+        }
+    }
+
+    func testTodaysChatIsSavedAndComesBackWithTheSameSession() async {
+        serve(); let journal = MemoryJournal()
+        let first = store(journal, at: noonNY)
+        first.restoreChat(); await first.send("two eggs")
+        XCTAssertEqual(journal.stored?.day, "2026-11-24")
+        XCTAssertEqual(journal.stored?.lines, [SavedChat.Line(fromUser: true, text: "two eggs"), SavedChat.Line(fromUser: false, text: "OK")])
+        let reopened = store(journal, at: noonNY.addingTimeInterval(3600))
+        reopened.restoreChat()
+        XCTAssertEqual(reopened.messages.map(\.text), ["two eggs", "OK"])
+        XCTAssertEqual(reopened.sessionID, first.sessionID)
+        XCTAssertTrue(reopened.messages.allSatisfy { $0.quickReplies.isEmpty && $0.surfaces.isEmpty })
+    }
+
+    func testYesterdaysChatIsClearedOnOpen() {
+        let journal = MemoryJournal(); let old = UUID()
+        journal.stored = SavedChat(day: "2026-11-23", sessionID: old, lines: [SavedChat.Line(fromUser: true, text: "yesterday")])
+        let store = store(journal, at: noonNY)
+        store.restoreChat()
+        XCTAssertTrue(store.messages.isEmpty); XCTAssertNil(journal.stored); XCTAssertNotEqual(store.sessionID, old)
+    }
+
+    func testChatBefore4amStillBelongsToYesterdayThenResetsAt4() async {
+        serve(); let journal = MemoryJournal()
+        let lateNight = ISO8601DateFormatter().date(from: "2026-11-25T08:30:00Z")!
+        var clock = lateNight
+        let store = AppStore(api: client(), vault: MemoryVault(), journal: journal)
+        store.now = { clock }
+        store.restoreChat(); await store.send("midnight snack")
+        XCTAssertEqual(journal.stored?.day, "2026-11-24")
+        let session = store.sessionID
+        clock = ISO8601DateFormatter().date(from: "2026-11-25T09:05:00Z")!
+        store.rollChatIfNewDay()
+        XCTAssertTrue(store.messages.isEmpty); XCTAssertNil(journal.stored); XCTAssertNotEqual(store.sessionID, session)
+        await store.send("breakfast")
+        XCTAssertEqual(journal.stored?.day, "2026-11-25"); XCTAssertEqual(journal.stored?.lines.first?.text, "breakfast")
+    }
+
+    func testSignOutDeletesTheSavedChat() {
+        let journal = MemoryJournal()
+        journal.stored = SavedChat(day: "2026-11-24", sessionID: UUID(), lines: [SavedChat.Line(fromUser: true, text: "x")])
+        let store = store(journal, at: noonNY)
+        store.signOut()
+        XCTAssertNil(journal.stored); XCTAssertTrue(store.messages.isEmpty)
+    }
+
+    func testSuggestionsLoadAndMakeButtonSendsOnlyTheEntryId() async throws {
+        var posted: [(String, Bool)] = []
+        FixtureProtocol.handler = { request in
+            let path = request.url!.path
+            if path == "/api/meal-suggestions" {
+                return (200, Data(#"{"days":30,"suggestions":[{"entry_id":"c1000000-0000-4000-8000-000000000009","name":"Oats","meal":"Breakfast","times":3,"calories":320,"protein":20,"carbs":null,"fat":9,"fiber":4}]}"#.utf8))
+            }
+            posted.append((path, try ContractTests().body(request).isEmpty))
+            return (200, Data(#"{"presets":[{"name":"Oats","emoji":"🍽️","calories":320,"protein":20,"carbs":0,"fat":9,"fiber":4,"meal":"Breakfast","sort_order":1}]}"#.utf8))
+        }
+        let store = store(MemoryJournal(), at: noonNY)
+        await store.loadSuggestions()
+        XCTAssertEqual(store.suggestions.map(\.name), ["Oats"]); XCTAssertNil(store.suggestions[0].carbs); XCTAssertEqual(store.suggestions[0].times, 3)
+        let saved = await store.saveSuggestion(store.suggestions[0])
+        XCTAssertTrue(saved); XCTAssertTrue(store.suggestions.isEmpty); XCTAssertEqual(store.presets.map(\.name), ["Oats"])
+        XCTAssertEqual(posted.map(\.0), ["/api/meal/c1000000-0000-4000-8000-000000000009/save-preset"])
+        XCTAssertEqual(posted.first?.1, true)
+    }
+
+    func testSuggestionsFailQuietly() async {
+        FixtureProtocol.handler = { _ in (404, Data(#"{"error":"Not found."}"#.utf8)) }
+        let store = store(MemoryJournal(), at: noonNY)
+        await store.loadSuggestions()
+        XCTAssertTrue(store.suggestions.isEmpty); XCTAssertNil(store.errorMessage)
+    }
+}
+
 final class MemoryVault: TokenVault {
     var value: String?
     func read() -> String? { value }

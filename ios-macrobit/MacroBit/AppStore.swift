@@ -30,7 +30,11 @@ final class AppStore: ObservableObject {
     @Published var retryTurn: PendingTurn?
     @Published var scanQueue: [(UUID, String)] = []
     @Published var isFixture = false
-    let sessionID = UUID()
+    @Published var suggestions: [MealSuggestion] = []
+    private(set) var sessionID = UUID()
+    private var chatDay: String?
+    private let journal: ChatJournal
+    var now: () -> Date = { Date() }
     private let vault: TokenVault
     private var api: APIClient
     var candidateClient: (@escaping () -> String?) -> APIClient = { APIClient(tokenProvider: $0) }
@@ -39,15 +43,67 @@ final class AppStore: ObservableObject {
     @Published private(set) var conflictBlocked = false
     var effectiveDate: String? { day?.dayTiming?.effectiveDate }
 
-    init(api: APIClient? = nil, vault: TokenVault = DeviceTokenVault()) {
+    init(api: APIClient? = nil, vault: TokenVault = DeviceTokenVault(), journal: ChatJournal = FileChatJournal()) {
         self.vault = vault
+        self.journal = journal
         self.api = api ?? APIClient(tokenProvider: { vault.read() })
+    }
+
+    var chatDayKey: String {
+        let policy = day?.dayTiming ?? LoggingDayPolicy.bootstrap
+        return policy.formatter.string(from: policy.currentDay(now: now()))
+    }
+
+    func restoreChat() {
+        let today = chatDayKey
+        guard let saved = journal.load(), saved.day == today else {
+            journal.clear(); startFreshChat(day: today); return
+        }
+        sessionID = saved.sessionID; chatDay = today
+        messages = saved.lines.map { ChatMessage(role: $0.fromUser ? .user : .coach, text: $0.text) }
+    }
+
+    func rollChatIfNewDay() {
+        let today = chatDayKey
+        guard let current = chatDay else { chatDay = today; return }
+        guard current != today, !isSending else { return }
+        journal.clear(); startFreshChat(day: today)
+    }
+
+    private func startFreshChat(day: String) {
+        sessionID = UUID(); chatDay = day
+        messages = []; retryTurn = nil; conflictBlocked = false
+    }
+
+    private func persistChat() {
+        guard !isFixture, let day = chatDay else { return }
+        let lines = messages.suffix(SavedChat.maxLines).map { SavedChat.Line(fromUser: $0.role == .user, text: $0.text) }
+        journal.save(SavedChat(day: day, sessionID: sessionID, lines: Array(lines)))
+    }
+
+    func loadSuggestions() async {
+        let generation = authGeneration
+        do { let result = try await api.mealSuggestions(); if generation == authGeneration { suggestions = result.suggestions } }
+        catch { if generation == authGeneration { suggestions = [] } }
+    }
+
+    func saveSuggestion(_ item: MealSuggestion) async -> Bool {
+        guard !isMutating else { return false }
+        let generation = authGeneration
+        isMutating = true; errorMessage = nil; defer { isMutating = false }
+        do {
+            let result = try await api.saveMealAsPreset(item.entryId)
+            guard generation == authGeneration else { return false }
+            presets = result.presets
+            suggestions.removeAll { $0.entryId == item.entryId }
+            return true
+        } catch { if generation == authGeneration { handle(error) }; return false }
     }
 
     func restore() async {
         guard vault.read() != nil else { return }
         await refreshToday()
-        if day != nil { isSignedIn = true; await loadPresets() }
+        if day != nil { isSignedIn = true; restoreChat(); await loadPresets(); await loadSuggestions() }
     }
 
     func signIn(_ raw: String) async -> Bool {
@@ -63,7 +119,8 @@ final class AppStore: ObservableObject {
             guard vault.save(token) else { throw APIError(status: 0, message: "Could not store the token securely. Try again.") }
             api = candidateClient({ [vault] in vault.read() })
             authGeneration = UUID(); day = payload; isSignedIn = true
-            await loadPresets()
+            journal.clear(); startFreshChat(day: chatDayKey)
+            await loadPresets(); await loadSuggestions()
             return true
         } catch {
             handle(error)
@@ -91,8 +148,9 @@ final class AppStore: ObservableObject {
     }
 
     func signOut() {
-        authGeneration = UUID(); vault.clear()
-        isSignedIn = false; day = nil; presets = []; trends = nil
+        authGeneration = UUID(); vault.clear(); journal.clear()
+        isSignedIn = false; day = nil; presets = []; trends = nil; suggestions = []
+        sessionID = UUID(); chatDay = nil
         messages = []; retryTurn = nil; scanQueue = []; scanEvents = []
         conflictBlocked = false; errorMessage = nil
     }
@@ -208,8 +266,10 @@ final class AppStore: ObservableObject {
     }
 
     private func perform(_ turn: PendingTurn, appendUser: Bool) async {
+        if retryTurn == nil { rollChatIfNewDay() }
         let generation = authGeneration
         isSending = true; retryTurn = nil
+        defer { persistChat() }
         // Any later user turn invalidates earlier preview buttons.
         for index in messages.indices { messages[index].quickReplies = [] }
         if appendUser { messages.append(ChatMessage(role: .user, text: turn.message)) }

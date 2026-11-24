@@ -130,7 +130,7 @@ struct AppleSignInPayload: Decodable, Equatable {
 
 enum AppleNonce {
     static func make(length: Int = 32) -> String {
-        let charset = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._")
+        let charset = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-._")
         var generator = SystemRandomNumberGenerator()
         return String((0..<length).map { _ in charset[Int(generator.next(upperBound: UInt32(charset.count)))] })
     }

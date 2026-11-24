@@ -33,6 +33,7 @@ final class AppStore: ObservableObject {
     let sessionID = UUID()
     private let vault: TokenVault
     private var api: APIClient
+    var candidateClient: (@escaping () -> String?) -> APIClient = { APIClient(tokenProvider: $0) }
     private var authGeneration = UUID()
     private var scanEvents = Set<UUID>()
     @Published private(set) var conflictBlocked = false
@@ -55,12 +56,12 @@ final class AppStore: ObservableObject {
         isValidating = true; errorMessage = nil
         defer { isValidating = false }
         // Validation uses the entered value in memory. Persist only after success.
-        let candidate = APIClient(tokenProvider: { token })
+        let candidate = candidateClient({ token })
         do {
             let payload = try await candidate.today()
             try validateDay(payload)
             guard vault.save(token) else { throw APIError(status: 0, message: "Could not store the token securely. Try again.") }
-            api = APIClient(tokenProvider: { [vault] in vault.read() })
+            api = candidateClient({ [vault] in vault.read() })
             authGeneration = UUID(); day = payload; isSignedIn = true
             await loadPresets()
             return true

@@ -1,3 +1,4 @@
+import AuthenticationServices
 import SwiftUI
 import UIKit
 
@@ -36,6 +37,8 @@ struct RootView: View {
 struct TokenView: View {
     @EnvironmentObject private var store: AppStore
     @State private var token = ""
+    @State private var nonce = ""
+    @State private var showToken = false
     var body: some View {
         ZStack {
             StudioBackground(alignment: .bottom)
@@ -45,21 +48,50 @@ struct TokenView: View {
                     CompanionView(character: .male, state: .rest).frame(height: 180).frame(maxWidth: .infinity)
                     VStack(alignment: .leading, spacing: 16) {
                         Text("Your studio, a fresh start").font(.title2.bold())
-                        Text("Use your dedicated device token to connect. Your old app and its log stay separate.").foregroundStyle(Theme.muted)
+                        Text("Sign in to start logging. Your old app and its log stay separate.").foregroundStyle(Theme.muted)
+                        SignInWithAppleButton(.signIn) { request in
+                            let raw = AppleNonce.make(); nonce = raw
+                            request.requestedScopes = [.fullName, .email]
+                            request.nonce = AppleNonce.sha256(raw)
+                        } onCompletion: { result in
+                            appleFinished(result)
+                        }
+                        .signInWithAppleButtonStyle(.black).frame(height: 50).disabled(store.isValidating)
+                        .accessibilityIdentifier("sign-in-with-apple")
+                        Button(showToken ? "Hide device token" : "Use a device token instead") { showToken.toggle() }
+                            .font(.footnote).foregroundStyle(Theme.muted).accessibilityIdentifier("use-device-token")
+                        if showToken {
                         SecureField("Paste your device token", text: $token)
                             .textContentType(.password).textInputAutocapitalization(.never).autocorrectionDisabled()
                             .padding(12).background(Theme.paper).accessibilityIdentifier("device-token")
+                        Button("Connect") {
+                            Task { if await store.signIn(token) { token = "" } }
+                        }.buttonStyle(PixelPrimaryButtonStyle()).disabled(token.isEmpty || store.isValidating)
+                        }
                         if store.isValidating {
                             ProgressView("Connecting. The server can take about a minute to wake up.")
                         }
                         if let error = store.errorMessage { Text(error).foregroundStyle(Theme.danger).accessibilityIdentifier("token-error") }
-                        Button("Connect") {
-                            Task { if await store.signIn(token) { token = "" } }
-                        }.buttonStyle(PixelPrimaryButtonStyle()).disabled(token.isEmpty || store.isValidating)
                     }.appCard()
                 }.padding(20)
             }
         }.foregroundStyle(Theme.ink)
+    }
+
+    private func appleFinished(_ result: Result<ASAuthorization, Error>) {
+        switch result {
+        case .success(let authorization):
+            guard let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
+                  let data = credential.identityToken, let identityToken = String(data: data, encoding: .utf8), !nonce.isEmpty else {
+                store.errorMessage = "Apple didn't return a sign-in. Try again."; return
+            }
+            let parts = [credential.fullName?.givenName, credential.fullName?.familyName].compactMap { $0 }.filter { !$0.isEmpty }
+            let raw = nonce; nonce = ""
+            Task { _ = await store.signInWithApple(identityToken: identityToken, nonce: raw, name: parts.isEmpty ? nil : parts.joined(separator: " ")) }
+        case .failure(let error):
+            if (error as? ASAuthorizationError)?.code == .canceled { return }
+            store.errorMessage = "Sign in with Apple didn't finish. Try again."
+        }
     }
 }
 

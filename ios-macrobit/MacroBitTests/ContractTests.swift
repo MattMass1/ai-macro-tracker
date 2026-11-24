@@ -73,6 +73,89 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(Set(calls.map { $0.1 }), ["/api/today","/api/day/2026-11-16","/api/presets","/api/log","/api/log-preset","/api/meal/fixture-meal","/api/trends", calls.last!.1])
     }
 
+    func testAppleSignInSendsTokenNonceAndNameWithoutBearer() async throws {
+        FixtureProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/api/auth/apple")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            let json = try self.body(request)
+            XCTAssertEqual(Set(json.keys), ["identity_token", "nonce", "name"])
+            XCTAssertEqual(json["nonce"] as? String, "raw-nonce")
+            return (200, Data(#"{"token":"mmd_fixture","user_id":"u1","display_name":"Matt","is_new":true}"#.utf8))
+        }
+        let result = try await client().signInWithApple(AppleSignInBody(identityToken: "a.b.c", nonce: "raw-nonce", name: "Matt"))
+        XCTAssertEqual(result, AppleSignInPayload(token: "mmd_fixture", userId: "u1", displayName: "Matt", isNew: true))
+    }
+
+    func testAppleSignInRefusalIsNotTreatedAsSignOut() async throws {
+        var unauthorized = 0
+        FixtureProtocol.handler = { _ in (401, Data(#"{"error":"Apple sign-in could not be verified."}"#.utf8)) }
+        do { _ = try await client(onUnauthorized: { unauthorized += 1 }).signInWithApple(AppleSignInBody(identityToken: "a.b.c", nonce: "n", name: nil)); XCTFail("expected refusal") }
+        catch let error as APIError { XCTAssertEqual(error.errorDescription, "Apple sign-in could not be verified.") }
+        XCTAssertEqual(unauthorized, 0)
+    }
+
+    func testAppleSignInStoresIssuedTokenOnlyAfterTodayAccepts() async {
+        var paths: [String] = []
+        FixtureProtocol.handler = { request in
+            paths.append(request.url?.path ?? "")
+            if request.url?.path == "/api/auth/apple" { return (200, Data(#"{"token":"mmd_issued","user_id":"u1","display_name":"Matt","is_new":false}"#.utf8)) }
+            if request.url?.path == "/api/today" {
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer mmd_issued")
+                return (200, self.dayJSON)
+            }
+            return (200, Data(#"{"presets":[]}"#.utf8))
+        }
+        let vault = MemoryVault()
+        let store = AppStore(api: client(), vault: vault)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        store.candidateClient = { provider in APIClient(baseURL: URL(string: "https://fixture.invalid")!, tokenProvider: provider, session: URLSession(configuration: config)) }
+        let ok = await store.signInWithApple(identityToken: "a.b.c", nonce: "raw-nonce-raw-nonce", name: nil)
+        XCTAssertTrue(ok); XCTAssertTrue(store.isSignedIn)
+        XCTAssertEqual(vault.value, "mmd_issued")
+        XCTAssertEqual(Array(paths.prefix(2)), ["/api/auth/apple", "/api/today"])
+    }
+
+    func testAppleSignInFailureStoresNothing() async {
+        FixtureProtocol.handler = { _ in (401, Data(#"{"error":"Apple sign-in could not be verified."}"#.utf8)) }
+        let vault = MemoryVault()
+        let store = AppStore(api: client(), vault: vault)
+        let ok = await store.signInWithApple(identityToken: "a.b.c", nonce: "raw-nonce-raw-nonce", name: nil)
+        XCTAssertFalse(ok); XCTAssertFalse(store.isSignedIn); XCTAssertNil(vault.value)
+        XCTAssertEqual(store.errorMessage, "Apple sign-in could not be verified.")
+    }
+
+    func testSignOutEverywhereRevokesBearerThenClears() async {
+        var revoked: [String?] = []
+        FixtureProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/auth/sign-out"); XCTAssertEqual(request.httpMethod, "POST")
+            revoked.append(request.value(forHTTPHeaderField: "Authorization"))
+            return (200, Data(#"{"signed_out":true}"#.utf8))
+        }
+        let vault = MemoryVault(); vault.value = "not-a-credential"
+        let store = AppStore(api: client(), vault: vault)
+        store.isSignedIn = true
+        await store.signOutEverywhere()
+        XCTAssertEqual(revoked, ["Bearer not-a-credential"])
+        XCTAssertFalse(store.isSignedIn); XCTAssertNil(vault.value)
+    }
+
+    func testSignOutEverywhereStillClearsWhenServerUnreachable() async {
+        FixtureProtocol.handler = { _ in throw URLError(.notConnectedToInternet) }
+        let vault = MemoryVault(); vault.value = "not-a-credential"
+        let store = AppStore(api: client(), vault: vault)
+        store.isSignedIn = true
+        await store.signOutEverywhere()
+        XCTAssertFalse(store.isSignedIn); XCTAssertNil(vault.value)
+    }
+
+    func testAppleNonceIsRandomAndHashedForApple() {
+        let a = AppleNonce.make(), b = AppleNonce.make()
+        XCTAssertEqual(a.count, 32); XCTAssertNotEqual(a, b)
+        XCTAssertEqual(AppleNonce.sha256("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    }
+
     func testTurnSerializesCanonicalUUIDsWithoutChangingValuesOrMessage() async throws {
         let sessionID = try XCTUnwrap(UUID(uuidString: "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF"))
         let turnID = try XCTUnwrap(UUID(uuidString: "FEDCBAFE-DCBA-4FED-9CBA-FEDCBAFEDCBA"))

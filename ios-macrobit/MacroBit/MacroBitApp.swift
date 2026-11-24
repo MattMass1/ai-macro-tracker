@@ -29,7 +29,7 @@ struct RootView: View {
             if store.isSignedIn { ContentView() } else { TokenView() }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active && store.isSignedIn { Task { await store.refreshToday() } }
+            if phase == .active && store.isSignedIn { Task { await store.refreshToday(); store.rollChatIfNewDay(); await store.loadSuggestions() } }
         }
     }
 }

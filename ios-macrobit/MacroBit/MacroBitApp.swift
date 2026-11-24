@@ -36,9 +36,7 @@ struct RootView: View {
 
 struct TokenView: View {
     @EnvironmentObject private var store: AppStore
-    @State private var token = ""
     @State private var nonce = ""
-    @State private var showToken = false
     var body: some View {
         ZStack {
             StudioBackground(alignment: .bottom)
@@ -58,16 +56,6 @@ struct TokenView: View {
                         }
                         .signInWithAppleButtonStyle(.black).frame(height: 50).disabled(store.isValidating)
                         .accessibilityIdentifier("sign-in-with-apple")
-                        Button(showToken ? "Hide device token" : "Use a device token instead") { showToken.toggle() }
-                            .font(.footnote).foregroundStyle(Theme.muted).accessibilityIdentifier("use-device-token")
-                        if showToken {
-                        SecureField("Paste your device token", text: $token)
-                            .textContentType(.password).textInputAutocapitalization(.never).autocorrectionDisabled()
-                            .padding(12).background(Theme.paper).accessibilityIdentifier("device-token")
-                        Button("Connect") {
-                            Task { if await store.signIn(token) { token = "" } }
-                        }.buttonStyle(PixelPrimaryButtonStyle()).disabled(token.isEmpty || store.isValidating)
-                        }
                         if store.isValidating {
                             ProgressView("Connecting. The server can take about a minute to wake up.")
                         }

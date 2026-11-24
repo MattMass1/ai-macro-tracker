@@ -120,7 +120,7 @@ struct CoachChatView: View {
         }
         .confirmationDialog("Sign out?", isPresented: $showSignOutConfirm, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { Task { await store.signOutEverywhere() } }
-        } message: { Text("You can sign back in with Apple or your device token.") }
+        } message: { Text("You can sign back in with Apple.") }
     }
 
     private var coachHeader: some View {

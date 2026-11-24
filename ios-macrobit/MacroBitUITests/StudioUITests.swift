@@ -18,8 +18,9 @@ final class StudioUITests: XCTestCase {
     func testTokenScreenAndOfflineStudioScreens() throws {
         let app = XCUIApplication()
         app.launch()
-        XCTAssertTrue(app.buttons["sign-in-with-apple"].waitForExistence(timeout: 10)); app.buttons["use-device-token"].tap()
-        XCTAssertTrue(app.secureTextFields["device-token"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["sign-in-with-apple"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["use-device-token"].exists)
+        XCTAssertFalse(app.secureTextFields["device-token"].exists)
         attach("01-token-screen", app: app)
         app.terminate()
         app.launchArguments = ["-fixture-ui"]

@@ -632,6 +632,42 @@ final class OnboardingTests: XCTestCase {
     }
 }
 
+@MainActor
+final class AccountSettingsTests: XCTestCase {
+    func client() -> APIClient { ChatMemoryTests().client() }
+
+    func testDeleteSendsExplicitConfirmThenSignsOutAndClearsEverything() async throws {
+        var body: [String: Any] = [:]; var path = ""
+        FixtureProtocol.handler = { request in
+            path = request.url!.path; body = try ContractTests().body(request)
+            return (200, Data(#"{"deleted":true}"#.utf8))
+        }
+        let vault = MemoryVault(); vault.value = "not-a-credential"
+        let journal = MemoryJournal(); journal.stored = SavedChat(day: "2026-11-25", sessionID: UUID(), lines: [SavedChat.Line(fromUser: true, text: "x")])
+        let store = AppStore(api: client(), vault: vault, journal: journal); store.isSignedIn = true
+        let ok = await store.deleteAccount()
+        XCTAssertTrue(ok); XCTAssertEqual(path, "/api/account/delete"); XCTAssertEqual(body["confirm"] as? String, "DELETE")
+        XCTAssertFalse(store.isSignedIn); XCTAssertNil(vault.value); XCTAssertNil(journal.stored); XCTAssertNil(store.profile)
+    }
+
+    func testFailedDeleteKeepsTheUserSignedIn() async {
+        FixtureProtocol.handler = { _ in (503, Data(#"{"error":"Account deletion is not available yet."}"#.utf8)) }
+        let vault = MemoryVault(); vault.value = "not-a-credential"
+        let store = AppStore(api: client(), vault: vault, journal: MemoryJournal()); store.isSignedIn = true
+        let ok = await store.deleteAccount()
+        XCTAssertFalse(ok); XCTAssertTrue(store.isSignedIn); XCTAssertEqual(vault.value, "not-a-credential"); XCTAssertNotNil(store.errorMessage)
+    }
+
+    func testSavedAnswersConvertBackToFeetInchesAndPounds() async {
+        FixtureProtocol.handler = { _ in (200, Data(#"{"needs_setup":false,"profile":{"height_cm":180.3,"weight_kg":81.6,"age":30,"sex":"male","activity":"active","goal":"gain"},"targets":{"calories":3060,"protein":147,"carbs":420,"fat":85,"fiber":43}}"#.utf8)) }
+        let store = AppStore(api: client(), vault: MemoryVault(), journal: MemoryJournal())
+        await store.checkSetup()
+        let p = try? XCTUnwrap(store.profile?.profile)
+        XCTAssertEqual(p?.usHeight.feet, 5); XCTAssertEqual(p?.usHeight.inches, 11); XCTAssertEqual(p?.pounds, 180)
+        XCTAssertEqual(store.profile?.targets?.calories, 3060); XCTAssertEqual(p?.activity, .active)
+    }
+}
+
 final class MemoryVault: TokenVault {
     var value: String?
     func read() -> String? { value }

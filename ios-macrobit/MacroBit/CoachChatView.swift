@@ -9,6 +9,8 @@ struct CoachChatView: View {
     @State private var showFoodDay = false
     @State private var showManual = false
     @State private var showSignOutConfirm = false
+    @State private var showTargets = false
+    @State private var showDeleteConfirm = false
     @State private var showScanner = false
     @State private var scanPaused = false
     @State private var scanEvent = UUID()
@@ -121,6 +123,11 @@ struct CoachChatView: View {
         .confirmationDialog("Sign out?", isPresented: $showSignOutConfirm, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { Task { await store.signOutEverywhere() } }
         } message: { Text("You can sign back in with Apple.") }
+        .confirmationDialog("Delete your account?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+            Button("Delete account and all data", role: .destructive) { Task { _ = await store.deleteAccount() } }
+                .accessibilityIdentifier("delete-account-confirm")
+        } message: { Text("This permanently deletes your meals, saved meals, targets and setup answers. It can't be undone.") }
+        .fullScreenCover(isPresented: $showTargets) { OnboardingView(editing: true) { showTargets = false } }
     }
 
     private var coachHeader: some View {
@@ -135,7 +142,9 @@ struct CoachChatView: View {
                 Toggle("Show coach artwork", isOn: $showsCompanion)
                 Button("Manual food entry", systemImage: "plus") { showManual = true }
                 Button("Meals and macros", systemImage: "fork.knife") { showFoodDay = true }
+                Button("My targets", systemImage: "target") { Task { await store.checkSetup(); showTargets = true } }
                 Button("Sign out", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { showSignOutConfirm = true }
+                Button("Delete account", systemImage: "trash", role: .destructive) { showDeleteConfirm = true }
             } label: {
                 Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44)
                     .background(Theme.dock, in: PixelPanelShape())

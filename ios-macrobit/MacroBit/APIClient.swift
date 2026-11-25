@@ -41,6 +41,7 @@ final class APIClient {
     func removePreset(_ body: RemovePresetBody) async throws -> PresetsPayload { try await request("api/presets/remove", method: "POST", body: encode(body)) }
     func mealSuggestions() async throws -> MealSuggestionsPayload { try await request("api/meal-suggestions") }
     func profile() async throws -> ProfilePayload { try await request("api/profile") }
+    func deleteAccount() async throws { let _: AccountDeleted = try await request("api/account/delete", method: "POST", body: encode(["confirm": "DELETE"])) }
     func saveProfile(_ answers: ProfileAnswers) async throws -> ProfilePayload { try await request("api/profile", method: "POST", body: encode(answers)) }
     func signInWithApple(_ body: AppleSignInBody) async throws -> AppleSignInPayload {
         guard let baseURL, let url = URL(string: "api/auth/apple", relativeTo: baseURL.appendingPathComponent("/")) else {
@@ -117,6 +118,8 @@ final class APIClient {
         value.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~"))) ?? value
     }
 }
+
+struct AccountDeleted: Decodable { let deleted: Bool }
 
 struct AppleSignInBody: Encodable {
     let identityToken: String

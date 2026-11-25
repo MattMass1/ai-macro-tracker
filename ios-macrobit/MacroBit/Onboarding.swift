@@ -52,8 +52,19 @@ struct ProfilePayload: Codable, Equatable {
     var targets: ProfileTargets?
 }
 
+extension ProfileAnswers {
+    var usHeight: (feet: Int, inches: Int) {
+        let total = Int((heightCm / 2.54).rounded())
+        return (total / 12, total % 12)
+    }
+    var pounds: Int { Int((weightKg / 0.45359237).rounded()) }
+}
+
 struct OnboardingView: View {
     @EnvironmentObject private var store: AppStore
+    var editing = false
+    var onDone: () -> Void = {}
+    @State private var loaded = false
     @FocusState private var focused: String?
     @State private var step = 0
     @State private var feet = ""
@@ -76,13 +87,19 @@ struct OnboardingView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 Color.clear.frame(height: 0).id("setup-top")
-                if step == 0 { PixelSelectedArtwork() }
-                Text(step == 0 ? "Make it yours" : "Your plan")
+                if step == 0 && !editing { PixelSelectedArtwork() }
+                if editing, step == 0, let targets = store.profile?.targets {
+                    PixelPanel(title: "Current targets", glyph: .leaf) {
+                        Text("\(Int(targets.calories)) kcal · P \(Int(targets.protein))g · C \(Int(targets.carbs))g · F \(Int(targets.fat))g · Fiber \(Int(targets.fiber))g")
+                            .font(.body.monospacedDigit()).accessibilityIdentifier("targets-current")
+                    }
+                }
+                Text(editing ? (step == 0 ? "My targets" : "Your plan") : (step == 0 ? "Make it yours" : "Your plan"))
                     .font(Theme.pixelFont(34, relativeTo: .largeTitle))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(8).background(Theme.profileCanvas.opacity(0.9), in: PixelPanelShape())
                     .accessibilityAddTraits(.isHeader)
-                Text(step == 0 ? "A few numbers so Macro-Bit can set your daily targets." : "Pick how active you are and what you're going for. We'll work out your calories and macros.")
+                Text(step == 0 ? (editing ? "Update your numbers and we'll recalculate your daily targets." : "A few numbers so Macro-Bit can set your daily targets.") : "Pick how active you are and what you're going for. We'll work out your calories and macros.")
                     .font(.body).foregroundStyle(Theme.profileMuted)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(8).background(Theme.profileCanvas.opacity(0.9), in: PixelPanelShape())
@@ -106,6 +123,15 @@ struct OnboardingView: View {
         }
         .foregroundStyle(Theme.profileInk).tint(Theme.profileAccent).preferredColorScheme(.dark)
         .disabled(store.isMutating)
+        .onAppear(perform: prefill)
+    }
+
+    private func prefill() {
+        guard editing, !loaded, let p = store.profile?.profile else { return }
+        loaded = true
+        let h = p.usHeight
+        feet = "\(h.feet)"; inches = "\(h.inches)"; pounds = "\(p.pounds)"; age = "\(p.age)"
+        sex = p.sex; activity = p.activity; goal = p.goal
     }
 
     private var aboutYou: some View {
@@ -148,9 +174,12 @@ struct OnboardingView: View {
                     if answers == nil { stepError = "Enter your height, weight and age. Age must be 13 to 100." }
                     else { stepError = nil; withAnimation { step = 1 } }
                 }.accessibilityIdentifier("setup-next")
+                if editing {
+                    PixelAction(title: "Cancel", secondary: true, glyph: nil) { onDone() }.accessibilityIdentifier("setup-cancel")
+                }
             } else {
-                PixelAction(title: "Set my targets", state: .profile(saving: store.isMutating, error: nil, complete: false), busyTitle: "Saving…") {
-                    if let answers { Task { _ = await store.saveProfile(answers) } }
+                PixelAction(title: editing ? "Update my targets" : "Set my targets", state: .profile(saving: store.isMutating, error: nil, complete: false), busyTitle: "Saving…") {
+                    if let answers { Task { if await store.saveProfile(answers) { onDone() } } }
                 }.accessibilityIdentifier("setup-save")
                 PixelAction(title: "Back", secondary: true, glyph: nil) { withAnimation { step = 0 } }
                     .accessibilityIdentifier("setup-back")

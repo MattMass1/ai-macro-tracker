@@ -32,6 +32,7 @@ final class AppStore: ObservableObject {
     @Published var isFixture = false
     @Published var suggestions: [MealSuggestion] = []
     @Published var needsSetup = false
+    @Published var profile: ProfilePayload?
     private(set) var sessionID = UUID()
     private var chatDay: String?
     private let journal: ChatJournal
@@ -84,7 +85,7 @@ final class AppStore: ObservableObject {
 
     func checkSetup() async {
         let generation = authGeneration
-        do { let result = try await api.profile(); if generation == authGeneration { needsSetup = result.needsSetup } }
+        do { let result = try await api.profile(); if generation == authGeneration { needsSetup = result.needsSetup; profile = result } }
         catch { if generation == authGeneration { needsSetup = false } }
     }
 
@@ -95,7 +96,7 @@ final class AppStore: ObservableObject {
         do {
             let result = try await api.saveProfile(answers)
             guard generation == authGeneration else { return false }
-            needsSetup = result.needsSetup
+            needsSetup = result.needsSetup; profile = result
             await refreshToday()
             return true
         } catch { if generation == authGeneration { handle(error) }; return false }
@@ -162,6 +163,16 @@ final class AppStore: ObservableObject {
         }
     }
 
+    func deleteAccount() async -> Bool {
+        guard !isMutating else { return false }
+        isMutating = true; errorMessage = nil; defer { isMutating = false }
+        do {
+            try await api.deleteAccount()
+            signOut()
+            return true
+        } catch { handle(error); return false }
+    }
+
     func signOutEverywhere() async {
         await api.signOutDevice()
         signOut()
@@ -169,7 +180,7 @@ final class AppStore: ObservableObject {
 
     func signOut() {
         authGeneration = UUID(); vault.clear(); journal.clear()
-        isSignedIn = false; day = nil; presets = []; trends = nil; suggestions = []; needsSetup = false
+        isSignedIn = false; day = nil; presets = []; trends = nil; suggestions = []; needsSetup = false; profile = nil
         sessionID = UUID(); chatDay = nil
         messages = []; retryTurn = nil; scanQueue = []; scanEvents = []
         conflictBlocked = false; errorMessage = nil
@@ -341,7 +352,7 @@ final class AppStore: ObservableObject {
         isFixture = true
         isSignedIn = true
         needsSetup = ProcessInfo.processInfo.arguments.contains("-fixture-setup")
-        Task { await refreshToday(); await loadPresets() }
+        Task { await refreshToday(); await loadPresets(); if !needsSetup { await checkSetup() } }
     }
     #endif
 }

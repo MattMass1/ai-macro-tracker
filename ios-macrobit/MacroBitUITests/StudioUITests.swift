@@ -43,6 +43,25 @@ final class StudioUITests: XCTestCase {
         attach("23-setup-done-studio", app: app)
     }
 
+    func testMyTargetsOpensPrefilledFromTheMenuAndCancelReturns() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-fixture-ui"]
+        app.launch()
+        XCTAssertTrue(app.buttons["Coach menu"].waitForExistence(timeout: 10))
+        app.buttons["Coach menu"].tap()
+        app.buttons["My targets"].tap()
+        XCTAssertTrue(app.textFields["setup-feet"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.textFields["setup-pounds"].value as? String, "180")
+        XCTAssertTrue(app.descendants(matching: .any)["targets-current"].exists)
+        attach("30-my-targets", app: app)
+        app.buttons["setup-cancel"].tap()
+        XCTAssertTrue(app.buttons["Coach menu"].waitForExistence(timeout: 10))
+        app.buttons["Coach menu"].tap()
+        app.buttons["Delete account"].tap()
+        XCTAssertTrue(app.buttons["delete-account-confirm"].firstMatch.waitForExistence(timeout: 5))
+        attach("31-delete-confirm", app: app)
+    }
+
     func testTokenScreenAndOfflineStudioScreens() throws {
         let app = XCUIApplication()
         app.launch()

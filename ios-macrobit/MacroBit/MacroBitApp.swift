@@ -26,7 +26,7 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     var body: some View {
         Group {
-            if store.isSignedIn { ContentView() } else { TokenView() }
+            if !store.isSignedIn { TokenView() } else if store.needsSetup { OnboardingView() } else { ContentView() }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active && store.isSignedIn { Task { await store.refreshToday(); store.rollChatIfNewDay(); await store.loadSuggestions() } }

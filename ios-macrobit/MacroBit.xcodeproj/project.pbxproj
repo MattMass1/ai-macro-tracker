@@ -577,7 +577,7 @@
 			"buildSettings" = {
 				"CLANG_ENABLE_MODULES" = "YES";
 				"SWIFT_VERSION" = "5.0";
-				"DEBUG_INFORMATION_FORMAT" = "dwarf";
+				"DEBUG_INFORMATION_FORMAT" = "dwarf-with-dsym";
 				"GCC_OPTIMIZATION_LEVEL" = "s";
 				"ONLY_ACTIVE_ARCH" = "NO";
 			};

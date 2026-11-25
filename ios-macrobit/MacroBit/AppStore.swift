@@ -340,6 +340,7 @@ final class AppStore: ObservableObject {
         api = APIClient(baseURL: URL(string: "https://offline-fixtures.invalid"), tokenProvider: { "noncredential-fixture" }, session: URLSession(configuration: config))
         isFixture = true
         isSignedIn = true
+        needsSetup = ProcessInfo.processInfo.arguments.contains("-fixture-setup")
         Task { await refreshToday(); await loadPresets() }
     }
     #endif

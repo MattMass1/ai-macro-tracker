@@ -82,12 +82,13 @@ enum CompanionPreferences {
 struct CompanionView: View {
     let character: CompanionCharacter
     let state: CompanionState
+    var motionPaused = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @State private var writingStarted = Date()
 
-    private var holdStill: Bool { reduceMotion || scenePhase != .active }
+    private var holdStill: Bool { reduceMotion || motionPaused || scenePhase != .active }
 
     var body: some View {
         Group {

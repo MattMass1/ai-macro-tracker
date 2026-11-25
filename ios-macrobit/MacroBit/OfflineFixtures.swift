@@ -17,6 +17,7 @@ final class OfflineFixtureProtocol: URLProtocol {
         case "/api/presets/remove": text = #"{"presets":[{"name":"Synthetic shake","emoji":"🥛","calories":150,"protein":30,"carbs":3,"fat":2.5,"fiber":0,"meal":"Snack","sort_order":1}]}"#
         case let route where route.hasPrefix("/api/meal/") && route.hasSuffix("/repeat"): text = Self.day
         case let route where route.hasPrefix("/api/meal/") && route.hasSuffix("/save-preset"): text = #"{"presets":[{"name":"Synthetic shake","emoji":"🥛","calories":150,"protein":30,"carbs":3,"fat":2.5,"fiber":0,"meal":"Snack","sort_order":1},{"name":"Synthetic bowl","emoji":"🌯","calories":625,"protein":75,"carbs":38,"fat":22,"fiber":0,"meal":"Lunch","sort_order":2},{"name":"Synthetic eggs","emoji":"🍽️","calories":140,"protein":12,"carbs":1,"fat":10,"fiber":0,"meal":"Breakfast","sort_order":3}]}"#
+        case "/api/profile": text = #"{"needs_setup":false,"profile":{"height_cm":180.3,"weight_kg":81.6,"age":30,"sex":"male","activity":"moderate","goal":"lose"},"targets":{"calories":2270,"protein":163,"carbs":256,"fat":63,"fiber":32}}"#
         case "/api/trends": text = #"{"days":[{"date":"2026-11-16","day_label":"Mon","calories":100,"protein":0,"carbs":0,"fat":0,"target_calories":2000,"target_protein":150,"macros_complete":false}],"weekly":[],"weight":{"current_kg":0,"goal_kg":0}}"#
         default:
             if path.hasPrefix("/api/agent-canvas/") && path.hasSuffix("/turn") {

@@ -1,7 +1,11 @@
 import SwiftUI
 
 struct ProfileAnswers: Codable, Equatable {
-    enum Sex: String, Codable, CaseIterable, Identifiable { case male, female; var id: String { rawValue } }
+    enum Sex: String, Codable, CaseIterable, Identifiable {
+        case male, female
+        var id: String { rawValue }
+        var label: String { rawValue.capitalized }
+    }
     enum Activity: String, Codable, CaseIterable, Identifiable {
         case sedentary, light, moderate, active, veryActive = "very_active"
         var id: String { rawValue }
@@ -50,6 +54,8 @@ struct ProfilePayload: Codable, Equatable {
 
 struct OnboardingView: View {
     @EnvironmentObject private var store: AppStore
+    @FocusState private var focused: String?
+    @State private var step = 0
     @State private var feet = ""
     @State private var inches = ""
     @State private var pounds = ""
@@ -57,6 +63,7 @@ struct OnboardingView: View {
     @State private var sex: ProfileAnswers.Sex = .male
     @State private var activity: ProfileAnswers.Activity = .moderate
     @State private var goal: ProfileAnswers.Goal = .maintain
+    @State private var stepError: String?
 
     private var answers: ProfileAnswers? {
         guard let f = Int(feet), let i = Double(inches.isEmpty ? "0" : inches), let lb = Double(pounds), let a = Int(age) else { return nil }
@@ -65,33 +72,89 @@ struct OnboardingView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("Height") {
-                    HStack {
-                        TextField("Feet", text: $feet).keyboardType(.numberPad).accessibilityIdentifier("setup-feet")
-                        TextField("Inches", text: $inches).keyboardType(.decimalPad).accessibilityIdentifier("setup-inches")
-                    }
+        ScrollViewReader { reader in
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Color.clear.frame(height: 0).id("setup-top")
+                if step == 0 { PixelSelectedArtwork() }
+                Text(step == 0 ? "Make it yours" : "Your plan")
+                    .font(Theme.pixelFont(34, relativeTo: .largeTitle))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(8).background(Theme.profileCanvas.opacity(0.9), in: PixelPanelShape())
+                    .accessibilityAddTraits(.isHeader)
+                Text(step == 0 ? "A few numbers so Macro-Bit can set your daily targets." : "Pick how active you are and what you're going for. We'll work out your calories and macros.")
+                    .font(.body).foregroundStyle(Theme.profileMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(8).background(Theme.profileCanvas.opacity(0.9), in: PixelPanelShape())
+                PixelStepProgress(titles: ["About you", "Your plan"], current: step)
+                if step == 0 { aboutYou } else { plan }
+                if let message = stepError ?? store.errorMessage {
+                    PixelStatus(state: .error(message)).accessibilityIdentifier("setup-error")
                 }
-                Section("Weight") { TextField("Pounds", text: $pounds).keyboardType(.decimalPad).accessibilityIdentifier("setup-pounds") }
-                Section("Age") { TextField("Age", text: $age).keyboardType(.numberPad).accessibilityIdentifier("setup-age") }
-                Section("Sex") {
-                    Picker("Sex", selection: $sex) { ForEach(ProfileAnswers.Sex.allCases) { Text($0.rawValue.capitalized).tag($0) } }.pickerStyle(.segmented)
-                }
-                Section("Activity") {
-                    Picker("Activity", selection: $activity) { ForEach(ProfileAnswers.Activity.allCases) { Text($0.label).tag($0) } }
-                }
-                Section("Goal") {
-                    Picker("Goal", selection: $goal) { ForEach(ProfileAnswers.Goal.allCases) { Text($0.label).tag($0) } }.pickerStyle(.segmented)
-                }
-                if let error = store.errorMessage { Text(error).foregroundStyle(Theme.danger) }
-                Button(store.isMutating ? "Saving..." : "Set my targets") {
-                    if let answers { Task { _ = await store.saveProfile(answers) } }
-                }
-                .disabled(answers == nil || store.isMutating)
-                .accessibilityIdentifier("setup-save")
-            }
-            .navigationTitle("Set up your targets")
+            }.padding(20)
         }
+        .onChange(of: step) { _, _ in reader.scrollTo("setup-top", anchor: .top) }
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .background { PixelSceneBackground() }
+        .safeAreaInset(edge: .bottom, spacing: 0) { if focused == nil { action } }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button { focused = nil } label: { Text("Done").frame(minWidth: 44, minHeight: 44) }
+            }
+        }
+        .foregroundStyle(Theme.profileInk).tint(Theme.profileAccent).preferredColorScheme(.dark)
+        .disabled(store.isMutating)
+    }
+
+    private var aboutYou: some View {
+        PixelPanel(title: "About you", glyph: .leaf) {
+            HStack(alignment: .top, spacing: 12) {
+                PixelValueField(label: "Height (feet)", text: $feet, id: "setup-feet", unit: "ft", focus: $focused)
+                PixelValueField(label: "Inches", text: $inches, id: "setup-inches", unit: "in", required: false, focus: $focused)
+            }
+            PixelValueField(label: "Weight", text: $pounds, id: "setup-pounds", unit: "lb", focus: $focused)
+            PixelValueField(label: "Age", text: $age, id: "setup-age", unit: "years", focus: $focused)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Sex").font(.subheadline.weight(.semibold))
+                HStack(spacing: 12) {
+                    ForEach(ProfileAnswers.Sex.allCases) { PixelChoice(title: $0.label, value: $0, selection: $sex, id: "setup-sex-\($0.rawValue)") }
+                }
+                Text("Used only for the calorie formula.").font(.footnote).foregroundStyle(Theme.profileMuted)
+            }
+        }
+    }
+
+    private var plan: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            PixelPanel(title: "How active are you?", glyph: .leaf) {
+                ForEach(ProfileAnswers.Activity.allCases) { PixelChoice(title: $0.label, value: $0, selection: $activity, id: "setup-activity-\($0.rawValue)") }
+            }
+            PixelPanel(title: "Your goal") {
+                ForEach(ProfileAnswers.Goal.allCases) { PixelChoice(title: $0.label, value: $0, selection: $goal, id: "setup-goal-\($0.rawValue)") }
+            }
+            Text("These are starting targets, not medical advice. You can change them later.")
+                .font(.footnote).foregroundStyle(Theme.profileMuted).fixedSize(horizontal: false, vertical: true)
+                .padding(12).background(Theme.profileCanvas, in: PixelPanelShape())
+        }
+    }
+
+    private var action: some View {
+        VStack(spacing: 8) {
+            if step == 0 {
+                PixelAction(title: "Continue") {
+                    focused = nil
+                    if answers == nil { stepError = "Enter your height, weight and age. Age must be 13 to 100." }
+                    else { stepError = nil; withAnimation { step = 1 } }
+                }.accessibilityIdentifier("setup-next")
+            } else {
+                PixelAction(title: "Set my targets", state: .profile(saving: store.isMutating, error: nil, complete: false), busyTitle: "Saving…") {
+                    if let answers { Task { _ = await store.saveProfile(answers) } }
+                }.accessibilityIdentifier("setup-save")
+                PixelAction(title: "Back", secondary: true, glyph: nil) { withAnimation { step = 0 } }
+                    .accessibilityIdentifier("setup-back")
+            }
+        }.padding(.horizontal, 20).padding(.vertical, 12).background(Theme.profileCanvas.opacity(0.96))
     }
 }

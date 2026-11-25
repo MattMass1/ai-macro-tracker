@@ -584,6 +584,54 @@ final class ChatMemoryTests: XCTestCase {
     }
 }
 
+@MainActor
+final class OnboardingTests: XCTestCase {
+    let dayJSON = ChatMemoryTests().dayJSON
+    func client() -> APIClient { ChatMemoryTests().client() }
+
+    func testUSUnitsConvertAndRangeIsChecked() {
+        let a = ProfileAnswers.fromUS(feet: 5, inches: 11, pounds: 180, age: 30, sex: .male, activity: .moderate, goal: .lose)
+        XCTAssertEqual(a.heightCm, 180.3); XCTAssertEqual(a.weightKg, 81.6); XCTAssertTrue(a.isInRange)
+        XCTAssertFalse(ProfileAnswers.fromUS(feet: 5, inches: 11, pounds: 180, age: 9, sex: .male, activity: .moderate, goal: .lose).isInRange)
+    }
+
+    func testNewAccountWithoutTargetsIsSentToSetupThenSaveSendsSnakeCaseAndClearsIt() async throws {
+        var posted: [String: Any] = [:]; var todayReads = 0
+        FixtureProtocol.handler = { request in
+            let path = request.url!.path
+            if path == "/api/today" { todayReads += 1; return (200, self.dayJSON) }
+            if path == "/api/profile" && request.httpMethod == "GET" { return (200, Data(#"{"needs_setup":true,"profile":null,"targets":null}"#.utf8)) }
+            if path == "/api/profile" {
+                posted = try ContractTests().body(request)
+                return (200, Data(#"{"needs_setup":false,"profile":{"height_cm":180.3,"weight_kg":81.6,"age":30,"sex":"male","activity":"very_active","goal":"lose"},"targets":{"calories":2260,"protein":160,"carbs":263,"fat":63,"fiber":32}}"#.utf8))
+            }
+            return (200, Data(#"{"presets":[]}"#.utf8))
+        }
+        let store = AppStore(api: client(), vault: MemoryVault(), journal: MemoryJournal())
+        await store.checkSetup(); XCTAssertTrue(store.needsSetup)
+        let answers = ProfileAnswers.fromUS(feet: 5, inches: 11, pounds: 180, age: 30, sex: .male, activity: .veryActive, goal: .lose)
+        let ok = await store.saveProfile(answers)
+        XCTAssertTrue(ok); XCTAssertFalse(store.needsSetup); XCTAssertEqual(todayReads, 1)
+        XCTAssertEqual(Set(posted.keys), ["height_cm", "weight_kg", "age", "sex", "activity", "goal"])
+        XCTAssertEqual(posted["activity"] as? String, "very_active"); XCTAssertEqual(posted["goal"] as? String, "lose")
+    }
+
+    func testAccountWithTargetsSkipsSetupAndAnErrorNeverTrapsTheUser() async {
+        FixtureProtocol.handler = { _ in (200, Data(#"{"needs_setup":false,"profile":null,"targets":{"calories":2000,"protein":150,"carbs":200,"fat":60,"fiber":25}}"#.utf8)) }
+        let store = AppStore(api: client(), vault: MemoryVault(), journal: MemoryJournal())
+        await store.checkSetup(); XCTAssertFalse(store.needsSetup)
+        FixtureProtocol.handler = { _ in (503, Data(#"{"error":"Setup is not available yet."}"#.utf8)) }
+        store.needsSetup = true; await store.checkSetup(); XCTAssertFalse(store.needsSetup)
+    }
+
+    func testBadSaveKeepsSetupOpenWithTheServerMessage() async {
+        FixtureProtocol.handler = { _ in (400, Data(#"{"error":"Height, weight, age, sex, activity and goal are all required and must be in range."}"#.utf8)) }
+        let store = AppStore(api: client(), vault: MemoryVault(), journal: MemoryJournal()); store.needsSetup = true
+        let ok = await store.saveProfile(ProfileAnswers.fromUS(feet: 5, inches: 11, pounds: 180, age: 30, sex: .male, activity: .moderate, goal: .maintain))
+        XCTAssertFalse(ok); XCTAssertTrue(store.needsSetup); XCTAssertTrue(store.errorMessage?.contains("must be in range") == true)
+    }
+}
+
 final class MemoryVault: TokenVault {
     var value: String?
     func read() -> String? { value }

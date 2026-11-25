@@ -31,6 +31,7 @@ final class AppStore: ObservableObject {
     @Published var scanQueue: [(UUID, String)] = []
     @Published var isFixture = false
     @Published var suggestions: [MealSuggestion] = []
+    @Published var needsSetup = false
     private(set) var sessionID = UUID()
     private var chatDay: String?
     private let journal: ChatJournal
@@ -81,6 +82,25 @@ final class AppStore: ObservableObject {
         journal.save(SavedChat(day: day, sessionID: sessionID, lines: Array(lines)))
     }
 
+    func checkSetup() async {
+        let generation = authGeneration
+        do { let result = try await api.profile(); if generation == authGeneration { needsSetup = result.needsSetup } }
+        catch { if generation == authGeneration { needsSetup = false } }
+    }
+
+    func saveProfile(_ answers: ProfileAnswers) async -> Bool {
+        guard !isMutating else { return false }
+        let generation = authGeneration
+        isMutating = true; errorMessage = nil; defer { isMutating = false }
+        do {
+            let result = try await api.saveProfile(answers)
+            guard generation == authGeneration else { return false }
+            needsSetup = result.needsSetup
+            await refreshToday()
+            return true
+        } catch { if generation == authGeneration { handle(error) }; return false }
+    }
+
     func loadSuggestions() async {
         let generation = authGeneration
         do { let result = try await api.mealSuggestions(); if generation == authGeneration { suggestions = result.suggestions } }
@@ -103,7 +123,7 @@ final class AppStore: ObservableObject {
     func restore() async {
         guard vault.read() != nil else { return }
         await refreshToday()
-        if day != nil { isSignedIn = true; restoreChat(); await loadPresets(); await loadSuggestions() }
+        if day != nil { isSignedIn = true; restoreChat(); await checkSetup(); await loadPresets(); await loadSuggestions() }
     }
 
     func signIn(_ raw: String) async -> Bool {
@@ -120,7 +140,7 @@ final class AppStore: ObservableObject {
             api = candidateClient({ [vault] in vault.read() })
             authGeneration = UUID(); day = payload; isSignedIn = true
             journal.clear(); startFreshChat(day: chatDayKey)
-            await loadPresets(); await loadSuggestions()
+            await checkSetup(); await loadPresets(); await loadSuggestions()
             return true
         } catch {
             handle(error)
@@ -149,7 +169,7 @@ final class AppStore: ObservableObject {
 
     func signOut() {
         authGeneration = UUID(); vault.clear(); journal.clear()
-        isSignedIn = false; day = nil; presets = []; trends = nil; suggestions = []
+        isSignedIn = false; day = nil; presets = []; trends = nil; suggestions = []; needsSetup = false
         sessionID = UUID(); chatDay = nil
         messages = []; retryTurn = nil; scanQueue = []; scanEvents = []
         conflictBlocked = false; errorMessage = nil

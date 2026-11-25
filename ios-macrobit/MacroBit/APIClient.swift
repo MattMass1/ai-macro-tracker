@@ -40,6 +40,8 @@ final class APIClient {
     func editPreset(_ body: EditPresetBody) async throws -> PresetsPayload { try await request("api/presets/edit", method: "POST", body: encode(body)) }
     func removePreset(_ body: RemovePresetBody) async throws -> PresetsPayload { try await request("api/presets/remove", method: "POST", body: encode(body)) }
     func mealSuggestions() async throws -> MealSuggestionsPayload { try await request("api/meal-suggestions") }
+    func profile() async throws -> ProfilePayload { try await request("api/profile") }
+    func saveProfile(_ answers: ProfileAnswers) async throws -> ProfilePayload { try await request("api/profile", method: "POST", body: encode(answers)) }
     func signInWithApple(_ body: AppleSignInBody) async throws -> AppleSignInPayload {
         guard let baseURL, let url = URL(string: "api/auth/apple", relativeTo: baseURL.appendingPathComponent("/")) else {
             throw APIError(status: 0, message: "Set MACRO_API_URL in Config.xcconfig before connecting.")

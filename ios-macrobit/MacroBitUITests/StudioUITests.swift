@@ -15,6 +15,34 @@ final class StudioUITests: XCTestCase {
             (towardBottom ? lower : upper).press(forDuration: 0.1, thenDragTo: towardBottom ? upper : lower)
         }
     }
+    func testSetupWalksBothStepsAndEntersStudio() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-fixture-ui", "-fixture-setup"]
+        app.launch()
+        let feet = app.textFields["setup-feet"]
+        XCTAssertTrue(feet.waitForExistence(timeout: 10))
+        attach("20-setup-about-empty", app: app)
+        app.buttons["setup-next"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["setup-error"].waitForExistence(timeout: 5))
+        for (id, value) in [("setup-feet", "5"), ("setup-inches", "11"), ("setup-pounds", "180"), ("setup-age", "30")] {
+            let field = app.textFields[id]; field.tap(); field.typeText(value)
+            app.buttons["Done"].firstMatch.tap()
+            XCTAssertEqual(field.value as? String, value)
+        }
+        attach("21-setup-about-filled", app: app)
+        app.buttons["setup-next"].tap()
+        XCTAssertTrue(app.buttons["setup-activity-moderate"].waitForExistence(timeout: 5))
+        attach("22-setup-plan-top", app: app)
+        app.swipeUp(); app.swipeUp()
+        XCTAssertTrue(app.buttons["setup-goal-lose"].isHittable)
+        app.buttons["setup-goal-lose"].tap()
+        XCTAssertEqual(app.buttons["setup-goal-lose"].value as? String, "Selected")
+        attach("22-setup-plan-bottom", app: app)
+        app.buttons["setup-save"].tap()
+        XCTAssertTrue(app.buttons["Meals and macros"].waitForExistence(timeout: 10))
+        attach("23-setup-done-studio", app: app)
+    }
+
     func testTokenScreenAndOfflineStudioScreens() throws {
         let app = XCUIApplication()
         app.launch()

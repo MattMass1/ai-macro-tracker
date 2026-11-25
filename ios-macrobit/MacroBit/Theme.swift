@@ -1,9 +1,20 @@
 import SwiftUI
+import UIKit
 
 /// One pixel language, from the room to the controls (design package v12):
 /// sage and cream surfaces, stepped borders and Jersey 15 display lettering.
 /// Paragraphs and editable inputs stay native for readability and accessibility.
 enum Theme {
+    static let profileCanvas = Color(red: 14 / 255, green: 43 / 255, blue: 36 / 255)
+    static let profileSurface = Color(red: 23 / 255, green: 65 / 255, blue: 49 / 255)
+    static let profileMint = Color(red: 192 / 255, green: 217 / 255, blue: 154 / 255)
+    static let profileInk = Color(red: 248 / 255, green: 248 / 255, blue: 215 / 255)
+    static let profileMuted = Color(red: 205 / 255, green: 224 / 255, blue: 184 / 255)
+    static let profileOutline = Color(red: 92 / 255, green: 138 / 255, blue: 87 / 255)
+    static let profileAccent = Color(red: 204 / 255, green: 234 / 255, blue: 114 / 255)
+    static let profileDanger = Color(red: 255 / 255, green: 185 / 255, blue: 164 / 255)
+    static let profileWellInk = Color(red: 19 / 255, green: 49 / 255, blue: 34 / 255)
+    static let profileWellMuted = Color(red: 58 / 255, green: 78 / 255, blue: 42 / 255)
     static let accent = Color(red: 22 / 255, green: 86 / 255, blue: 57 / 255)        // #165639 forest
     static let accentDark = Color(red: 16 / 255, green: 61 / 255, blue: 40 / 255)    // #103d28
     static let accentEdge = Color(red: 69 / 255, green: 103 / 255, blue: 71 / 255)   // #456747

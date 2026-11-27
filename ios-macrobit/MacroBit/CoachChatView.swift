@@ -11,6 +11,7 @@ struct CoachChatView: View {
     @State private var showSignOutConfirm = false
     @State private var showTargets = false
     @State private var showDeleteConfirm = false
+    @State private var homeLogged: String?
     @State private var showScanner = false
     @State private var scanPaused = false
     @State private var scanEvent = UUID()
@@ -189,8 +190,53 @@ struct CoachChatView: View {
         }.padding(.top, 4)
     }
 
+    private var savedMealStrip: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Saved meals").textCase(.uppercase).font(Theme.pixelFont(StudioLayout.dockLabelSize))
+                Spacer()
+                if let homeLogged {
+                    Text("+ \(homeLogged)").font(.caption2.weight(.semibold)).foregroundStyle(Theme.accent).lineLimit(1)
+                        .accessibilityIdentifier("home-preset-logged")
+                } else {
+                    Text("Tap to log 1 serving").font(.caption2)
+                }
+            }.foregroundStyle(Theme.sectionInk)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(store.presets) { item in
+                        Button { logFromHome(item) } label: {
+                            HStack(spacing: 6) {
+                                Text(item.emoji).font(.title3)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(item.name).font(.caption.weight(.semibold)).foregroundStyle(Theme.ink).lineLimit(1)
+                                    Text("\(Int(item.calories.rounded())) kcal · \(Int(item.protein.rounded()))g P").font(.caption2).foregroundStyle(Theme.muted)
+                                }
+                            }
+                            .frame(maxWidth: 170, minHeight: 44, alignment: .leading)
+                            .padding(.horizontal, 10).padding(.vertical, 4)
+                        }
+                        .buttonStyle(PixelTileButtonStyle())
+                        .disabled(store.isMutating)
+                        .accessibilityIdentifier("home-preset-\(item.name)")
+                        .accessibilityLabel("Log \(item.name), \(Int(item.calories.rounded())) calories")
+                    }
+                }.padding(.vertical, 4).padding(.horizontal, 2)
+            }
+        }
+    }
+
+    private func logFromHome(_ item: Preset) {
+        Task {
+            if await store.logPreset(LogPresetBody(presetName: item.name, servings: 1, meal: item.meal, day: store.effectiveDate)) {
+                homeLogged = item.name
+            }
+        }
+    }
+
     private var composer: some View {
         VStack(spacing: 6) {
+            if !store.presets.isEmpty && !inputFocused { savedMealStrip }
             HStack {
                 Text("Your companion").textCase(.uppercase).font(Theme.pixelFont(StudioLayout.dockLabelSize))
                 Spacer()

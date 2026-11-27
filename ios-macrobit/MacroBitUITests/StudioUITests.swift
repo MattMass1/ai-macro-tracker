@@ -62,6 +62,20 @@ final class StudioUITests: XCTestCase {
         attach("31-delete-confirm", app: app)
     }
 
+    func testSavedMealButtonLogsFromTheMainScreen() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-fixture-ui"]
+        app.launch()
+        let tile = app.buttons["home-preset-Synthetic shake"]
+        XCTAssertTrue(tile.waitForExistence(timeout: 10))
+        XCTAssertTrue(tile.isHittable)
+        attach("40-home-saved-meals", app: app)
+        tile.tap()
+        XCTAssertTrue(app.staticTexts["home-preset-logged"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts["home-preset-logged"].label, "+ Synthetic shake")
+        attach("41-home-saved-meal-logged", app: app)
+    }
+
     func testTokenScreenAndOfflineStudioScreens() throws {
         let app = XCUIApplication()
         app.launch()
